@@ -12,12 +12,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS = {
     "active_strategy": "scalping_4_rules",
+    "strategy_params": {},  # {strategy_id: {param_key: value}}
     "custom_sessions": [
         {"start": "09:00", "end": "12:00", "name": "London", "enabled": True},
         {"start": "15:30", "end": "18:30", "name": "US", "enabled": True}
     ],
     "pre_signal_enabled": True,
-    "pre_signal_rsi_zone": 4,
 }
 
 

@@ -40,6 +40,14 @@
   font-weight: 600;
 }
 
+.header-strategy {
+  font-size: 12px;
+  color: #00FF66;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin-top: 2px;
+}
+
 .header-center {
   display: flex;
   flex-direction: column;

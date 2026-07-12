@@ -4,7 +4,7 @@ import './Header.css';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
-const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions }) => {
+const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions, activeStrategy }) => {
   const [currentTime, setCurrentTime] = useState(new Date());
 
   useEffect(() => {
@@ -28,7 +28,11 @@ const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions
           <ChartLineUp size={28} weight="bold" className="brand-icon" />
           <div>
             <h1 className="header-title">CRYPTO SCANNER</h1>
-            <div className="header-subtitle">Multi-Strategy Trading Signals</div>
+            {activeStrategy && (
+              <div className="header-strategy" data-testid="active-strategy-display">
+                🎯 {activeStrategy.name}
+              </div>
+            )}
           </div>
         </div>
       </div>

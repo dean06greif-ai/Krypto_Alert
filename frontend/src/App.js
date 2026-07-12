@@ -18,6 +18,8 @@ function App() {
   const [sessionActive, setSessionActive] = useState(false);
   const [currentSession, setCurrentSession] = useState('');
   const [customSessions, setCustomSessions] = useState([]);
+  const [activeStrategy, setActiveStrategy] = useState(null);
+  const [strategyParams, setStrategyParams] = useState({});
   const [showAlert, setShowAlert] = useState(false);
   const [currentAlert, setCurrentAlert] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -93,6 +95,27 @@ function App() {
     }
   }, []);
 
+  // Fetch strategies + settings for active strategy display
+  useEffect(() => {
+    const fetchStrategies = async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/strategies`);
+        const data = await response.json();
+        const activeId = data.active;
+        const strategy = data.strategies.find(s => s.id === activeId);
+        setActiveStrategy(strategy);
+        setStrategyParams(strategy?.current_params || {});
+      } catch (error) {
+        console.error('Error fetching strategies:', error);
+      }
+    };
+
+    fetchStrategies();
+    const interval = setInterval(fetchStrategies, 15000); // Update every 15s
+
+    return () => clearInterval(interval);
+  }, [showSettings]);
+
   // Fetch session status
   useEffect(() => {
     const fetchSessionStatus = async () => {
@@ -161,6 +184,7 @@ function App() {
         sessionActive={sessionActive}
         currentSession={currentSession}
         customSessions={customSessions}
+        activeStrategy={activeStrategy}
         onSettingsClick={() => setShowSettings(true)}
       />
       
@@ -180,6 +204,8 @@ function App() {
           <SignalPanel 
             symbol={selectedCoin}
             signals={signals.filter(s => s.symbol === selectedCoin)}
+            activeStrategy={activeStrategy}
+            strategyParams={strategyParams}
           />
         </div>
         

@@ -11,6 +11,9 @@
 .panel-header {
   padding: 16px 20px;
   border-bottom: 1px solid #2A2D3A;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .panel-header h3 {
@@ -19,6 +22,20 @@
   letter-spacing: 0.1em;
   color: #FFFFFF;
   margin-bottom: 4px;
+}
+
+.strategy-active-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: rgba(0, 255, 102, 0.1);
+  border: 1px solid #00FF66;
+  color: #00FF66;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.05em;
 }
 
 .panel-subtitle {

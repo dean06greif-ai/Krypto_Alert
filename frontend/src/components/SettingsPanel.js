@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, TelegramLogo, Warning, Lightning, ChartLineUp, Plus, Trash } from '@phosphor-icons/react';
+import { X, TelegramLogo, Warning, Lightning, ChartLineUp, Plus, Trash, ArrowLeft, Sliders } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import './SettingsPanel.css';
 
@@ -8,15 +8,17 @@ const API_URL = process.env.REACT_APP_BACKEND_URL;
 const SettingsPanel = ({ onClose }) => {
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [activeTab, setActiveTab] = useState('strategy'); // strategy, sessions, telegram
   const [settings, setSettings] = useState({
     custom_sessions: [],
     pre_signal_enabled: true,
     active_strategy: 'scalping_4_rules',
+    strategy_params: {},
   });
   const [strategies, setStrategies] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [editingParams, setEditingParams] = useState({}); // Local params being edited
 
-  // Fetch current settings and available strategies
   useEffect(() => {
     Promise.all([
       fetch(`${API_URL}/api/settings`).then(r => r.json()),
@@ -27,6 +29,7 @@ const SettingsPanel = ({ onClose }) => {
           custom_sessions: settingsData.custom_sessions || [],
           pre_signal_enabled: settingsData.pre_signal_enabled !== false,
           active_strategy: settingsData.active_strategy || 'scalping_4_rules',
+          strategy_params: settingsData.strategy_params || {},
         });
         setStrategies(strategiesData.strategies || []);
         setLoading(false);
@@ -45,38 +48,63 @@ const SettingsPanel = ({ onClose }) => {
       
       if (response.ok) {
         const data = await response.json();
-        setSettings({
+        setSettings(prev => ({
+          ...prev,
           custom_sessions: data.settings.custom_sessions || [],
           pre_signal_enabled: data.settings.pre_signal_enabled !== false,
-        });
-        toast.success('Einstellungen gespeichert');
-      } else {
-        toast.error('Fehler beim Speichern');
+          active_strategy: data.settings.active_strategy || 'scalping_4_rules',
+          strategy_params: data.settings.strategy_params || {},
+        }));
+        toast.success('Gespeichert');
       }
     } catch (error) {
-      toast.error('Verbindungsfehler');
+      toast.error('Fehler beim Speichern');
     } finally {
       setSaving(false);
     }
   };
 
-  const togglePreSignal = (value) => {
-    const updated = { ...settings, pre_signal_enabled: value };
-    setSettings(updated);
-    saveSettings({ pre_signal_enabled: value });
+  const changeStrategy = (strategyId) => {
+    setSettings({ ...settings, active_strategy: strategyId });
+    saveSettings({ active_strategy: strategyId });
+    const strategy = strategies.find(s => s.id === strategyId);
+    toast.success(`Aktiv: ${strategy?.name}`);
   };
 
-  const changeStrategy = (strategyId) => {
-    const updated = { ...settings, active_strategy: strategyId };
-    setSettings(updated);
-    saveSettings({ active_strategy: strategyId });
-    toast.success(`Strategie gewechselt: ${strategyId}`);
+  const updateStrategyParam = (strategyId, paramKey, value) => {
+    const currentParams = settings.strategy_params[strategyId] || {};
+    const newParams = {
+      ...settings.strategy_params,
+      [strategyId]: { ...currentParams, [paramKey]: parseFloat(value) }
+    };
+    setSettings({ ...settings, strategy_params: newParams });
+  };
+
+  const commitParams = (strategyId) => {
+    saveSettings({ strategy_params: settings.strategy_params });
+  };
+
+  const resetStrategyParams = (strategyId) => {
+    const newParams = { ...settings.strategy_params };
+    delete newParams[strategyId];
+    setSettings({ ...settings, strategy_params: newParams });
+    saveSettings({ strategy_params: newParams });
+    toast.success('Parameter auf Standard zurückgesetzt');
+  };
+
+  const getCurrentParamValue = (strategyId, paramKey, defaultValue) => {
+    return settings.strategy_params[strategyId]?.[paramKey] ?? defaultValue;
+  };
+
+  // Sessions handlers
+  const togglePreSignal = (value) => {
+    setSettings({ ...settings, pre_signal_enabled: value });
+    saveSettings({ pre_signal_enabled: value });
   };
 
   const addSession = () => {
     const newSession = {
-      start: "09:00",
-      end: "12:00",
+      start: "09:00", end: "12:00",
       name: `Session ${settings.custom_sessions.length + 1}`,
       enabled: true
     };
@@ -97,9 +125,7 @@ const SettingsPanel = ({ onClose }) => {
     setSettings({ ...settings, custom_sessions: updated });
   };
 
-  const commitSessionUpdate = () => {
-    saveSettings({ custom_sessions: settings.custom_sessions });
-  };
+  const commitSessionUpdate = () => saveSettings({ custom_sessions: settings.custom_sessions });
 
   const toggleSession = (index) => {
     const updated = [...settings.custom_sessions];
@@ -111,7 +137,7 @@ const SettingsPanel = ({ onClose }) => {
   const enable24_7 = () => {
     setSettings({ ...settings, custom_sessions: [] });
     saveSettings({ custom_sessions: [] });
-    toast.success('24/7 Modus aktiviert - Scanner läuft rund um die Uhr!');
+    toast.success('24/7 Modus aktiviert');
   };
 
   const restoreDefaults = () => {
@@ -127,19 +153,16 @@ const SettingsPanel = ({ onClose }) => {
     setTesting(true);
     try {
       const response = await fetch(`${API_URL}/api/telegram/test`, { method: 'POST' });
-      if (response.ok) {
-        toast.success('Telegram Test erfolgreich!');
-      } else {
-        const data = await response.json();
-        toast.error(`Fehler: ${data.detail || 'Telegram nicht konfiguriert'}`);
-      }
-    } catch (error) {
+      if (response.ok) toast.success('Telegram Test erfolgreich!');
+      else toast.error('Fehler');
+    } catch {
       toast.error('Verbindungsfehler');
     } finally {
       setTesting(false);
     }
   };
 
+  const activeStrategy = strategies.find(s => s.id === settings.active_strategy);
   const is24_7 = settings.custom_sessions.length === 0;
 
   return (
@@ -152,249 +175,275 @@ const SettingsPanel = ({ onClose }) => {
           </button>
         </div>
 
+        {/* Tab Navigation */}
+        <div className="settings-tabs">
+          <button 
+            className={`settings-tab ${activeTab === 'strategy' ? 'active' : ''}`}
+            onClick={() => setActiveTab('strategy')}
+            data-testid="tab-strategy"
+          >
+            <ChartLineUp size={16} weight="bold" />
+            Strategie
+          </button>
+          <button 
+            className={`settings-tab ${activeTab === 'sessions' ? 'active' : ''}`}
+            onClick={() => setActiveTab('sessions')}
+            data-testid="tab-sessions"
+          >
+            <Lightning size={16} weight="bold" />
+            Zeitfenster
+          </button>
+          <button 
+            className={`settings-tab ${activeTab === 'telegram' ? 'active' : ''}`}
+            onClick={() => setActiveTab('telegram')}
+            data-testid="tab-telegram"
+          >
+            <TelegramLogo size={16} weight="bold" />
+            Telegram
+          </button>
+        </div>
+
         <div className="settings-content">
-          {/* Strategy Selector */}
-          <div className="settings-section">
-            <div className="section-header">
-              <ChartLineUp size={24} weight="bold" className="text-long" />
-              <div>
-                <h3>Trading Strategie</h3>
-                <p className="section-description">
-                  Wähle welche Strategie der Scanner verwenden soll
-                </p>
-              </div>
-            </div>
-
-            <div className="strategy-list">
-              {strategies.map(strategy => (
-                <div 
-                  key={strategy.id}
-                  className={`strategy-option ${settings.active_strategy === strategy.id ? 'strategy-option-active' : ''}`}
-                  onClick={() => changeStrategy(strategy.id)}
-                  data-testid={`strategy-option-${strategy.id}`}
-                >
-                  <div className="strategy-radio">
-                    {settings.active_strategy === strategy.id ? (
-                      <div className="radio-dot"></div>
-                    ) : null}
+          {/* STRATEGY TAB */}
+          {activeTab === 'strategy' && (
+            <>
+              {/* Strategy Cards */}
+              <div className="settings-section">
+                <div className="section-simple-header">
+                  <h3>Aktive Strategie wählen</h3>
+                  <div className="section-description">
+                    Klicke auf eine Strategie um sie zu aktivieren
                   </div>
-                  <div className="strategy-info">
-                    <div className="strategy-name">
-                      {strategy.name}
-                      <span className="strategy-timeframe">{strategy.timeframe}</span>
+                </div>
+
+                <div className="strategy-cards">
+                  {strategies.map(strategy => {
+                    const isActive = settings.active_strategy === strategy.id;
+                    return (
+                      <div
+                        key={strategy.id}
+                        className={`strategy-card ${isActive ? 'strategy-card-active' : ''}`}
+                        onClick={() => !isActive && changeStrategy(strategy.id)}
+                        data-testid={`strategy-card-${strategy.id}`}
+                      >
+                        <div className="strategy-card-header">
+                          <div className="strategy-card-title">
+                            {strategy.name}
+                          </div>
+                          {isActive && (
+                            <div className="strategy-active-badge">
+                              ✓ AKTIV
+                            </div>
+                          )}
+                        </div>
+                        <div className="strategy-card-desc">
+                          {strategy.description}
+                        </div>
+                        <div className="strategy-card-meta">
+                          <span className="strategy-tf-badge">{strategy.timeframe}</span>
+                          <span className="text-muted">
+                            {Object.keys(strategy.params || {}).length} Parameter
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Parameter Editor for active strategy */}
+              {activeStrategy && (
+                <div className="settings-section">
+                  <div className="section-simple-header">
+                    <h3>
+                      <Sliders size={18} weight="bold" style={{marginRight: '8px', display: 'inline-block', verticalAlign: 'middle'}} />
+                      Parameter: {activeStrategy.name}
+                    </h3>
+                    <div className="section-description">
+                      Passe die Werte an deine Strategie an - wird automatisch gespeichert
                     </div>
-                    <div className="strategy-description">{strategy.description}</div>
                   </div>
-                </div>
-              ))}
-            </div>
-            
-            <div className="info-hint">
-              💡 <strong>Neue Strategien:</strong> Weitere Strategien wie MACD, Bollinger Bands, 
-              Multi-Timeframe können hinzugefügt werden. Sag mir welche du haben möchtest!
-            </div>
-          </div>
 
-          {/* Trading Zeitfenster */}
-          <div className="settings-section">
-            <div className="section-header">
-              <Lightning size={24} weight="bold" className="text-warning" />
-              <div>
-                <h3>Trading Zeitfenster</h3>
-                <p className="section-description">
-                  Wann soll der Scanner Signale generieren?
-                </p>
-              </div>
-            </div>
+                  <div className="params-list">
+                    {Object.entries(activeStrategy.params || {}).map(([paramKey, paramMeta]) => {
+                      const currentValue = getCurrentParamValue(
+                        activeStrategy.id, 
+                        paramKey, 
+                        paramMeta.value
+                      );
+                      const isCustom = settings.strategy_params[activeStrategy.id]?.[paramKey] !== undefined;
+                      
+                      return (
+                        <div key={paramKey} className="param-item" data-testid={`param-${paramKey}`}>
+                          <div className="param-info">
+                            <div className="param-label">
+                              {paramMeta.label}
+                              {isCustom && <span className="param-custom-badge">CUSTOM</span>}
+                            </div>
+                            <div className="param-description">
+                              {paramMeta.description}
+                            </div>
+                            <div className="param-range">
+                              Min: {paramMeta.min} · Max: {paramMeta.max} · Default: {paramMeta.value}
+                            </div>
+                          </div>
+                          <div className="param-input-wrapper">
+                            <input
+                              type="number"
+                              className="param-input"
+                              value={currentValue}
+                              min={paramMeta.min}
+                              max={paramMeta.max}
+                              step={paramMeta.step}
+                              onChange={(e) => updateStrategyParam(activeStrategy.id, paramKey, e.target.value)}
+                              onBlur={() => commitParams(activeStrategy.id)}
+                              data-testid={`param-input-${paramKey}`}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
 
-            <div className="session-mode-info">
-              {is24_7 ? (
-                <div className="mode-badge mode-badge-active">
-                  ⚡ 24/7 MODUS AKTIV - Scanner läuft rund um die Uhr
-                </div>
-              ) : (
-                <div className="mode-badge">
-                  📅 {settings.custom_sessions.filter(s => s.enabled).length} Zeitfenster konfiguriert
+                  <button 
+                    className="btn btn-reset"
+                    onClick={() => resetStrategyParams(activeStrategy.id)}
+                    data-testid="reset-params-btn"
+                  >
+                    Alle Parameter zurücksetzen
+                  </button>
                 </div>
               )}
-            </div>
 
-            {/* Sessions List */}
-            <div className="sessions-list">
-              {settings.custom_sessions.map((session, index) => (
-                <div key={index} className="session-item" data-testid={`session-${index}`}>
-                  <label className="switch switch-small">
+              {/* Pre-Signal Setting */}
+              <div className="settings-section">
+                <div className="setting-toggle">
+                  <div className="toggle-info">
+                    <div className="toggle-title">Pre-Signal Warnungen aktivieren</div>
+                    <div className="toggle-description">
+                      Frühwarnungen wenn Signal in Kürze zu erwarten ist
+                    </div>
+                  </div>
+                  <label className="switch">
                     <input 
                       type="checkbox" 
-                      checked={session.enabled !== false}
-                      onChange={() => toggleSession(index)}
-                      data-testid={`session-toggle-${index}`}
+                      checked={settings.pre_signal_enabled !== false}
+                      onChange={(e) => togglePreSignal(e.target.checked)}
+                      data-testid="pre-signal-toggle"
                     />
                     <span className="slider"></span>
                   </label>
-                  
-                  <input 
-                    type="text" 
-                    className="session-name"
-                    value={session.name || ''}
-                    onChange={(e) => updateSession(index, 'name', e.target.value)}
-                    onBlur={commitSessionUpdate}
-                    placeholder="Name"
-                    data-testid={`session-name-${index}`}
-                  />
-                  
-                  <div className="session-times">
-                    <input 
-                      type="time" 
-                      value={session.start || '09:00'}
-                      onChange={(e) => updateSession(index, 'start', e.target.value)}
-                      onBlur={commitSessionUpdate}
-                      className="time-input"
-                      data-testid={`session-start-${index}`}
-                    />
-                    <span className="text-muted">-</span>
-                    <input 
-                      type="time" 
-                      value={session.end || '12:00'}
-                      onChange={(e) => updateSession(index, 'end', e.target.value)}
-                      onBlur={commitSessionUpdate}
-                      className="time-input"
-                      data-testid={`session-end-${index}`}
-                    />
-                  </div>
-                  
-                  <button 
-                    className="btn-icon-remove"
-                    onClick={() => removeSession(index)}
-                    data-testid={`session-remove-${index}`}
-                  >
-                    <Trash size={16} />
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* SESSIONS TAB */}
+          {activeTab === 'sessions' && (
+            <>
+              <div className="settings-section">
+                <div className="session-mode-info">
+                  {is24_7 ? (
+                    <div className="mode-badge mode-badge-active">
+                      ⚡ 24/7 MODUS AKTIV
+                    </div>
+                  ) : (
+                    <div className="mode-badge">
+                      📅 {settings.custom_sessions.filter(s => s.enabled).length} Zeitfenster
+                    </div>
+                  )}
+                </div>
+
+                <div className="sessions-list">
+                  {settings.custom_sessions.map((session, index) => (
+                    <div key={index} className="session-item" data-testid={`session-${index}`}>
+                      <label className="switch switch-small">
+                        <input 
+                          type="checkbox" 
+                          checked={session.enabled !== false}
+                          onChange={() => toggleSession(index)}
+                        />
+                        <span className="slider"></span>
+                      </label>
+                      <input 
+                        type="text" className="session-name"
+                        value={session.name || ''}
+                        onChange={(e) => updateSession(index, 'name', e.target.value)}
+                        onBlur={commitSessionUpdate}
+                      />
+                      <div className="session-times">
+                        <input 
+                          type="time" value={session.start || '09:00'}
+                          onChange={(e) => updateSession(index, 'start', e.target.value)}
+                          onBlur={commitSessionUpdate}
+                          className="time-input"
+                        />
+                        <span className="text-muted">-</span>
+                        <input 
+                          type="time" value={session.end || '12:00'}
+                          onChange={(e) => updateSession(index, 'end', e.target.value)}
+                          onBlur={commitSessionUpdate}
+                          className="time-input"
+                        />
+                      </div>
+                      <button 
+                        className="btn-icon-remove"
+                        onClick={() => removeSession(index)}
+                      >
+                        <Trash size={16} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="session-actions">
+                  <button className="btn btn-add-session" onClick={addSession} data-testid="add-session-btn">
+                    <Plus size={16} weight="bold" />
+                    Zeitfenster hinzufügen
                   </button>
+                  {!is24_7 && (
+                    <button className="btn btn-24-7" onClick={enable24_7} data-testid="enable-24-7-btn">
+                      <Lightning size={16} weight="bold" />
+                      24/7 Modus
+                    </button>
+                  )}
+                  {is24_7 && (
+                    <button className="btn" onClick={restoreDefaults} data-testid="restore-defaults-btn">
+                      Standard (London + US)
+                    </button>
+                  )}
                 </div>
-              ))}
-            </div>
-
-            <div className="session-actions">
-              <button 
-                className="btn btn-add-session"
-                onClick={addSession}
-                data-testid="add-session-btn"
-              >
-                <Plus size={16} weight="bold" />
-                Zeitfenster hinzufügen
-              </button>
-              
-              {!is24_7 && (
-                <button 
-                  className="btn btn-24-7"
-                  onClick={enable24_7}
-                  data-testid="enable-24-7-btn"
-                >
-                  <Lightning size={16} weight="bold" />
-                  24/7 Modus (alle löschen)
-                </button>
-              )}
-              
-              {is24_7 && (
-                <button 
-                  className="btn"
-                  onClick={restoreDefaults}
-                  data-testid="restore-defaults-btn"
-                >
-                  Standard wiederherstellen (London + US)
-                </button>
-              )}
-            </div>
-            
-            <div className="info-hint">
-              💡 <strong>Tipp:</strong> Alle Zeiten sind in deutscher Zeit (MEZ/CET). 
-              Standard: London 09:00-12:00, US 15:30-18:30. 
-              <br />
-              Ohne Zeitfenster → 24/7 Modus aktiv.
-            </div>
-          </div>
-
-          {/* Pre-Signal Settings */}
-          <div className="settings-section">
-            <div className="section-header">
-              <ChartLineUp size={24} weight="bold" className="text-warning" />
-              <div>
-                <h3>Pre-Signal Warnings</h3>
-                <p className="section-description">Frühwarnungen bevor alle 4 Regeln erfüllt sind</p>
-              </div>
-            </div>
-
-            <div className="setting-toggle">
-              <div className="toggle-info">
-                <div className="toggle-title">Pre-Signals aktivieren</div>
-                <div className="toggle-description">
-                  Erhalte Warnungen wenn 3 von 4 Regeln erfüllt sind und die 4. bald folgt
+                
+                <div className="info-hint">
+                  💡 Alle Zeiten in deutscher Zeit (MEZ/CET). Ohne Zeitfenster → 24/7 Modus.
                 </div>
               </div>
-              <label className="switch">
-                <input 
-                  type="checkbox" 
-                  checked={settings.pre_signal_enabled !== false}
-                  onChange={(e) => togglePreSignal(e.target.checked)}
-                  data-testid="pre-signal-toggle"
-                />
-                <span className="slider"></span>
-              </label>
-            </div>
-          </div>
+            </>
+          )}
 
-          {/* Telegram */}
-          <div className="settings-section">
-            <div className="section-header">
-              <TelegramLogo size={24} weight="bold" />
-              <div>
-                <h3>Telegram Bot</h3>
-                <p className="section-description">Handy-Alerts sind aktiv!</p>
+          {/* TELEGRAM TAB */}
+          {activeTab === 'telegram' && (
+            <>
+              <div className="settings-section">
+                <div className="info-box" style={{ borderColor: '#00FF66' }}>
+                  <div className="info-text">
+                    ✅ <strong>Bot verbunden:</strong> @Krypto_Strategy_Alert_Bot
+                    <br />
+                    Signale werden automatisch an dich gesendet
+                  </div>
+                </div>
+
+                <button 
+                  className="btn btn-long" 
+                  onClick={handleTestTelegram} 
+                  disabled={testing}
+                  data-testid="test-telegram-button"
+                >
+                  {testing ? 'Teste...' : 'Test-Nachricht senden'}
+                </button>
               </div>
-            </div>
-
-            <div className="info-box" style={{ borderColor: '#00FF66' }}>
-              <div className="info-text">
-                ✅ <strong>Bot verbunden:</strong> @Krypto_Strategy_Alert_Bot
-              </div>
-            </div>
-
-            <button 
-              className="btn btn-long" 
-              onClick={handleTestTelegram} 
-              disabled={testing}
-              data-testid="test-telegram-button"
-            >
-              {testing ? 'Teste...' : 'Test-Nachricht senden'}
-            </button>
-          </div>
-
-          {/* Info */}
-          <div className="settings-section">
-            <div className="section-header">
-              <Warning size={24} weight="bold" className="text-warning" />
-              <div>
-                <h3>Wichtige Hinweise</h3>
-              </div>
-            </div>
-
-            <div className="info-box">
-              <ul className="info-list">
-                <li>
-                  <strong>Zeitfenster:</strong> Signale werden nur in aktivierten Zeitfenstern gesendet
-                </li>
-                <li>
-                  <strong>Pre-Signals</strong> haben 3 von 4 Regeln - trade erst wenn 4. folgt!
-                </li>
-                <li>
-                  <strong>Deutsche Zeit:</strong> Alle Zeitangaben sind in MEZ/CET
-                </li>
-                <li>
-                  <strong>Bitunix API läuft READ-ONLY</strong> - kein Auto-Trading
-                </li>
-              </ul>
-            </div>
-          </div>
+            </>
+          )}
         </div>
       </div>
     </div>

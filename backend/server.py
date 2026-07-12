@@ -329,9 +329,19 @@ async def get_settings():
 
 @app.get("/api/strategies")
 async def get_strategies():
-    """List all available strategies"""
+    """List all available strategies with their parameters"""
+    strategies_with_current_params = []
+    for strategy_meta in strategy_registry.list_all():
+        strategy_id = strategy_meta["id"]
+        strategy = strategy_registry.get(strategy_id)
+        current_params = strategy.get_params(scanner.settings)
+        strategies_with_current_params.append({
+            **strategy_meta,
+            "current_params": current_params
+        })
+    
     return {
-        "strategies": strategy_registry.list_all(),
+        "strategies": strategies_with_current_params,
         "active": scanner.settings.get("active_strategy", "scalping_4_rules")
     }
 
