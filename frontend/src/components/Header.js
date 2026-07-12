@@ -1,15 +1,16 @@
-import React from 'react';
-import { Clock, Gear } from '@phosphor-icons/react';
+import React, { useState, useEffect } from 'react';
+import { Clock, Gear, ChartLineUp } from '@phosphor-icons/react';
 import './Header.css';
 
-const Header = ({ sessionActive, onSettingsClick }) => {
-  const [currentTime, setCurrentTime] = React.useState(new Date());
+const API_URL = process.env.REACT_APP_BACKEND_URL;
 
-  React.useEffect(() => {
+const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions }) => {
+  const [currentTime, setCurrentTime] = useState(new Date());
+
+  useEffect(() => {
     const timer = setInterval(() => {
       setCurrentTime(new Date());
     }, 1000);
-
     return () => clearInterval(timer);
   }, []);
 
@@ -17,11 +18,19 @@ const Header = ({ sessionActive, onSettingsClick }) => {
     return date.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   };
 
+  const is24_7 = !customSessions || customSessions.length === 0;
+  const enabledSessions = (customSessions || []).filter(s => s.enabled !== false);
+
   return (
     <header className="header" data-testid="main-header">
       <div className="header-left">
-        <h1 className="header-title">CRYPTO SCALPING SCANNER</h1>
-        <div className="header-subtitle">4-Regel Strategie | Heikin Ashi | EMA 50/9 | RSI</div>
+        <div className="header-brand">
+          <ChartLineUp size={28} weight="bold" className="brand-icon" />
+          <div>
+            <h1 className="header-title">CRYPTO SCANNER</h1>
+            <div className="header-subtitle">Multi-Strategy Trading Signals</div>
+          </div>
+        </div>
       </div>
       
       <div className="header-center">
@@ -29,13 +38,24 @@ const Header = ({ sessionActive, onSettingsClick }) => {
           <Clock size={20} weight="bold" />
           <span className="mono">{formatTime(currentTime)}</span>
           <span className={`badge ${sessionActive ? 'badge-active' : 'badge-inactive'}`} data-testid="session-status-badge">
-            {sessionActive ? 'TRADING SESSION ACTIVE' : 'OUTSIDE TRADING HOURS'}
+            {sessionActive 
+              ? (currentSession ? `${currentSession.toUpperCase()} · ACTIVE` : 'TRADING ACTIVE')
+              : 'OUTSIDE SESSIONS'}
           </span>
         </div>
         <div className="session-times">
-          <span className="text-muted">London: 09:00-12:00</span>
-          <span className="text-muted">|</span>
-          <span className="text-muted">US: 15:30-18:30</span>
+          {is24_7 ? (
+            <span className="text-warning" style={{fontWeight: 600}}>⚡ 24/7 MODUS AKTIV</span>
+          ) : enabledSessions.length === 0 ? (
+            <span className="text-muted">Keine aktiven Sessions</span>
+          ) : (
+            enabledSessions.map((s, i) => (
+              <span key={i} className="text-muted">
+                {i > 0 && <span style={{margin: '0 4px'}}>|</span>}
+                {s.name}: {s.start}-{s.end}
+              </span>
+            ))
+          )}
         </div>
       </div>
       

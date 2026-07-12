@@ -16,6 +16,8 @@ function App() {
   const [signals, setSignals] = useState([]);
   const [performance, setPerformance] = useState([]);
   const [sessionActive, setSessionActive] = useState(false);
+  const [currentSession, setCurrentSession] = useState('');
+  const [customSessions, setCustomSessions] = useState([]);
   const [showAlert, setShowAlert] = useState(false);
   const [currentAlert, setCurrentAlert] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -98,16 +100,18 @@ function App() {
         const response = await fetch(`${API_URL}/api/session/status`);
         const data = await response.json();
         setSessionActive(data.is_active);
+        setCurrentSession(data.current_session || '');
+        setCustomSessions(data.custom_sessions || []);
       } catch (error) {
         console.error('Error fetching session status:', error);
       }
     };
 
     fetchSessionStatus();
-    const interval = setInterval(fetchSessionStatus, 60000); // Update every minute
+    const interval = setInterval(fetchSessionStatus, 30000); // Update every 30s
 
     return () => clearInterval(interval);
-  }, []);
+  }, [showSettings]);
 
   // Fetch signals
   useEffect(() => {
@@ -155,6 +159,8 @@ function App() {
       
       <Header 
         sessionActive={sessionActive}
+        currentSession={currentSession}
+        customSessions={customSessions}
         onSettingsClick={() => setShowSettings(true)}
       />
       

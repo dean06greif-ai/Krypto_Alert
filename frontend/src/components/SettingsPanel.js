@@ -11,18 +11,24 @@ const SettingsPanel = ({ onClose }) => {
   const [settings, setSettings] = useState({
     custom_sessions: [],
     pre_signal_enabled: true,
+    active_strategy: 'scalping_4_rules',
   });
+  const [strategies, setStrategies] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Fetch current settings
+  // Fetch current settings and available strategies
   useEffect(() => {
-    fetch(`${API_URL}/api/settings`)
-      .then(r => r.json())
-      .then(data => {
+    Promise.all([
+      fetch(`${API_URL}/api/settings`).then(r => r.json()),
+      fetch(`${API_URL}/api/strategies`).then(r => r.json())
+    ])
+      .then(([settingsData, strategiesData]) => {
         setSettings({
-          custom_sessions: data.custom_sessions || [],
-          pre_signal_enabled: data.pre_signal_enabled !== false,
+          custom_sessions: settingsData.custom_sessions || [],
+          pre_signal_enabled: settingsData.pre_signal_enabled !== false,
+          active_strategy: settingsData.active_strategy || 'scalping_4_rules',
         });
+        setStrategies(strategiesData.strategies || []);
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -58,6 +64,13 @@ const SettingsPanel = ({ onClose }) => {
     const updated = { ...settings, pre_signal_enabled: value };
     setSettings(updated);
     saveSettings({ pre_signal_enabled: value });
+  };
+
+  const changeStrategy = (strategyId) => {
+    const updated = { ...settings, active_strategy: strategyId };
+    setSettings(updated);
+    saveSettings({ active_strategy: strategyId });
+    toast.success(`Strategie gewechselt: ${strategyId}`);
   };
 
   const addSession = () => {
@@ -140,6 +153,48 @@ const SettingsPanel = ({ onClose }) => {
         </div>
 
         <div className="settings-content">
+          {/* Strategy Selector */}
+          <div className="settings-section">
+            <div className="section-header">
+              <ChartLineUp size={24} weight="bold" className="text-long" />
+              <div>
+                <h3>Trading Strategie</h3>
+                <p className="section-description">
+                  Wähle welche Strategie der Scanner verwenden soll
+                </p>
+              </div>
+            </div>
+
+            <div className="strategy-list">
+              {strategies.map(strategy => (
+                <div 
+                  key={strategy.id}
+                  className={`strategy-option ${settings.active_strategy === strategy.id ? 'strategy-option-active' : ''}`}
+                  onClick={() => changeStrategy(strategy.id)}
+                  data-testid={`strategy-option-${strategy.id}`}
+                >
+                  <div className="strategy-radio">
+                    {settings.active_strategy === strategy.id ? (
+                      <div className="radio-dot"></div>
+                    ) : null}
+                  </div>
+                  <div className="strategy-info">
+                    <div className="strategy-name">
+                      {strategy.name}
+                      <span className="strategy-timeframe">{strategy.timeframe}</span>
+                    </div>
+                    <div className="strategy-description">{strategy.description}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            
+            <div className="info-hint">
+              💡 <strong>Neue Strategien:</strong> Weitere Strategien wie MACD, Bollinger Bands, 
+              Multi-Timeframe können hinzugefügt werden. Sag mir welche du haben möchtest!
+            </div>
+          </div>
+
           {/* Trading Zeitfenster */}
           <div className="settings-section">
             <div className="section-header">

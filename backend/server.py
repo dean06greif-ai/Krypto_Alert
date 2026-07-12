@@ -16,6 +16,7 @@ load_dotenv()
 from services.bitunix_client import BitunixWebSocketClient
 from services.strategy_scanner import StrategyScanner
 from services.telegram_bot import TelegramNotifier
+from strategies.registry import registry as strategy_registry
 from models.signal import Signal, CoinPerformance
 
 # Setup logging
@@ -326,9 +327,17 @@ async def get_settings():
     """Get scanner settings"""
     return scanner.settings
 
+@app.get("/api/strategies")
+async def get_strategies():
+    """List all available strategies"""
+    return {
+        "strategies": strategy_registry.list_all(),
+        "active": scanner.settings.get("active_strategy", "scalping_4_rules")
+    }
+
 @app.post("/api/settings")
 async def update_settings(settings: Dict):
-    """Update scanner settings (custom sessions, pre-signals, etc)"""
+    """Update scanner settings (custom sessions, pre-signals, active strategy)"""
     scanner.update_settings(settings)
     
     # Persist to MongoDB

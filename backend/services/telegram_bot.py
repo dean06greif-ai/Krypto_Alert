@@ -12,6 +12,7 @@ class TelegramNotifier:
     def __init__(self):
         self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
+        self.frontend_url = os.getenv('FRONTEND_URL', 'https://crypto-scanner-frontend-a98r.onrender.com')
         self.bot = None
         
         if self.bot_token:
@@ -22,50 +23,52 @@ class TelegramNotifier:
                 logger.error(f"Failed to initialize Telegram bot: {e}")
     
     def format_signal_message(self, signal: Dict) -> str:
-        """Format signal data into Telegram message"""
+        """Format signal data into Telegram message with better SL/TP context and website link"""
         signal_type = signal['type']
         is_pre_signal = signal.get('signal_class') == 'PRE_SIGNAL'
+        strategy_name = signal.get('strategy_name', 'Scalping')
         
         if is_pre_signal:
             emoji = "🟡"
-            title = f"⚠️ *PRE-{signal_type} WARNING* ⚠️"
-            action = "*Bereite Trade vor - 4. Regel steht bevor!*"
+            title = f"⚠️ *PRE-{signal_type} WARNING*"
+            action = "🔔 *Trade vorbereiten - 4. Regel steht bevor!*"
         else:
             emoji = "🟢" if signal_type == "LONG" else "🔴"
-            title = f"{emoji} *{signal_type} SIGNAL DETECTED* {emoji}"
-            action = "*Action Required: Check chart and enter trade within 2 candles!*"
+            title = f"{emoji} *{signal_type} SIGNAL* {emoji}"
+            action = "🎯 *ACTION: Enter trade within 2 candles!*"
+        
+        # Calculate percentage moves for better context
+        entry = signal['entry_price']
+        sl = signal['stop_loss']
+        tp1 = signal['take_profit_1']
+        tp_full = signal['take_profit_full']
+        
+        sl_pct = abs((sl - entry) / entry * 100)
+        tp1_pct = abs((tp1 - entry) / entry * 100)
+        tp_full_pct = abs((tp_full - entry) / entry * 100)
         
         message = f"""{title}
 
-*Coin:* {signal['symbol']}
-*Session:* {signal.get('session', 'N/A')}
-*Rules Met:* {signal.get('rules_met_count', 4)}/4
+💰 *{signal['symbol']}* · {strategy_name}
+🕐 Session: {signal.get('session', 'N/A')} | Rules: {signal.get('rules_met_count', 4)}/4
 
-*Entry:* ${signal['entry_price']}
-*Stop Loss:* ${signal['stop_loss']}
-*TP1 (40%):* ${signal['take_profit_1']}
-*TP Full:* ${signal['take_profit_full']}
-*CRV:* {signal['crv']}
+━━━━━━━━━━━━━━━━━━━
+💵 *ENTRY:* `${entry}`
+🛑 *STOP LOSS:* `${sl}` (-{sl_pct:.2f}%)
+🎯 *TP1 (40%):* `${tp1}` (+{tp1_pct:.2f}%)
+🚀 *TP FULL:* `${tp_full}` (+{tp_full_pct:.2f}%)
+━━━━━━━━━━━━━━━━━━━
 
-*Indicators:*
-• RSI: {signal['rsi']}
-• EMA 9: ${signal['ema_9']}
-• EMA 50: ${signal['ema_50']}
-
-⏰ Time: {signal['timestamp']}
+📊 *CRV:* {signal['crv']} | RSI: {signal['rsi']}
 
 {action}
+
+🔗 [Open Live Dashboard]({self.frontend_url})
 """
         return message
     
     async def send_signal(self, signal: Dict) -> bool:
-        """
-        Send signal notification via Telegram
-        Args:
-            signal: Signal dictionary
-        Returns:
-            True if sent successfully, False otherwise
-        """
+        """Send signal notification via Telegram"""
         if not self.bot or not self.chat_id:
             logger.warning("Telegram not configured, skipping notification")
             return False
@@ -76,7 +79,8 @@ class TelegramNotifier:
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=message,
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True
             )
             
             logger.info(f"Telegram notification sent for {signal['symbol']} {signal['type']}")
@@ -87,19 +91,22 @@ class TelegramNotifier:
             return False
     
     async def send_test_message(self) -> bool:
-        """
-        Send test message to verify bot setup
-        Returns:
-            True if sent successfully
-        """
+        """Send test message to verify bot setup"""
         if not self.bot or not self.chat_id:
             return False
         
         try:
+            message = f"""✅ *Crypto Scanner Bot Connected!*
+
+Bot ist bereit und wartet auf Signale.
+
+🔗 [Open Dashboard]({self.frontend_url})
+"""
             await self.bot.send_message(
                 chat_id=self.chat_id,
-                text="✅ Crypto Scalping Scanner connected successfully!",
-                parse_mode=ParseMode.MARKDOWN
+                text=message,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True
             )
             return True
         except Exception as e:

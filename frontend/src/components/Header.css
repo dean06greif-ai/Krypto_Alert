@@ -15,6 +15,16 @@
   gap: 4px;
 }
 
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-icon {
+  color: #00FF66;
+}
+
 .header-title {
   font-size: 18px;
   font-weight: 900;
