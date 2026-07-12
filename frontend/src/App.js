@@ -24,8 +24,15 @@ function App() {
   const [currentAlert, setCurrentAlert] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [candleData, setCandleData] = useState({});
+  const [notifications, setNotifications] = useState({});
   const wsRef = useRef(null);
   const audioRef = useRef(null);
+  const notificationsRef = useRef({});
+
+  // keep a ref in sync so the websocket handler always reads the latest map
+  useEffect(() => {
+    notificationsRef.current = notifications;
+  }, [notifications]);
 
   // WebSocket connection
   useEffect(() => {
@@ -44,7 +51,13 @@ function App() {
       if (message.type === 'signal') {
         const signal = message.data;
         setSignals(prev => [signal, ...prev]);
-        
+
+        // Respect per-instrument notification toggle (default = enabled)
+        const notifyEnabled = notificationsRef.current[signal.symbol] !== false;
+        if (!notifyEnabled) {
+          return;
+        }
+
         // Show alert
         setCurrentAlert(signal);
         setShowAlert(true);
@@ -136,6 +149,36 @@ function App() {
     return () => clearInterval(interval);
   }, [showSettings]);
 
+  // Fetch per-instrument notification settings
+  useEffect(() => {
+    const fetchNotifications = async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/settings`);
+        const data = await response.json();
+        setNotifications(data.notifications || {});
+      } catch (error) {
+        console.error('Error fetching notification settings:', error);
+      }
+    };
+    fetchNotifications();
+  }, [showSettings]);
+
+  const toggleNotification = async (symbol) => {
+    const current = notifications[symbol] !== false; // default enabled
+    const updated = { ...notifications, [symbol]: !current };
+    setNotifications(updated);
+    try {
+      await fetch(`${API_URL}/api/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notifications: updated })
+      });
+      toast.success(`${symbol.replace('USDT', '')}: Alerts ${!current ? 'AN' : 'AUS'}`);
+    } catch (error) {
+      toast.error('Fehler beim Speichern');
+    }
+  };
+
   // Fetch signals
   useEffect(() => {
     const fetchSignals = async () => {
@@ -193,6 +236,8 @@ function App() {
           selectedCoin={selectedCoin}
           onSelectCoin={setSelectedCoin}
           performance={performance}
+          notifications={notifications}
+          onToggleNotification={toggleNotification}
         />
         
         <div className="main-content">
