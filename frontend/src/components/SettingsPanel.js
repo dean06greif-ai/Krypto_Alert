@@ -1,23 +1,53 @@
-import React, { useState } from 'react';
-import { X, TelegramLogo, Check, Warning } from '@phosphor-icons/react';
+import React, { useState, useEffect } from 'react';
+import { X, TelegramLogo, Check, Warning, Lightning, ChartLineUp } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import './SettingsPanel.css';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
 const SettingsPanel = ({ onClose }) => {
-  const [telegramToken, setTelegramToken] = useState('');
-  const [telegramChatId, setTelegramChatId] = useState('');
   const [testing, setTesting] = useState(false);
+  const [settings, setSettings] = useState({
+    test_mode_24_7: false,
+    pre_signal_enabled: true,
+  });
+  const [loading, setLoading] = useState(true);
+
+  // Fetch current settings
+  useEffect(() => {
+    fetch(`${API_URL}/api/settings`)
+      .then(r => r.json())
+      .then(data => {
+        setSettings(data);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const updateSetting = async (key, value) => {
+    const newSettings = { ...settings, [key]: value };
+    setSettings(newSettings);
+    
+    try {
+      const response = await fetch(`${API_URL}/api/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [key]: value })
+      });
+      
+      if (response.ok) {
+        toast.success('Einstellung gespeichert');
+      }
+    } catch (error) {
+      toast.error('Fehler beim Speichern');
+      setSettings(settings);
+    }
+  };
 
   const handleTestTelegram = async () => {
     setTesting(true);
-    
     try {
-      const response = await fetch(`${API_URL}/api/telegram/test`, {
-        method: 'POST',
-      });
-
+      const response = await fetch(`${API_URL}/api/telegram/test`, { method: 'POST' });
       if (response.ok) {
         toast.success('Telegram Test erfolgreich!');
       } else {
@@ -42,66 +72,100 @@ const SettingsPanel = ({ onClose }) => {
         </div>
 
         <div className="settings-content">
+          {/* Scanner Settings */}
           <div className="settings-section">
             <div className="section-header">
-              <TelegramLogo size={24} weight="bold" />
+              <Lightning size={24} weight="bold" className="text-warning" />
               <div>
-                <h3>Telegram Bot Setup</h3>
+                <h3>Scanner Einstellungen</h3>
+                <p className="section-description">Steuere wann und wie Signale erkannt werden</p>
+              </div>
+            </div>
+
+            <div className="setting-toggle">
+              <div className="toggle-info">
+                <div className="toggle-title">24/7 Test Mode</div>
+                <div className="toggle-description">
+                  Signale auch außerhalb der Trading-Sessions (zum Testen)
+                </div>
+              </div>
+              <label className="switch">
+                <input 
+                  type="checkbox" 
+                  checked={settings.test_mode_24_7 || false}
+                  onChange={(e) => updateSetting('test_mode_24_7', e.target.checked)}
+                  data-testid="test-mode-toggle"
+                />
+                <span className="slider"></span>
+              </label>
+            </div>
+
+            <div className="setting-toggle">
+              <div className="toggle-info">
+                <div className="toggle-title">Pre-Signal Warnings</div>
+                <div className="toggle-description">
+                  Frühwarnungen wenn 3 von 4 Regeln erfüllt und 4. steht bevor
+                </div>
+              </div>
+              <label className="switch">
+                <input 
+                  type="checkbox" 
+                  checked={settings.pre_signal_enabled !== false}
+                  onChange={(e) => updateSetting('pre_signal_enabled', e.target.checked)}
+                  data-testid="pre-signal-toggle"
+                />
+                <span className="slider"></span>
+              </label>
+            </div>
+          </div>
+
+          {/* Analytics Info */}
+          <div className="settings-section">
+            <div className="section-header">
+              <ChartLineUp size={24} weight="bold" className="text-long" />
+              <div>
+                <h3>Zeit-basierte Analytics</h3>
                 <p className="section-description">
-                  Erhalten Sie Trading-Signale direkt auf Ihr Handy
+                  Neue Feature: Sieh welche Coins zu welchen Uhrzeiten am besten performen
                 </p>
               </div>
             </div>
 
-            <div className="setup-steps">
-              <div className="step-item">
-                <div className="step-number">1</div>
-                <div className="step-content">
-                  <div className="step-title">Bot erstellen</div>
-                  <div className="step-description">
-                    Sende <code>/newbot</code> an <strong>@BotFather</strong> auf Telegram
-                  </div>
-                </div>
+            <div className="info-box">
+              <div className="info-text">
+                📊 <strong>Wo finde ich das?</strong>
+                <br />
+                Öffne die Performance Analytics im rechten Panel - dort werden nun 
+                pro Coin die besten und schlechtesten Uhrzeiten angezeigt basierend 
+                auf historischen Signals.
+                <br /><br />
+                <strong>Was gemessen wird:</strong>
+                <ul style={{ marginTop: '8px', paddingLeft: '20px' }}>
+                  <li>Uhrzeit (0-23 Uhr)</li>
+                  <li>Wochentag</li>
+                  <li>Anzahl Signale (Long/Short)</li>
+                  <li>Win-Rate pro Zeitfenster</li>
+                  <li>Durchschnittliches CRV</li>
+                </ul>
               </div>
+            </div>
+          </div>
 
-              <div className="step-item">
-                <div className="step-number">2</div>
-                <div className="step-content">
-                  <div className="step-title">Bot Token kopieren</div>
-                  <div className="step-description">
-                    BotFather gibt dir einen Token. Trage ihn in der <code>backend/.env</code> Datei ein:
-                    <br />
-                    <code>TELEGRAM_BOT_TOKEN="dein_token_hier"</code>
-                  </div>
-                </div>
+          {/* Telegram Setup */}
+          <div className="settings-section">
+            <div className="section-header">
+              <TelegramLogo size={24} weight="bold" />
+              <div>
+                <h3>Telegram Bot</h3>
+                <p className="section-description">Deine Handy-Alerts sind aktiv!</p>
               </div>
+            </div>
 
-              <div className="step-item">
-                <div className="step-number">3</div>
-                <div className="step-content">
-                  <div className="step-title">Chat ID erhalten</div>
-                  <div className="step-description">
-                    Sende eine Nachricht an deinen Bot, dann öffne:
-                    <br />
-                    <code>https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code>
-                    <br />
-                    Finde deine Chat ID und trage sie ein:
-                    <br />
-                    <code>TELEGRAM_CHAT_ID="deine_chat_id"</code>
-                  </div>
-                </div>
-              </div>
-
-              <div className="step-item">
-                <div className="step-number">4</div>
-                <div className="step-content">
-                  <div className="step-title">Backend neu starten</div>
-                  <div className="step-description">
-                    Nach dem Speichern der .env Datei:
-                    <br />
-                    <code>sudo supervisorctl restart backend</code>
-                  </div>
-                </div>
+            <div className="info-box" style={{ borderColor: '#00FF66' }}>
+              <div className="info-text">
+                ✅ <strong>Bot verbunden:</strong> @Krypto_Strategy_Alert_Bot
+                <br />
+                Du bekommst automatisch Nachrichten bei jedem Signal!
               </div>
             </div>
 
@@ -111,10 +175,11 @@ const SettingsPanel = ({ onClose }) => {
               disabled={testing}
               data-testid="test-telegram-button"
             >
-              {testing ? 'Teste...' : 'Telegram Verbindung testen'}
+              {testing ? 'Teste...' : 'Telegram Test-Nachricht senden'}
             </button>
           </div>
 
+          {/* Info */}
           <div className="settings-section">
             <div className="section-header">
               <Warning size={24} weight="bold" className="text-warning" />
@@ -126,43 +191,19 @@ const SettingsPanel = ({ onClose }) => {
             <div className="info-box">
               <ul className="info-list">
                 <li>
-                  <strong>Bitunix API Keys:</strong> Bereits in <code>backend/.env</code> gespeichert (nur Read-Only)
+                  <strong>Pre-Signals</strong> haben nur 3 von 4 Regeln erfüllt - 
+                  handeln nur wenn 4. Regel folgt!
                 </li>
                 <li>
-                  <strong>Trading Sessions:</strong> Scanner ist nur aktiv während London (9-12 Uhr) und US (15:30-18:30 Uhr) Sessions
+                  <strong>24/7 Test Mode:</strong> Nutze nur zum Testen, sonst Sessions einhalten!
                 </li>
                 <li>
-                  <strong>Heikin Ashi:</strong> Charts verwenden Heikin Ashi Candles, nicht normale Candles
+                  <strong>Bitunix API läuft READ-ONLY</strong> (kein Auto-Trading)
                 </li>
                 <li>
-                  <strong>Keine Auto-Trading:</strong> Diese App sendet nur Signale, sie handelt NICHT automatisch
+                  <strong>Trading Sessions:</strong> London 9-12 Uhr, US 15:30-18:30 Uhr
                 </li>
               </ul>
-            </div>
-          </div>
-
-          <div className="settings-section">
-            <div className="section-header">
-              <Check size={24} weight="bold" className="text-long" />
-              <div>
-                <h3>Deployment auf Render</h3>
-              </div>
-            </div>
-
-            <div className="info-box">
-              <ol className="info-list">
-                <li>Erstelle ein neues Web Service auf Render.com</li>
-                <li>Verbinde dein Git Repository</li>
-                <li>Environment Variables hinzufügen:
-                  <ul style={{ marginTop: '8px', paddingLeft: '20px' }}>
-                    <li><code>MONGO_URL</code></li>
-                    <li><code>DB_NAME</code></li>
-                    <li><code>TELEGRAM_BOT_TOKEN</code></li>
-                    <li><code>TELEGRAM_CHAT_ID</code></li>
-                  </ul>
-                </li>
-                <li>Deploy starten - App läuft dann 24/7!</li>
-              </ol>
             </div>
           </div>
         </div>

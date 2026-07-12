@@ -22,19 +22,25 @@ class TelegramNotifier:
                 logger.error(f"Failed to initialize Telegram bot: {e}")
     
     def format_signal_message(self, signal: Dict) -> str:
-        """
-        Format signal data into Telegram message
-        Args:
-            signal: Signal dictionary
-        Returns:
-            Formatted message string
-        """
+        """Format signal data into Telegram message"""
         signal_type = signal['type']
-        emoji = "🟢" if signal_type == "LONG" else "🔴"
+        is_pre_signal = signal.get('signal_class') == 'PRE_SIGNAL'
         
-        message = f"""{emoji} *{signal_type} SIGNAL DETECTED* {emoji}
+        if is_pre_signal:
+            emoji = "🟡"
+            title = f"⚠️ *PRE-{signal_type} WARNING* ⚠️"
+            action = "*Bereite Trade vor - 4. Regel steht bevor!*"
+        else:
+            emoji = "🟢" if signal_type == "LONG" else "🔴"
+            title = f"{emoji} *{signal_type} SIGNAL DETECTED* {emoji}"
+            action = "*Action Required: Check chart and enter trade within 2 candles!*"
+        
+        message = f"""{title}
 
 *Coin:* {signal['symbol']}
+*Session:* {signal.get('session', 'N/A')}
+*Rules Met:* {signal.get('rules_met_count', 4)}/4
+
 *Entry:* ${signal['entry_price']}
 *Stop Loss:* ${signal['stop_loss']}
 *TP1 (40%):* ${signal['take_profit_1']}
@@ -48,7 +54,7 @@ class TelegramNotifier:
 
 ⏰ Time: {signal['timestamp']}
 
-*Action Required:* Check chart and enter trade within 2 candles!
+{action}
 """
         return message
     

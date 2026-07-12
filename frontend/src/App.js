@@ -181,6 +181,7 @@ function App() {
           <PerformanceAnalytics 
             performance={performance}
             signals={signals}
+            selectedCoin={selectedCoin}
           />
         </div>
       </div>

@@ -301,12 +301,120 @@ async def get_session_status():
     
     return {
         "is_active": is_active,
+        "current_session": scanner.get_current_session(),
+        "test_mode_24_7": scanner.settings.get("test_mode_24_7", False),
+        "pre_signal_enabled": scanner.settings.get("pre_signal_enabled", True),
         "current_time_utc": now.isoformat(),
         "sessions": {
             "london": "09:00-12:00 CET",
             "us": "15:30-18:30 CET"
         }
     }
+
+@app.get("/api/settings")
+async def get_settings():
+    """Get scanner settings"""
+    return scanner.settings
+
+@app.post("/api/settings")
+async def update_settings(settings: Dict):
+    """Update scanner settings (test mode, pre-signals, etc)"""
+    scanner.update_settings(settings)
+    return {"status": "success", "settings": scanner.settings}
+
+@app.get("/api/analytics/time-based/{symbol}")
+async def get_time_based_analytics(symbol: str):
+    """Get time-based performance for a specific coin (best hours/days)"""
+    # Aggregate signals by hour and weekday
+    pipeline = [
+        {"$match": {"symbol": symbol}},
+        {
+            "$group": {
+                "_id": {"hour": "$hour", "weekday": "$weekday"},
+                "total": {"$sum": 1},
+                "long_signals": {"$sum": {"$cond": [{"$eq": ["$type", "LONG"]}, 1, 0]}},
+                "short_signals": {"$sum": {"$cond": [{"$eq": ["$type", "SHORT"]}, 1, 0]}},
+                "wins": {"$sum": {"$cond": [{"$eq": ["$result", "win"]}, 1, 0]}},
+                "losses": {"$sum": {"$cond": [{"$eq": ["$result", "loss"]}, 1, 0]}},
+                "avg_crv": {"$avg": "$crv"}
+            }
+        },
+        {"$sort": {"total": -1}}
+    ]
+    
+    results = await app.mongodb.signals.aggregate(pipeline).to_list(1000)
+    
+    weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    
+    time_stats = []
+    for r in results:
+        hour = r["_id"]["hour"]
+        weekday = r["_id"]["weekday"]
+        total = r["total"]
+        wins = r.get("wins", 0)
+        win_rate = (wins / total * 100) if total > 0 else 0
+        
+        time_stats.append({
+            "hour": hour,
+            "weekday": weekday_names[weekday],
+            "total_signals": total,
+            "long_signals": r.get("long_signals", 0),
+            "short_signals": r.get("short_signals", 0),
+            "wins": wins,
+            "losses": r.get("losses", 0),
+            "win_rate": round(win_rate, 1),
+            "avg_crv": round(r.get("avg_crv", 0) or 0, 2)
+        })
+    
+    return {
+        "symbol": symbol,
+        "time_analytics": time_stats,
+        "best_hours": sorted(time_stats, key=lambda x: x["win_rate"], reverse=True)[:5],
+        "worst_hours": sorted(time_stats, key=lambda x: x["win_rate"])[:5]
+    }
+
+@app.get("/api/analytics/heatmap")
+async def get_heatmap_analytics():
+    """Get overall heatmap of signals by hour and weekday for all coins"""
+    pipeline = [
+        {
+            "$group": {
+                "_id": {"hour": "$hour", "weekday": "$weekday"},
+                "total": {"$sum": 1},
+                "symbols": {"$addToSet": "$symbol"}
+            }
+        }
+    ]
+    
+    results = await app.mongodb.signals.aggregate(pipeline).to_list(1000)
+    
+    heatmap = []
+    for r in results:
+        heatmap.append({
+            "hour": r["_id"]["hour"],
+            "weekday": r["_id"]["weekday"],
+            "count": r["total"],
+            "symbols_count": len(r["symbols"])
+        })
+    
+    return {"heatmap": heatmap}
+
+@app.post("/api/signal/mark-result")
+async def mark_signal_result(data: Dict):
+    """Mark a signal as win/loss/breakeven for performance tracking"""
+    signal_id = data.get("signal_id")
+    result = data.get("result")  # win, loss, breakeven
+    
+    if not signal_id or result not in ["win", "loss", "breakeven"]:
+        raise HTTPException(status_code=400, detail="Invalid request")
+    
+    from bson import ObjectId
+    await app.mongodb.signals.update_one(
+        {"_id": ObjectId(signal_id)},
+        {"$set": {"result": result}}
+    )
+    
+    return {"status": "success"}
 
 if __name__ == "__main__":
     import uvicorn
