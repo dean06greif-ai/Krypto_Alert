@@ -1,89 +1,299 @@
-from fastapi import FastAPI, APIRouter
-from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from contextlib import asynccontextmanager
 import os
 import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
-import uuid
+import asyncio
+from typing import List, Dict
 from datetime import datetime, timezone
+import json
 
+from services.bitunix_client import BitunixWebSocketClient
+from services.strategy_scanner import StrategyScanner
+from services.telegram_bot import TelegramNotifier
+from models.signal import Signal, CoinPerformance
 
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# Top 10 coins to track
+TOP_10_COINS = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "MATICUSDT"
+]
 
-# Create the main app without a prefix
-app = FastAPI()
+# Global state
+scanner = StrategyScanner()
+telegram = TelegramNotifier()
+bitunix_client = BitunixWebSocketClient()
+active_signals = []
+websocket_clients = []
 
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
-
-
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Starting Crypto Scalping Scanner...")
     
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-class StatusCheckCreate(BaseModel):
-    client_name: str
-
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
-async def root():
-    return {"message": "Hello World"}
-
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
+    # Connect to MongoDB
+    app.mongodb_client = AsyncIOMotorClient(os.getenv("MONGO_URL"))
+    app.mongodb = app.mongodb_client[os.getenv("DB_NAME", "crypto_scanner")]
+    logger.info("Connected to MongoDB")
     
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
+    # Start Bitunix WebSocket connections
+    asyncio.create_task(start_bitunix_scanner())
     
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
-
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
+    # Send test telegram message
+    if telegram.bot:
+        await telegram.send_test_message()
     
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
+    yield
     
-    return status_checks
+    # Shutdown
+    logger.info("Shutting down...")
+    await bitunix_client.stop()
+    app.mongodb_client.close()
 
-# Include the router in the main app
-app.include_router(api_router)
+app = FastAPI(title="Crypto Scalping Scanner", lifespan=lifespan)
 
+# CORS
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+async def start_bitunix_scanner():
+    """Start WebSocket scanner for all coins"""
+    logger.info(f"Starting scanner for {len(TOP_10_COINS)} coins")
+    
+    async def handle_candle_update(symbol: str, candle: Dict):
+        """Handle new candle data"""
+        # Add to scanner
+        scanner.add_candle(symbol, candle)
+        
+        # Check for signal
+        signal = scanner.check_signal(symbol)
+        
+        if signal:
+            # Store in MongoDB
+            await app.mongodb.signals.insert_one(signal)
+            active_signals.append(signal)
+            
+            # Send Telegram notification
+            await telegram.send_signal(signal)
+            
+            # Update coin performance
+            await update_coin_performance(symbol, signal)
+            
+            # Notify connected WebSocket clients
+            await broadcast_signal(signal)
+            
+            logger.info(f"New signal: {signal['type']} for {symbol}")
+        
+        # Broadcast candle update to WebSocket clients
+        await broadcast_candle(symbol, candle)
+    
+    # Start connections
+    await bitunix_client.start(TOP_10_COINS, handle_candle_update)
 
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+async def update_coin_performance(symbol: str, signal: Dict):
+    """Update performance stats for a coin"""
+    perf = await app.mongodb.performance.find_one({"symbol": symbol})
+    
+    if not perf:
+        perf = {
+            "symbol": symbol,
+            "total_signals": 0,
+            "long_signals": 0,
+            "short_signals": 0,
+            "wins": 0,
+            "losses": 0,
+            "breakevens": 0,
+            "avg_crv": 0.0,
+            "win_rate": 0.0
+        }
+    
+    perf["total_signals"] += 1
+    if signal["type"] == "LONG":
+        perf["long_signals"] += 1
+    else:
+        perf["short_signals"] += 1
+    
+    perf["last_signal"] = signal["timestamp"]
+    
+    # Update average CRV
+    total_crv = perf.get("avg_crv", 0) * (perf["total_signals"] - 1) + signal["crv"]
+    perf["avg_crv"] = total_crv / perf["total_signals"]
+    
+    await app.mongodb.performance.update_one(
+        {"symbol": symbol},
+        {"$set": perf},
+        upsert=True
+    )
+
+async def broadcast_signal(signal: Dict):
+    """Broadcast new signal to all connected WebSocket clients"""
+    message = {
+        "type": "signal",
+        "data": signal
+    }
+    
+    disconnected = []
+    for client in websocket_clients:
+        try:
+            await client.send_json(message)
+        except Exception as e:
+            logger.error(f"Error broadcasting to client: {e}")
+            disconnected.append(client)
+    
+    # Remove disconnected clients
+    for client in disconnected:
+        websocket_clients.remove(client)
+
+async def broadcast_candle(symbol: str, candle: Dict):
+    """Broadcast candle update to connected clients"""
+    message = {
+        "type": "candle",
+        "symbol": symbol,
+        "data": candle
+    }
+    
+    disconnected = []
+    for client in websocket_clients:
+        try:
+            await client.send_json(message)
+        except Exception as e:
+            disconnected.append(client)
+    
+    for client in disconnected:
+        websocket_clients.remove(client)
+
+# WebSocket endpoint
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket connection for real-time updates"""
+    await websocket.accept()
+    websocket_clients.append(websocket)
+    logger.info(f"WebSocket client connected. Total clients: {len(websocket_clients)}")
+    
+    try:
+        # Send initial data
+        await websocket.send_json({
+            "type": "connected",
+            "message": "Connected to Crypto Scalping Scanner"
+        })
+        
+        # Keep connection alive
+        while True:
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                # Echo back or handle commands
+                await websocket.send_json({"type": "pong"})
+            except asyncio.TimeoutError:
+                # Send ping
+                await websocket.send_json({"type": "ping"})
+    
+    except WebSocketDisconnect:
+        logger.info("WebSocket client disconnected")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+    finally:
+        if websocket in websocket_clients:
+            websocket_clients.remove(websocket)
+
+# REST API Endpoints
+
+@app.get("/")
+async def root():
+    return {
+        "app": "Crypto Scalping Scanner",
+        "status": "running",
+        "coins_tracked": len(TOP_10_COINS),
+        "active_signals": len(active_signals)
+    }
+
+@app.get("/api/coins")
+async def get_coins():
+    """Get list of tracked coins"""
+    return {"coins": TOP_10_COINS}
+
+@app.get("/api/signals")
+async def get_signals(limit: int = 50):
+    """Get recent signals"""
+    signals = await app.mongodb.signals.find().sort("timestamp", -1).limit(limit).to_list(limit)
+    
+    # Convert ObjectId to string
+    for signal in signals:
+        signal["_id"] = str(signal["_id"])
+    
+    return {"signals": signals}
+
+@app.get("/api/signals/{symbol}")
+async def get_symbol_signals(symbol: str, limit: int = 20):
+    """Get signals for a specific symbol"""
+    signals = await app.mongodb.signals.find({"symbol": symbol}).sort("timestamp", -1).limit(limit).to_list(limit)
+    
+    for signal in signals:
+        signal["_id"] = str(signal["_id"])
+    
+    return {"symbol": symbol, "signals": signals}
+
+@app.get("/api/performance")
+async def get_performance():
+    """Get performance stats for all coins"""
+    performance = await app.mongodb.performance.find().to_list(100)
+    
+    for perf in performance:
+        perf["_id"] = str(perf["_id"])
+    
+    # Sort by total signals
+    performance.sort(key=lambda x: x.get("total_signals", 0), reverse=True)
+    
+    return {"performance": performance}
+
+@app.get("/api/performance/{symbol}")
+async def get_symbol_performance(symbol: str):
+    """Get performance for a specific symbol"""
+    perf = await app.mongodb.performance.find_one({"symbol": symbol})
+    
+    if not perf:
+        raise HTTPException(status_code=404, detail="Symbol not found")
+    
+    perf["_id"] = str(perf["_id"])
+    return perf
+
+@app.post("/api/telegram/test")
+async def test_telegram():
+    """Test Telegram bot connection"""
+    if not telegram.bot:
+        raise HTTPException(status_code=400, detail="Telegram not configured")
+    
+    result = await telegram.send_test_message()
+    
+    if result:
+        return {"status": "success", "message": "Test message sent"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to send test message")
+
+@app.get("/api/session/status")
+async def get_session_status():
+    """Get current trading session status"""
+    is_active = scanner.is_trading_session()
+    now = datetime.now(timezone.utc)
+    
+    return {
+        "is_active": is_active,
+        "current_time_utc": now.isoformat(),
+        "sessions": {
+            "london": "09:00-12:00 CET",
+            "us": "15:30-18:30 CET"
+        }
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)

@@ -1,0 +1,160 @@
+.performance-analytics {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  overflow-y: auto;
+}
+
+.analytics-header h3 {
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  color: #FFFFFF;
+  margin-bottom: 4px;
+}
+
+.analytics-subtitle {
+  font-size: 11px;
+  color: #5C6070;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+
+.analytics-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.section-title {
+  font-size: 11px;
+  color: #5C6070;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 700;
+}
+
+.stats-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.stat-card {
+  background: #1A1C23;
+  border: 1px solid #2A2D3A;
+  padding: 12px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.stat-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stat-content {
+  flex: 1;
+}
+
+.stat-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #FFFFFF;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+
+.stat-label {
+  font-size: 11px;
+  color: #5C6070;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.top-coins-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.top-coin-item {
+  background: #1A1C23;
+  border: 1px solid #2A2D3A;
+  padding: 12px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.coin-rank {
+  font-size: 16px;
+  font-weight: 900;
+  color: #5C6070;
+  font-family: 'JetBrains Mono', monospace;
+  min-width: 24px;
+}
+
+.coin-info {
+  flex: 1;
+}
+
+.coin-info .coin-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #FFFFFF;
+  margin-bottom: 4px;
+}
+
+.coin-signals {
+  font-size: 11px;
+  display: flex;
+  gap: 4px;
+}
+
+.coin-crv {
+  text-align: right;
+}
+
+.crv-label {
+  font-size: 9px;
+  color: #5C6070;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.crv-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: #00FF66;
+}
+
+.recent-signals-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.recent-signal-item {
+  background: #1A1C23;
+  border: 1px solid #2A2D3A;
+  padding: 10px 12px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.no-data {
+  padding: 20px;
+  text-align: center;
+  color: #5C6070;
+  font-size: 12px;
+}
