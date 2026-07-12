@@ -48,9 +48,7 @@ const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions
           </span>
         </div>
         <div className="session-times">
-          {is24_7 ? (
-            <span className="text-warning" style={{fontWeight: 600}}>⚡ 24/7 MODUS AKTIV</span>
-          ) : enabledSessions.length === 0 ? (
+          {is24_7 ? null : enabledSessions.length === 0 ? (
             <span className="text-muted">Keine aktiven Sessions</span>
           ) : (
             enabledSessions.map((s, i) => (

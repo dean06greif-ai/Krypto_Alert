@@ -94,3 +94,42 @@
   gap: 4px;
   font-size: 11px;
 }
+
+.coin-group {
+  margin-bottom: 8px;
+}
+.coin-group-title {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--text-muted, #7a8290);
+  text-transform: uppercase;
+  padding: 10px 14px 6px;
+  font-weight: 700;
+  opacity: 0.85;
+}
+
+.coin-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.notify-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 6px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.notify-toggle.notify-on {
+  color: #00FF66;
+}
+.notify-toggle.notify-off {
+  color: #5C6070;
+}
+.notify-toggle:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
