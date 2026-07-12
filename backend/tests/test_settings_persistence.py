@@ -166,16 +166,60 @@ class TestSettingsPersistence:
         assert data["is_active"] is True
         assert data["current_session"] == "AlwaysOn"
 
+    # ---- Multi-Strategy: active_strategy switching ----
+    def test_10_get_settings_has_active_strategy_default(self):
+        data = _get_settings()
+        assert "active_strategy" in data
+        # Default must be scalping (user requirement - do not change scalping)
+        # Any prior test setup may have changed it, so we just assert it's a valid known strategy.
+        strategies = requests.get(
+            f"{BASE_URL}/api/strategies", timeout=TIMEOUT
+        ).json()["strategies"]
+        ids = [s["id"] for s in strategies]
+        assert data["active_strategy"] in ids
+
+    def test_11_switch_active_strategy_to_rsi_only(self):
+        _post_settings({"active_strategy": "rsi_only"})
+        got = _get_settings()
+        assert got["active_strategy"] == "rsi_only", got
+        strategies = requests.get(
+            f"{BASE_URL}/api/strategies", timeout=TIMEOUT
+        ).json()
+        assert strategies["active"] == "rsi_only", strategies
+
+    def test_12_switch_active_strategy_back_to_scalping(self):
+        _post_settings({"active_strategy": "scalping_4_rules"})
+        got = _get_settings()
+        assert got["active_strategy"] == "scalping_4_rules", got
+        strategies = requests.get(
+            f"{BASE_URL}/api/strategies", timeout=TIMEOUT
+        ).json()
+        assert strategies["active"] == "scalping_4_rules", strategies
+
+    def test_13_partial_update_preserves_active_strategy(self):
+        _post_settings({"active_strategy": "rsi_only"})
+        # Now push an unrelated field
+        _post_settings({"pre_signal_enabled": True})
+        got = _get_settings()
+        assert got["active_strategy"] == "rsi_only", (
+            f"active_strategy should survive partial update: {got}"
+        )
+
     # ---- Persistence across backend restart ----
-    def test_10_settings_survive_backend_restart(self):
+    def test_14_settings_survive_backend_restart(self):
         marker_sessions = [
             {"start": "07:15", "end": "09:45", "name": "TEST_Marker_A", "enabled": True},
             {"start": "20:00", "end": "22:30", "name": "TEST_Marker_B", "enabled": False},
         ]
-        _post_settings({"custom_sessions": marker_sessions, "pre_signal_enabled": False})
+        _post_settings({
+            "custom_sessions": marker_sessions,
+            "pre_signal_enabled": False,
+            "active_strategy": "rsi_only",
+        })
         before = _get_settings()
         assert before["custom_sessions"] == marker_sessions
         assert before["pre_signal_enabled"] is False
+        assert before["active_strategy"] == "rsi_only"
 
         result = subprocess.run(
             ["sudo", "supervisorctl", "restart", "backend"],
@@ -191,3 +235,23 @@ class TestSettingsPersistence:
         assert after["pre_signal_enabled"] is False, (
             f"pre_signal_enabled lost after restart: {after}"
         )
+        assert after["active_strategy"] == "rsi_only", (
+            f"active_strategy lost after restart: {after}"
+        )
+
+        # Confirm /api/strategies also reflects the persisted active strategy
+        strategies = requests.get(
+            f"{BASE_URL}/api/strategies", timeout=TIMEOUT
+        ).json()
+        assert strategies["active"] == "rsi_only"
+
+    # ---- Telegram keepalive: POST /api/telegram/test still works ----
+    def test_15_telegram_test_endpoint(self):
+        r = requests.post(f"{BASE_URL}/api/telegram/test", timeout=30)
+        # If telegram is not configured, backend returns 400. In this env it IS
+        # configured (env vars set), so we expect 200 + status=success.
+        assert r.status_code == 200, (
+            f"Expected 200 from /api/telegram/test, got {r.status_code}: {r.text}"
+        )
+        body = r.json()
+        assert body.get("status") == "success", body
