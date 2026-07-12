@@ -220,6 +220,16 @@ async def root():
         "active_signals": len(active_signals)
     }
 
+@app.get("/api/health")
+async def health_check():
+    """Lightweight health check endpoint for keepalive pings"""
+    return {
+        "status": "alive",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "websocket_clients": len(websocket_clients),
+        "session_active": scanner.is_trading_session()
+    }
+
 @app.get("/api/coins")
 async def get_coins():
     """Get list of tracked coins"""
