@@ -101,3 +101,22 @@ BITUNIX_SECRET_KEY="9ee6fd2bb3c31af3a5ea092df4307a8a"
 - `GET /api/session/status` - Trading Session Status
 - `POST /api/telegram/test` - Test Telegram Connection
 - `WS /ws` - Real-time WebSocket Updates
+
+## Update (Session: Bug Fix – no signals / empty middle)
+ROOT CAUSE FIXED: bitunix_client parsed wrong WS format (data['k']/'t' do not exist).
+Real format: {ch,symbol,ts,data:{o,h,l,c,b,q}}. => no candle ever processed => never a signal.
+
+Changes:
+- Rewrote WS parsing to real Bitunix format; SINGLE ws connection (was 10 => HTTP 429) + backoff.
+- Added REST historical bootstrap (fetch_historical_klines) so indicators work immediately.
+- add_candle now aggregates snapshots into distinct 1-min candles; strategy evaluated on candle CLOSE (max 1/min/coin => low DB writes).
+- MATICUSDT -> POLUSDT (delisted/renamed).
+- Signals get a UUID 'id'; insert a copy to avoid ObjectId leaking into WS broadcast.
+- Added GET /api/debug/status (data_feed connection + per-coin RSI/candles) for observability.
+- Default trading mode set to 24/7 (empty custom_sessions). Adjustable in Settings.
+- Telegram alerts (SIGNAL + PRE_SIGNAL) verified working with user's bot token/chat id.
+
+KNOWN EXTERNAL ISSUE: Bitunix uses Cloudflare WAF that blocks datacenter IPs (HTTP 403 "Just a moment").
+This test env IP got blocked after an initial burst, so LIVE signals can't be verified here.
+Pipeline verified OFFLINE (/tmp/pipeline_test.py). On deploy, check /api/debug/status: if connected=false/403,
+a residential proxy (or Bitunix IP whitelist / support) is required for the data feed.
