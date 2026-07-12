@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { createChart } from 'lightweight-charts';
+import { createChart, CandlestickSeries, LineSeries } from 'lightweight-charts';
 import './MainChart.css';
 
 const MainChart = ({ symbol, candleData }) => {
@@ -48,7 +48,7 @@ const MainChart = ({ symbol, candleData }) => {
     chartRef.current = chart;
 
     // Add candlestick series (Heikin Ashi will be calculated server-side)
-    const candlestickSeries = chart.addCandlestickSeries({
+    const candlestickSeries = chart.addSeries(CandlestickSeries, {
       upColor: '#00FF66',
       downColor: '#FF3366',
       borderUpColor: '#00FF66',
@@ -60,7 +60,7 @@ const MainChart = ({ symbol, candleData }) => {
     candlestickSeriesRef.current = candlestickSeries;
 
     // Add EMA 9 line
-    const ema9Series = chart.addLineSeries({
+    const ema9Series = chart.addSeries(LineSeries, {
       color: '#FFD700',
       lineWidth: 2,
       title: 'EMA 9',
@@ -69,7 +69,7 @@ const MainChart = ({ symbol, candleData }) => {
     ema9SeriesRef.current = ema9Series;
 
     // Add EMA 50 line
-    const ema50Series = chart.addLineSeries({
+    const ema50Series = chart.addSeries(LineSeries, {
       color: '#00A8FF',
       lineWidth: 2,
       title: 'EMA 50',
