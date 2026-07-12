@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import os
 import logging
 import asyncio
+import uuid
 from typing import List, Dict
 from datetime import datetime, timezone
 import json
@@ -14,6 +15,7 @@ import json
 load_dotenv()
 
 from services.bitunix_client import BitunixWebSocketClient
+from services.market_data import MarketDataFeed
 from services.strategy_scanner import StrategyScanner
 from services.telegram_bot import TelegramNotifier
 from strategies.registry import registry as strategy_registry
@@ -26,15 +28,29 @@ logger = logging.getLogger(__name__)
 # Top 10 coins to track
 TOP_10_COINS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "MATICUSDT"
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "POLUSDT"
 ]
+
+# "Other" instruments (commodities/metals) via Yahoo Finance - free 1m data
+OTHER_INSTRUMENTS = [
+    {"symbol": "GOLD", "yahoo": "GC=F", "name": "Gold"},
+    {"symbol": "SILVER", "yahoo": "SI=F", "name": "Silver"},
+    {"symbol": "OIL", "yahoo": "CL=F", "name": "Oil"},
+]
+OTHER_YAHOO = {i["symbol"]: i["yahoo"] for i in OTHER_INSTRUMENTS}
+ALL_SYMBOLS = TOP_10_COINS + [i["symbol"] for i in OTHER_INSTRUMENTS]
 
 # Global state
 scanner = StrategyScanner()
 telegram = TelegramNotifier()
 bitunix_client = BitunixWebSocketClient()
+feed = MarketDataFeed()
 active_signals = []
 websocket_clients = []
+
+# How often to poll the market data source (seconds)
+POLL_INTERVAL = 12
+scanner_running = asyncio.Event()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -60,18 +76,45 @@ async def lifespan(app: FastAPI):
         })
         logger.info("Initialized default settings in MongoDB")
     
-    # Start Bitunix WebSocket connections
-    asyncio.create_task(start_bitunix_scanner())
-    
+    # Select a reachable market data source (Bitunix -> Binance -> OKX)
+    logger.info("Probing market data sources...")
+    await feed.probe("BTCUSDT")
+
+    # Bootstrap historical candles so indicators work immediately
+    logger.info(f"Bootstrapping historical candles from '{feed.active_source}'...")
+    for symbol in TOP_10_COINS:
+        try:
+            hist = await feed.fetch(symbol, 200)
+            # last candle is the forming minute -> keep only closed candles
+            closed = hist[:-1] if len(hist) > 1 else hist
+            scanner.bootstrap(symbol, closed)
+        except Exception as e:
+            logger.error(f"Bootstrap failed for {symbol}: {e}")
+        await asyncio.sleep(0.2)  # gentle pacing
+
+    # Bootstrap "Other" instruments (Gold/Silver/Oil) via Yahoo (range=5d for history)
+    for inst in OTHER_INSTRUMENTS:
+        try:
+            hist = await feed.fetch_commodity(inst["yahoo"], "5d")
+            closed = hist[:-1] if len(hist) > 1 else hist
+            scanner.bootstrap(inst["symbol"], closed[-200:])
+        except Exception as e:
+            logger.error(f"Bootstrap failed for {inst['symbol']}: {e}")
+        await asyncio.sleep(0.2)
+
+    # Start polling scanner
+    asyncio.create_task(start_scanner())
+
     # Send test telegram message
     if telegram.bot:
         await telegram.send_test_message()
-    
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down...")
-    await bitunix_client.stop()
+    scanner_running.clear()
+    await feed.close()
     app.mongodb_client.close()
 
 app = FastAPI(title="Crypto Scalping Scanner", lifespan=lifespan)
@@ -85,39 +128,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-async def start_bitunix_scanner():
-    """Start WebSocket scanner for all coins"""
-    logger.info(f"Starting scanner for {len(TOP_10_COINS)} coins")
-    
-    async def handle_candle_update(symbol: str, candle: Dict):
-        """Handle new candle data"""
-        # Add to scanner
-        scanner.add_candle(symbol, candle)
-        
-        # Check for signal
-        signal = scanner.check_signal(symbol)
-        
-        if signal:
-            # Store in MongoDB
-            await app.mongodb.signals.insert_one(signal)
-            active_signals.append(signal)
-            
-            # Send Telegram notification
-            await telegram.send_signal(signal)
-            
-            # Update coin performance
-            await update_coin_performance(symbol, signal)
-            
-            # Notify connected WebSocket clients
-            await broadcast_signal(signal)
-            
-            logger.info(f"New signal: {signal['type']} for {symbol}")
-        
-        # Broadcast candle update to WebSocket clients
-        await broadcast_candle(symbol, candle)
-    
-    # Start connections
-    await bitunix_client.start(TOP_10_COINS, handle_candle_update)
+async def process_signal(symbol: str, signal: Dict):
+    """Persist + notify for a new signal."""
+    signal["id"] = str(uuid.uuid4())
+    notify = scanner.is_notify_enabled(symbol)
+    signal["notify"] = notify
+    await app.mongodb.signals.insert_one(dict(signal))  # insert a copy (keeps ObjectId out of broadcast)
+    active_signals.append(signal)
+    if notify:
+        await telegram.send_signal(signal)
+    await update_coin_performance(symbol, signal)
+    await broadcast_signal(signal)
+    logger.info(f"New signal: {signal['type']} for {symbol} ({signal.get('signal_class')}) notify={notify}")
+
+
+async def start_scanner():
+    """
+    Poll the active market data source (Bitunix -> Binance -> OKX) for all coins.
+    Evaluates the strategy once per newly CLOSED 1-minute candle (max 1/min/coin).
+    """
+    logger.info(f"Starting polling scanner for {len(TOP_10_COINS)} coins (every {POLL_INTERVAL}s)")
+    scanner_running.set()
+
+    while scanner_running.is_set():
+        for symbol in ALL_SYMBOLS:
+            if not scanner_running.is_set():
+                break
+            try:
+                if symbol in OTHER_YAHOO:
+                    klines = await feed.fetch_commodity(OTHER_YAHOO[symbol], "1d")
+                else:
+                    klines = await feed.fetch(symbol, 5)
+                if len(klines) < 2:
+                    continue
+
+                closed_candles = klines[:-1]   # last one is still forming
+                forming = klines[-1]
+
+                # Feed any newly closed candles; evaluate strategy on each new close
+                for candle in closed_candles[-3:]:
+                    if scanner.add_closed_candle(symbol, candle):
+                        signal = scanner.check_signal(symbol)
+                        if signal:
+                            await process_signal(symbol, signal)
+
+                # Track forming candle + push live price to chart clients
+                scanner.forming[symbol] = forming
+                await broadcast_candle(symbol, forming)
+
+            except Exception as e:
+                logger.error(f"Scan error for {symbol}: {e}")
+
+            await asyncio.sleep(0.1)  # small gap between instruments
+
+        await asyncio.sleep(POLL_INTERVAL)
 
 async def update_coin_performance(symbol: str, signal: Dict):
     """Update performance stats for a coin"""
@@ -245,10 +309,64 @@ async def health_check():
         "session_active": scanner.is_trading_session()
     }
 
+@app.get("/api/debug/status")
+async def debug_status():
+    """
+    Diagnostic endpoint: shows whether live market data is flowing from Bitunix
+    and the current indicator state per coin. Use this to verify data feed health
+    (e.g. on your production host) without needing a signal.
+    """
+    return {
+        "data_feed": feed.status,
+        "session_active": scanner.is_trading_session(),
+        "current_session": scanner.get_current_session(),
+        "active_strategy": scanner.settings.get("active_strategy"),
+        "coins": [scanner.debug_snapshot(s) for s in ALL_SYMBOLS],
+    }
+
+def _build_source_zip() -> str:
+    """Zip the project source (excluding secrets and heavy/generated dirs)."""
+    import zipfile
+    root = "/app"
+    zip_path = "/tmp/krypto_alert_source.zip"
+    exclude_dirs = {".git", ".emergent", "node_modules", "__pycache__",
+                    "build", "venv", ".venv", "test_reports", ".pytest_cache"}
+    exclude_files = {".env"}
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for base, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            for f in files:
+                if f in exclude_files or f.endswith((".pyc", ".zip", ".log")):
+                    continue
+                full = os.path.join(base, f)
+                arc = os.path.relpath(full, root)
+                try:
+                    zf.write(full, arcname=os.path.join("Krypto_Alert", arc))
+                except OSError:
+                    pass
+    return zip_path
+
+
+@app.get("/api/download-source")
+async def download_source():
+    """Download the full project source as a ZIP (no .env/secrets, no node_modules)."""
+    from fastapi.responses import FileResponse
+    path = _build_source_zip()
+    return FileResponse(path, media_type="application/zip", filename="Krypto_Alert.zip")
+
+
 @app.get("/api/coins")
 async def get_coins():
-    """Get list of tracked coins"""
-    return {"coins": TOP_10_COINS}
+    """Get list of tracked instruments, grouped."""
+    return {
+        "coins": TOP_10_COINS,
+        "groups": [
+            {"name": "TOP 10 COINS", "symbols": TOP_10_COINS},
+            {"name": "OTHER", "symbols": [
+                {"symbol": i["symbol"], "name": i["name"]} for i in OTHER_INSTRUMENTS
+            ]},
+        ],
+    }
 
 @app.get("/api/signals")
 async def get_signals(limit: int = 50):
