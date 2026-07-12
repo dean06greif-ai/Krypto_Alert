@@ -1,0 +1,48 @@
+{
+  "summary": "Backend-only regression + feature tests for the settings persistence bug fix and the new custom_sessions feature. 26/26 pytest tests pass (10 new settings tests + 16 pre-existing health/coins/root/session tests). Verified: GET/POST /api/settings, MongoDB persistence across `supervisorctl restart backend`, empty custom_sessions => 24/7 mode, partial updates preserve untouched fields, unknown fields are silently dropped, /api/session/status derives current_session correctly. Also updated the pre-existing TestSessionStatusEndpoint to match the new response schema (custom_sessions list instead of the old sessions dict with london/us keys).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/settings", "issue": "Silently drops unknown fields (no validation error). Acceptable behaviour but not documented; consider using a Pydantic model for stricter contract."},
+      {"endpoint": "GET /api/session/status", "issue": "Sessions are compared in 'German time' as UTC+1 with `(now.hour + 1) % 24` in strategy_scanner.py. This does NOT observe DST (CEST = UTC+2 in summer). During summer months the London/US window boundaries drift by 1h. Consider using zoneinfo('Europe/Berlin')."},
+      {"endpoint": "N/A - config", "issue": "pytest.ini uses `-n 2 --dist loadscope` which schedules by CLASS. If multiple classes in a file mutate the same singleton state they will race. Kept all settings-mutating tests inside a single class (TestSettingsPersistence) to work around this."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_settings_persistence.py",
+    "/app/backend/tests/test_health_endpoints.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: switch update_settings to a Pydantic model to reject unknown fields with a 422 instead of silently dropping.",
+    "OPTIONAL: replace the manual `(now.hour + 1) % 24` UTC->local conversion in strategy_scanner.py with zoneinfo('Europe/Berlin') to handle DST correctly.",
+    "OPTIONAL: extract `broadcast_signal`/`broadcast_candle` into a single `_broadcast(message)` helper (DRY - carried over from previous review)."
+  ],
+  "critical_code_review_comments": [
+    "strategy_scanner.update_settings silently ignores keys not present in DEFAULT_SETTINGS. This is a good guard against arbitrary field injection but is undocumented and untested at the API layer. A malformed frontend payload will just be a no-op - hard to debug. Prefer explicit 422 via Pydantic.",
+    "session/status uses `(datetime.utcnow().hour + 1) % 24` to compute German time. This is DST-naive: correct in winter (UTC+1) but off by 1h in summer (UTC+2). Users' London 09:00-12:00 window will actually run 08:00-11:00 local time in summer.",
+    "server.py lifespan `insert_one` on empty settings collection: if the app is booted concurrently by multiple workers (e.g., gunicorn -w 4), this will race and one worker will crash on duplicate _id. Use `update_one({..., upsert=True})` for idempotency instead.",
+    "settings singleton (`scanner` at module level) means partial POSTs correctly preserve fields (verified in test_05) BECAUSE update_settings iterates on incoming keys only, not because of merge logic in MongoDB. The MongoDB `$set: scanner.settings` write always writes the full dict - which is fine.",
+    "POST /api/settings does not have a Pydantic response_model; response is untyped Dict."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_settings_persistence.py (new - 10 tests)",
+    "/app/backend/tests/test_health_endpoints.py (updated TestSessionStatusEndpoint to new schema)",
+    "/app/test_reports/pytest/pytest_results.xml (regenerated)"
+  ],
+  "success_rate": {
+    "backend": "100% (26/26)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "test_credentials": "N/A - endpoints are public",
+  "seed_data_creation": "Tests snapshot the original settings in setup_class and POST them back in teardown_class so the backend is left in its pre-test state. No lingering test data.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Test file /app/backend/tests/test_settings_persistence.py covers the full settings-persistence + custom_sessions contract, including a real `sudo supervisorctl restart backend` mid-test. All mutating tests are inside a single class TestSettingsPersistence so pytest-xdist loadscope pins them to one worker (parallel classes race on the shared singleton scanner state - do NOT split this class). Original settings are captured in setup_class and restored in teardown_class. External URL from /app/frontend/.env: https://market-alert-pro-2.preview.emergentagent.com. Run with: `python -m pytest backend/tests/ -v` (default pytest.ini already applies -n 2 --dist loadscope).",
+  "rca_of_the_issue": "Original bug: SettingsPanel 24/7 toggle didn't persist because scanner.settings was module-level in-memory only. Fix verified: /app/backend/server.py lifespan (lines 48-60) now loads scanner.settings from MongoDB collection `settings` doc `_id=scanner_settings` on startup, and POST /api/settings (lines 329-341) upserts to the same doc. Restart test (test_10_settings_survive_backend_restart) confirms: POST marker sessions -> supervisorctl restart backend -> GET returns the same marker sessions. The 24/7 toggle was also replaced with a custom_sessions array; empty array -> is_trading_session() returns True (24/7 mode) - verified in tests 03 and 08."
+}

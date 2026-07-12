@@ -140,10 +140,11 @@ class TestSessionStatusEndpoint:
         assert "is_active" in data
         assert isinstance(data["is_active"], bool)
         assert "current_time_utc" in data
-        assert "sessions" in data
-        assert isinstance(data["sessions"], dict)
-        assert "london" in data["sessions"]
-        assert "us" in data["sessions"]
+        # New schema: custom_sessions (list) instead of sessions (dict)
+        assert "custom_sessions" in data
+        assert isinstance(data["custom_sessions"], list)
+        assert "current_session" in data
+        assert "pre_signal_enabled" in data
 
     def test_session_current_time_iso(self):
         r = requests.get(f"{BASE_URL}/api/session/status", timeout=TIMEOUT)
