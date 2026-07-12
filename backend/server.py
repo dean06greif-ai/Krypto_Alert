@@ -2,12 +2,16 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 import os
 import logging
 import asyncio
 from typing import List, Dict
 from datetime import datetime, timezone
 import json
+
+# Load environment variables FIRST
+load_dotenv()
 
 from services.bitunix_client import BitunixWebSocketClient
 from services.strategy_scanner import StrategyScanner
