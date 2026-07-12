@@ -45,6 +45,20 @@ async def lifespan(app: FastAPI):
     app.mongodb = app.mongodb_client[os.getenv("DB_NAME", "crypto_scanner")]
     logger.info("Connected to MongoDB")
     
+    # Load persisted settings from MongoDB
+    saved_settings = await app.mongodb.settings.find_one({"_id": "scanner_settings"})
+    if saved_settings:
+        saved_settings.pop("_id", None)
+        scanner.update_settings(saved_settings)
+        logger.info(f"Loaded settings from MongoDB: {scanner.settings}")
+    else:
+        # Save defaults to MongoDB
+        await app.mongodb.settings.insert_one({
+            "_id": "scanner_settings",
+            **scanner.settings
+        })
+        logger.info("Initialized default settings in MongoDB")
+    
     # Start Bitunix WebSocket connections
     asyncio.create_task(start_bitunix_scanner())
     
@@ -302,13 +316,9 @@ async def get_session_status():
     return {
         "is_active": is_active,
         "current_session": scanner.get_current_session(),
-        "test_mode_24_7": scanner.settings.get("test_mode_24_7", False),
+        "custom_sessions": scanner.settings.get("custom_sessions", []),
         "pre_signal_enabled": scanner.settings.get("pre_signal_enabled", True),
         "current_time_utc": now.isoformat(),
-        "sessions": {
-            "london": "09:00-12:00 CET",
-            "us": "15:30-18:30 CET"
-        }
     }
 
 @app.get("/api/settings")
@@ -318,8 +328,16 @@ async def get_settings():
 
 @app.post("/api/settings")
 async def update_settings(settings: Dict):
-    """Update scanner settings (test mode, pre-signals, etc)"""
+    """Update scanner settings (custom sessions, pre-signals, etc)"""
     scanner.update_settings(settings)
+    
+    # Persist to MongoDB
+    await app.mongodb.settings.update_one(
+        {"_id": "scanner_settings"},
+        {"$set": scanner.settings},
+        upsert=True
+    )
+    
     return {"status": "success", "settings": scanner.settings}
 
 @app.get("/api/analytics/time-based/{symbol}")

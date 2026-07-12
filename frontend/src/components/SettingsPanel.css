@@ -304,3 +304,172 @@
 .info-text strong {
   color: #FFFFFF;
 }
+
+/* Session Editor */
+.session-mode-info {
+  margin-bottom: 16px;
+}
+
+.mode-badge {
+  padding: 12px 16px;
+  background: #1A1C23;
+  border: 1px solid #2A2D3A;
+  font-size: 13px;
+  color: #A1A4B0;
+  text-align: center;
+  font-weight: 600;
+}
+
+.mode-badge-active {
+  color: #00FF66;
+  border-color: #00FF66;
+  background: rgba(0, 255, 102, 0.05);
+}
+
+.sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.session-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: #1A1C23;
+  border: 1px solid #2A2D3A;
+}
+
+.session-name {
+  flex: 1;
+  background: #0A0A0A;
+  border: 1px solid #2A2D3A;
+  color: #FFFFFF;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: 'Manrope', sans-serif;
+  min-width: 100px;
+}
+
+.session-name:focus {
+  outline: none;
+  border-color: #00FF66;
+}
+
+.session-times {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.time-input {
+  background: #0A0A0A;
+  border: 1px solid #2A2D3A;
+  color: #FFFFFF;
+  padding: 8px;
+  font-size: 13px;
+  font-family: 'JetBrains Mono', monospace;
+  width: 100px;
+}
+
+.time-input:focus {
+  outline: none;
+  border-color: #00FF66;
+}
+
+.time-input::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  opacity: 0.5;
+  cursor: pointer;
+}
+
+.btn-icon-remove {
+  background: transparent;
+  border: 1px solid #2A2D3A;
+  color: #A1A4B0;
+  padding: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon-remove:hover {
+  color: #FF3366;
+  border-color: #FF3366;
+}
+
+.session-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.btn-add-session {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-color: #00FF66;
+  color: #00FF66;
+}
+
+.btn-add-session:hover {
+  background: rgba(0, 255, 102, 0.1);
+}
+
+.btn-24-7 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-color: #FFD700;
+  color: #FFD700;
+}
+
+.btn-24-7:hover {
+  background: rgba(255, 215, 0, 0.1);
+}
+
+.info-hint {
+  padding: 12px;
+  background: rgba(255, 215, 0, 0.05);
+  border: 1px solid rgba(255, 215, 0, 0.2);
+  font-size: 12px;
+  color: #A1A4B0;
+  line-height: 1.6;
+}
+
+.info-hint strong {
+  color: #FFD700;
+}
+
+.switch-small {
+  width: 40px;
+  height: 22px;
+}
+
+.switch-small .slider:before {
+  height: 14px;
+  width: 14px;
+  left: 3px;
+  bottom: 3px;
+}
+
+.switch-small input:checked + .slider:before {
+  transform: translateX(18px);
+}
+
+@media (max-width: 640px) {
+  .session-item {
+    flex-wrap: wrap;
+  }
+  
+  .session-times {
+    width: 100%;
+    justify-content: center;
+    margin-top: 8px;
+  }
+}
