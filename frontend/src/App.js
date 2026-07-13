@@ -12,7 +12,9 @@ import SettingsPanel from './components/SettingsPanel';
 import StrategyBuilder from './components/StrategyBuilder';
 import AutoTradeModal from './components/AutoTradeModal';
 import ErrorBoundary from './components/ErrorBoundary';
+import AdminLogin from './components/AdminLogin';
 import { Toaster, toast } from 'sonner';
+import { isAdmin as isAdminFn, clearToken, authHeaders } from './auth';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
@@ -37,6 +39,8 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showBuilder, setShowBuilder] = useState(false);
   const [autoTradeSymbol, setAutoTradeSymbol] = useState(null);
+  const [adminAuthed, setAdminAuthed] = useState(isAdminFn());
+  const [showLogin, setShowLogin] = useState(false);
 
   const wsRef = useRef(null);
   const audioRef = useRef(null);
@@ -157,12 +161,22 @@ function App() {
     return () => clearInterval(iv);
   }, [showSettings]);
 
+  // ---- admin gate ----
+  const requireAdmin = (action) => {
+    if (isAdminFn()) { action(); }
+    else { setShowLogin(true); toast.info('Admin-Login erforderlich'); }
+  };
+  const handleAdminClick = () => {
+    if (adminAuthed) { clearToken(); setAdminAuthed(false); toast.success('Admin abgemeldet'); }
+    else { setShowLogin(true); }
+  };
+
   // ---- actions ----
   const toggleNotification = async (symbol) => {
     const current = notifications[symbol] !== false;
     const updated = { ...notifications, [symbol]: !current };
     setNotifications(updated);
-    await fetch(`${API_URL}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notifications: updated }) });
+    await fetch(`${API_URL}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ notifications: updated }) });
     toast.success(`${symbol.replace('USDT','')}: Alerts ${!current ? 'AN' : 'AUS'}`);
   };
 
@@ -170,7 +184,7 @@ function App() {
     const current = signalsEnabled[strategyId] !== false;
     const updated = { ...signalsEnabled, [strategyId]: !current };
     setSignalsEnabled(updated);
-    await fetch(`${API_URL}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ strategy_signals_enabled: updated }) });
+    await fetch(`${API_URL}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ strategy_signals_enabled: updated }) });
     toast.success(`Signale ${!current ? 'AN' : 'AUS'}`);
   };
 
@@ -189,7 +203,9 @@ function App() {
         customSessions={customSessions}
         activeStrategy={strategyMeta}
         berlinTime={berlinTime}
-        onSettingsClick={() => setShowSettings(true)}
+        isAdmin={adminAuthed}
+        onAdminClick={handleAdminClick}
+        onSettingsClick={() => requireAdmin(() => setShowSettings(true))}
       />
 
       <div className="app-layout">

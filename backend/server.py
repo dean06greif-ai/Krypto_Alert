@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from contextlib import asynccontextmanager
@@ -7,8 +7,9 @@ import os
 import logging
 import asyncio
 import uuid
+import jwt
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict
-from datetime import datetime, timezone
 
 load_dotenv()
 
@@ -113,6 +114,47 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Crypto Scalping Scanner", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
+
+
+# ---------------- admin auth (protects WRITE actions; GET + health stay public) ----------------
+JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
+ADMIN_USER = os.getenv("ADMIN_USER", "Admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin")
+
+
+def create_admin_token() -> str:
+    payload = {"sub": "admin", "exp": datetime.now(timezone.utc) + timedelta(days=30)}
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+async def require_admin(request: Request):
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:] if auth.startswith("Bearer ") else None
+    if not token:
+        raise HTTPException(status_code=401, detail="Admin-Login erforderlich")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        if payload.get("sub") != "admin":
+            raise HTTPException(status_code=401, detail="Ungültiges Token")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token abgelaufen")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Ungültiges Token")
+    return True
+
+
+@app.post("/api/auth/login")
+async def admin_login(body: Dict):
+    user = (body.get("username") or "").strip()
+    pw = body.get("password") or ""
+    if pw == ADMIN_PASSWORD and (not ADMIN_USER or user == ADMIN_USER or not user):
+        return {"token": create_admin_token(), "user": ADMIN_USER}
+    raise HTTPException(status_code=401, detail="Falsche Zugangsdaten")
+
+
+@app.get("/api/auth/verify")
+async def admin_verify(_: bool = Depends(require_admin)):
+    return {"valid": True}
 
 
 # ---------------- signal processing ----------------
@@ -435,7 +477,7 @@ async def get_settings():
 
 
 @app.post("/api/settings")
-async def update_settings(settings: Dict):
+async def update_settings(settings: Dict, _: bool = Depends(require_admin)):
     scanner.update_settings(settings)
     await app.mongodb.settings.update_one({"_id": "scanner_settings"},
                                           {"$set": scanner.settings}, upsert=True)
@@ -466,7 +508,7 @@ async def get_strategies():
 
 # ---- custom strategy CRUD ----
 @app.post("/api/strategies/custom")
-async def create_custom_strategy(definition: Dict):
+async def create_custom_strategy(definition: Dict, _: bool = Depends(require_admin)):
     sid = definition.get("id") or f"custom_{uuid.uuid4().hex[:8]}"
     definition["id"] = sid
     definition.setdefault("timeframe", "1m")
@@ -482,7 +524,7 @@ async def create_custom_strategy(definition: Dict):
 
 
 @app.delete("/api/strategies/custom/{strategy_id}")
-async def delete_custom_strategy(strategy_id: str):
+async def delete_custom_strategy(strategy_id: str, _: bool = Depends(require_admin)):
     await app.mongodb.custom_strategies.delete_one({"id": strategy_id})
     strategy_registry.remove_custom(strategy_id)
     enabled = [s for s in scanner.settings.get("enabled_strategies", []) if s != strategy_id]
@@ -505,7 +547,7 @@ async def get_autotrade_config():
 
 
 @app.post("/api/autotrade/config")
-async def set_autotrade_config(config: Dict):
+async def set_autotrade_config(config: Dict, _: bool = Depends(require_admin)):
     if "mode" not in config:
         config["mode"] = autotrader.config.get("mode", "paper")
     config.setdefault("coins", autotrader.config.get("coins", {}))
@@ -517,7 +559,7 @@ async def set_autotrade_config(config: Dict):
 
 
 @app.post("/api/autotrade/coin/{symbol}")
-async def set_coin_config(symbol: str, cfg: Dict):
+async def set_coin_config(symbol: str, cfg: Dict, _: bool = Depends(require_admin)):
     coins = dict(autotrader.config.get("coins", {}))
     merged = dict(DEFAULT_COIN_CFG)
     merged.update(coins.get(symbol, {}))
@@ -540,7 +582,7 @@ async def get_trades(status: str = None, limit: int = 50):
 
 
 @app.post("/api/autotrade/close/{trade_id}")
-async def close_trade(trade_id: str):
+async def close_trade(trade_id: str, _: bool = Depends(require_admin)):
     t = await app.mongodb.auto_trades.find_one({"id": trade_id})
     if not t:
         raise HTTPException(status_code=404, detail="Trade not found")
@@ -560,7 +602,7 @@ async def get_balance():
 
 
 @app.post("/api/telegram/test")
-async def test_telegram():
+async def test_telegram(_: bool = Depends(require_admin)):
     if not telegram.bot:
         raise HTTPException(status_code=400, detail="Telegram not configured")
     if await telegram.send_test_message():

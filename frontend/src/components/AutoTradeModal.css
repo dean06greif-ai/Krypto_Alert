@@ -24,10 +24,10 @@
 .at-warn.err { color: #FF3366; background: #FF336612; border-color: #FF336644; }
 
 .at-section { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 8px; }
-.at-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.at-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; min-width: 0; }
 .at-field.small { max-width: 240px; }
 .at-field label { font-size: 11px; color: #A1A4B0; text-transform: uppercase; letter-spacing: 0.4px; }
-.at-field input[type=number] { background: #0A0A0A; border: 1px solid #2A2D3A; border-radius: 8px; padding: 9px 11px; color: #fff; font-family: 'JetBrains Mono', monospace; }
+.at-field input[type=number] { width: 100%; box-sizing: border-box; background: #0A0A0A; border: 1px solid #2A2D3A; border-radius: 8px; padding: 9px 11px; color: #fff; font-family: 'JetBrains Mono', monospace; }
 .at-field input[type=number]:focus { outline: none; border-color: #00FF66; }
 .at-field input[type=range] { accent-color: #00FF66; }
 .at-possize { font-size: 12px; color: #A1A4B0; margin-bottom: 14px; }

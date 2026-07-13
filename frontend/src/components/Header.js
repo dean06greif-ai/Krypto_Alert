@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Clock, Gear, ChartLineUp } from '@phosphor-icons/react';
+import { Clock, Gear, ChartLineUp, Lock, LockOpen } from '@phosphor-icons/react';
 import './Header.css';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
-const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions, activeStrategy }) => {
+const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions, activeStrategy, isAdmin, onAdminClick }) => {
   const [currentTime, setCurrentTime] = useState(new Date());
 
   useEffect(() => {
@@ -62,6 +62,14 @@ const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions
       </div>
       
       <div className="header-right">
+        <button
+          className={`btn ${isAdmin ? 'btn-admin-on' : ''}`}
+          onClick={onAdminClick}
+          title={isAdmin ? 'Admin aktiv (klicken zum Abmelden)' : 'Admin-Login'}
+          data-testid="admin-button"
+        >
+          {isAdmin ? <LockOpen size={20} weight="bold" /> : <Lock size={20} weight="bold" />}
+        </button>
         <button className="btn" onClick={onSettingsClick} data-testid="settings-button">
           <Gear size={20} weight="bold" />
         </button>

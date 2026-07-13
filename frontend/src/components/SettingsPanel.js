@@ -5,7 +5,7 @@ import './SettingsPanel.css';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
-const SettingsPanel = ({ onClose }) => {
+const SettingsPanel = ({ onClose, focusStrategy }) => {
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [activeTab, setActiveTab] = useState('strategy'); // strategy, sessions, telegram
@@ -66,13 +66,6 @@ const SettingsPanel = ({ onClose }) => {
     } finally {
       setSaving(false);
     }
-  };
-
-  const changeStrategy = (strategyId) => {
-    setSettings({ ...settings, active_strategy: strategyId });
-    saveSettings({ active_strategy: strategyId });
-    const strategy = strategies.find(s => s.id === strategyId);
-    toast.success(`Aktiv: ${strategy?.name}`);
   };
 
   const updateStrategyParam = (strategyId, paramKey, value) => {
@@ -186,7 +179,9 @@ const SettingsPanel = ({ onClose }) => {
     }
   };
 
-  const activeStrategy = strategies.find(s => s.id === settings.active_strategy);
+  const activeStrategy = strategies.find(s => s.id === focusStrategy)
+    || strategies.find(s => s.id === settings.active_strategy)
+    || strategies[0];
   const is24_7 = settings.custom_sessions.length === 0;
 
   return (
@@ -231,62 +226,15 @@ const SettingsPanel = ({ onClose }) => {
           {/* STRATEGY TAB */}
           {activeTab === 'strategy' && (
             <>
-              {/* Strategy Cards */}
-              <div className="settings-section">
-                <div className="section-simple-header">
-                  <h3>Aktive Strategie wählen</h3>
-                  <div className="section-description">
-                    Klicke auf eine Strategie um sie zu aktivieren
-                  </div>
-                </div>
-
-                <div className="strategy-cards">
-                  {strategies.map(strategy => {
-                    const isActive = settings.active_strategy === strategy.id;
-                    return (
-                      <div
-                        key={strategy.id}
-                        className={`strategy-card ${isActive ? 'strategy-card-active' : ''}`}
-                        onClick={() => !isActive && changeStrategy(strategy.id)}
-                        data-testid={`strategy-card-${strategy.id}`}
-                      >
-                        <div className="strategy-card-header">
-                          <div className="strategy-card-title">
-                            {strategy.name}
-                          </div>
-                          {isActive && (
-                            <div className="strategy-active-badge">
-                              ✓ AKTIV
-                            </div>
-                          )}
-                        </div>
-                        <div className="strategy-card-desc">
-                          {strategy.description}
-                        </div>
-                        <div className="strategy-card-meta">
-                          <span className="strategy-tf-badge">{strategy.timeframe}</span>
-                          <span className="text-muted">
-                            {Object.keys(strategy.params || {}).length} Parameter
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Parameter Editor for active strategy */}
+              {/* Parameter Editor for the ACTIVE (selected tab) strategy only */}
               {activeStrategy && (
                 <div className="settings-section">
                   <div className="section-simple-header">
                     <h3>
                       <Sliders size={18} weight="bold" style={{marginRight: '8px', display: 'inline-block', verticalAlign: 'middle'}} />
-                      Parameter: {activeStrategy.name}
+                      {activeStrategy.name}
                     </h3>
-                    <div className="section-description">
-                      Passe die Werte an deine Strategie an - wird automatisch gespeichert
-                    </div>
-                    <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <span className="text-muted" style={{ fontSize: 12 }}>Gilt für:</span>
                       <select
                         value={paramCoin}
