@@ -14,10 +14,12 @@ const SettingsPanel = ({ onClose }) => {
     pre_signal_enabled: true,
     active_strategy: 'scalping_4_rules',
     strategy_params: {},
+    coin_params: {},
   });
   const [strategies, setStrategies] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [editingParams, setEditingParams] = useState({}); // Local params being edited
+  const [paramCoin, setParamCoin] = useState(''); // '' = Global, else per-coin override
+  const ALL_COINS = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","AVAXUSDT","DOTUSDT","POLUSDT","GOLD","SILVER","OIL"];
 
   useEffect(() => {
     Promise.all([
@@ -30,6 +32,7 @@ const SettingsPanel = ({ onClose }) => {
           pre_signal_enabled: settingsData.pre_signal_enabled !== false,
           active_strategy: settingsData.active_strategy || 'scalping_4_rules',
           strategy_params: settingsData.strategy_params || {},
+          coin_params: settingsData.coin_params || {},
         });
         setStrategies(strategiesData.strategies || []);
         setLoading(false);
@@ -54,6 +57,7 @@ const SettingsPanel = ({ onClose }) => {
           pre_signal_enabled: data.settings.pre_signal_enabled !== false,
           active_strategy: data.settings.active_strategy || 'scalping_4_rules',
           strategy_params: data.settings.strategy_params || {},
+          coin_params: data.settings.coin_params || {},
         }));
         toast.success('Gespeichert');
       }
@@ -72,28 +76,48 @@ const SettingsPanel = ({ onClose }) => {
   };
 
   const updateStrategyParam = (strategyId, paramKey, value) => {
-    const currentParams = settings.strategy_params[strategyId] || {};
-    const newParams = {
-      ...settings.strategy_params,
-      [strategyId]: { ...currentParams, [paramKey]: parseFloat(value) }
-    };
-    setSettings({ ...settings, strategy_params: newParams });
+    const v = parseFloat(value);
+    if (paramCoin) {
+      const cp = settings.coin_params || {};
+      const stratCp = cp[strategyId] || {};
+      const coinCp = { ...(stratCp[paramCoin] || {}), [paramKey]: v };
+      const newCp = { ...cp, [strategyId]: { ...stratCp, [paramCoin]: coinCp } };
+      setSettings({ ...settings, coin_params: newCp });
+    } else {
+      const currentParams = settings.strategy_params[strategyId] || {};
+      const newParams = { ...settings.strategy_params, [strategyId]: { ...currentParams, [paramKey]: v } };
+      setSettings({ ...settings, strategy_params: newParams });
+    }
   };
 
   const commitParams = (strategyId) => {
-    saveSettings({ strategy_params: settings.strategy_params });
+    if (paramCoin) saveSettings({ coin_params: settings.coin_params });
+    else saveSettings({ strategy_params: settings.strategy_params });
   };
 
   const resetStrategyParams = (strategyId) => {
-    const newParams = { ...settings.strategy_params };
-    delete newParams[strategyId];
-    setSettings({ ...settings, strategy_params: newParams });
-    saveSettings({ strategy_params: newParams });
-    toast.success('Parameter auf Standard zurückgesetzt');
+    if (paramCoin) {
+      const cp = { ...(settings.coin_params || {}) };
+      if (cp[strategyId]) { delete cp[strategyId][paramCoin]; }
+      setSettings({ ...settings, coin_params: cp });
+      saveSettings({ coin_params: cp });
+      toast.success(`${paramCoin} Parameter zurückgesetzt`);
+    } else {
+      const newParams = { ...settings.strategy_params };
+      delete newParams[strategyId];
+      setSettings({ ...settings, strategy_params: newParams });
+      saveSettings({ strategy_params: newParams });
+      toast.success('Parameter auf Standard zurückgesetzt');
+    }
   };
 
   const getCurrentParamValue = (strategyId, paramKey, defaultValue) => {
-    return settings.strategy_params[strategyId]?.[paramKey] ?? defaultValue;
+    const globalVal = settings.strategy_params[strategyId]?.[paramKey];
+    if (paramCoin) {
+      const coinVal = settings.coin_params?.[strategyId]?.[paramCoin]?.[paramKey];
+      return coinVal ?? globalVal ?? defaultValue;
+    }
+    return globalVal ?? defaultValue;
   };
 
   // Sessions handlers
@@ -262,6 +286,19 @@ const SettingsPanel = ({ onClose }) => {
                     <div className="section-description">
                       Passe die Werte an deine Strategie an - wird automatisch gespeichert
                     </div>
+                    <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span className="text-muted" style={{ fontSize: 12 }}>Gilt für:</span>
+                      <select
+                        value={paramCoin}
+                        onChange={(e) => setParamCoin(e.target.value)}
+                        data-testid="param-coin-select"
+                        style={{ background: '#0A0A0A', border: '1px solid #2A2D3A', borderRadius: 8, padding: '7px 10px', color: '#fff' }}
+                      >
+                        <option value="">Alle Coins (Global)</option>
+                        {ALL_COINS.map(c => <option key={c} value={c}>{c.replace('USDT', '')}</option>)}
+                      </select>
+                      {paramCoin && <span className="param-custom-badge">PRO COIN</span>}
+                    </div>
                   </div>
 
                   <div className="params-list">
@@ -271,7 +308,9 @@ const SettingsPanel = ({ onClose }) => {
                         paramKey, 
                         paramMeta.value
                       );
-                      const isCustom = settings.strategy_params[activeStrategy.id]?.[paramKey] !== undefined;
+                      const isCustom = paramCoin
+                        ? settings.coin_params?.[activeStrategy.id]?.[paramCoin]?.[paramKey] !== undefined
+                        : settings.strategy_params[activeStrategy.id]?.[paramKey] !== undefined;
                       
                       return (
                         <div key={paramKey} className="param-item" data-testid={`param-${paramKey}`}>

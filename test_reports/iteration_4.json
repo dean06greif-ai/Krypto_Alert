@@ -1,0 +1,62 @@
+{
+  "summary": "Full-stack testing of the Krypto_Alert daytrading dashboard (multi-strategy tabs + custom strategy builder + Bitunix paper auto-trade + rule-state live circles + Berlin daily reset + minimal keepalive). Backend: 54/54 pytest tests pass across new test_krypto_alert_features.py (21 tests covering all new endpoints) + updated test_health_endpoints.py (12 tests) + test_settings_persistence.py (16 tests) + test_strategies.py (5 tests). Frontend: dashboard loads, BTC & GOLD charts render (no black screen, no ErrorBoundary), WebSocket /api/ws connects ('Verbunden mit Scanner' toast), AutoTradeModal opens with all required fields (PAPER/LIVE toggle, capital, leverage slider, structure/fixed SL, TP1/TP-full CRV, break-even, save), StrategyBuilder opens (tab-toggle-*, custom-name, add-rule-long/short, create-strategy-btn), SettingsPanel opens with param-coin-select. Enabling rsi_only in Builder adds a second tab live; disabling removes it. SignalPanel shows 3 rule circles with rule-long / rule-short color classes driven live by WebSocket rule_states. Auto-trade paper-mode config persists per-coin.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/settings", "issue": "Silently drops unknown fields. Also POSTing active_strategy alone (without matching enabled_strategies) is silently snapped back to enabled_strategies[0] instead of returning 422 (see StrategyScanner.update_settings). Consider Pydantic validation."},
+      {"endpoint": "POST /api/autotrade/coin/{symbol}", "issue": "No validation on numeric fields: negative/zero max_capital, leverage=0, leverage>125, tp1_close_percent outside 1-99 are all accepted. Frontend clamps but backend should also enforce."},
+      {"endpoint": "POST /api/telegram/test", "issue": "TELEGRAM_BOT_TOKEN not in backend/.env in this environment - endpoint correctly returns 400 'Telegram not configured'. Not a bug, but the deployment guide should mention this env var is optional."},
+      {"endpoint": "GET /api/autotrade/balance (live)", "issue": "When mode=live and Bitunix returns 403 (IP-blocked here, EXPECTED per problem statement), the raw Bitunix response is returned. Consider wrapping/normalizing to always return the same {mode,realized_pnl,open_trades,closed_trades} shape to avoid frontend surprises."},
+      {"endpoint": "server.py process_signal", "issue": "signal dict is mutated by mongodb insert_one (adds ObjectId '_id'), then appended to open_signal_evals and broadcast to WebSocket via _clean(). broadcast is fine because _clean pops _id, but open_signal_evals stores a subset that doesn't include _id so that path is safe. Small hygiene note: insert_one(dict(signal)) already copies; you can keep signal itself clean if you also do dict(signal) before it. Not blocking."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Rapid modal close-during-fetch", "issue": "Console 'TypeError: Failed to fetch' errors appear when navigating quickly between modals - these are aborted in-flight fetches on unmount and are cosmetic. No functional impact. Consider AbortController if you want a clean console.", "affected_selectors": []}
+    ],
+    "design_issues": [
+      {"screen": "StrategyBuilder modal", "issues": ["No 'Save & Close' button - user has to hit Regel erstellen then close X manually. Not critical."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_krypto_alert_features.py",
+    "/app/backend/tests/test_health_endpoints.py",
+    "/app/backend/tests/test_settings_persistence.py",
+    "/app/backend/tests/test_strategies.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: Add Pydantic validation to POST /api/settings (reject unknown fields & invalid active_strategy IDs with 422).",
+    "OPTIONAL: Add server-side numeric range validation to POST /api/autotrade/coin/{symbol} (leverage 1-125, tp1_close_percent 1-99, max_capital > 0).",
+    "OPTIONAL: Normalize /api/autotrade/balance response shape between live/paper modes.",
+    "OPTIONAL: Consider AbortController for in-flight fetches on component unmount to silence cosmetic 'Failed to fetch' console noise.",
+    "OPTIONAL (from prior iteration): Add TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID to backend/.env if telegram notifications are required in this env - currently absent so /api/telegram/test correctly returns 400."
+  ],
+  "critical_code_review_comments": [
+    "strategies/registry.py: register_defaults() runs at module import; if either ScalpingStrategy() or RSIOnlyStrategy() throws in __init__, the whole server fails to start silently through the FastAPI lifespan. Wrap register() calls in try/except with logger.error to keep the app booting even if a strategy is broken.",
+    "services/strategy_scanner.py update_settings snaps active_strategy to enabled_strategies[0] when the requested value isn't in enabled_strategies. This masks user error - POST {active_strategy: 'foo'} silently succeeds but reads back a different value. Return 422 or at least log a warning.",
+    "server.py process_signal / broadcast: signals contain floats; JSON encoder is fine but MongoDB _id gets injected on insert. _clean() correctly pops _id before broadcast; keep this pattern - do not remove.",
+    "server.py autotrade config uses a single 'settings' collection with two _ids ('scanner_settings' + 'autotrade_config') - this is fine but confusing. Consider a separate 'autotrade' collection for clarity.",
+    "frontend/src/App.js: WebSocket reconnect is fine but reconnectRef.current is cleared only in cleanup; a rapid Ctrl-R may cause two reconnect timers to overlap for ~3s. Not a bug.",
+    "frontend/src/components/AutoTradeModal.js: 'save' button POSTs mode-config THEN coin-config sequentially; no error handling if the first POST fails (second still runs). Minor.",
+    "backend/services/bitunix_trade.py AutoTradeManager._levels: risk<=0 fallback sets risk = entry * 0.003 but doesn't recompute sl for SHORT case correctly - line 178 uses (entry+risk) for LONG-fallback path OK, but on SHORT side sets sl = entry+risk directly which is correct. Just noting the logic is dense.",
+    "backend/services/bitunix_trade.py _manage_trade: TP-full is checked AFTER TP1 partial in one tick, meaning if a candle spikes through both levels in a single scan cycle, the position closes at TP-full but only after already partial-closing at TP1 - net PnL is correct but 2 events fire simultaneously. Acceptable behavior for paper mode."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_krypto_alert_features.py (NEW - 21 tests covering multi-strategy, custom-strategy CRUD, rule-states, autotrade paper, klines BTC+GOLD, signals+performance+analytics, session status)",
+    "/app/backend/tests/test_health_endpoints.py (updated for new minimal /api/health = {status:alive}, new session_status berlin_time/berlin_date schema)",
+    "/app/backend/tests/test_settings_persistence.py (updated test_07/11/12/13/14/15 for multi-tab enabled_strategies schema + telegram-optional)",
+    "/app/test_reports/pytest/pytest_results.xml (regenerated - 54 passed)"
+  ],
+  "success_rate": {
+    "backend": "100% (54/54 pytest)",
+    "frontend": "100% (all critical flows verified via Playwright: dashboard load, BTC+GOLD chart, strategy tabs enable/disable, signals toggle, AutoTradeModal fields, StrategyBuilder fields, SettingsPanel with param-coin-select, rule circles colored, WebSocket connected)"
+  },
+  "test_credentials": "N/A - all endpoints public. Bitunix keys already present in backend/.env for paper mode. TELEGRAM_BOT_TOKEN NOT set in this env (endpoint returns 400 as expected).",
+  "seed_data_creation": "TestKryptoAlert snapshots /api/settings and /api/autotrade/config in setup_class and restores them in teardown_class. Any custom strategies created during tests are deleted in teardown via DELETE /api/strategies/custom/{id}.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run: `cd /app/backend && python -m pytest tests/ -v` (pytest.ini pins -n 2 --dist loadscope). All 54 tests pass. Key files: /app/backend/tests/test_krypto_alert_features.py is the primary regression suite for the new multi-strategy / custom-strategy / autotrade / klines endpoints - keep it in ONE class. test_14 in test_settings_persistence.py does a real `sudo supervisorctl restart backend` mid-suite; this can cause transient parallel-worker connection failures - if you see one, just re-run. Frontend URL is picked up from /app/frontend/.env REACT_APP_BACKEND_URL. WebSocket path is /api/ws (NOT /ws). Custom strategy IDs are prefixed with 'custom_' to distinguish from built-ins. Bitunix LIVE endpoints return 403 from this preview env - PAPER mode is the only testable path (per problem statement).",
+  "rca_of_the_issue": "This iteration is a large feature addition (not a bug fix). Prior iteration tests were written against an old schema (single active_strategy, richer /api/health) and stopped passing because: (1) /api/health was intentionally reduced to {status:alive} for keepalive minimalism; (2) session_status replaced current_time_utc with berlin_time+berlin_date; (3) multi-strategy tabs replaced the single active_strategy concept - active_strategy is now snapped to enabled_strategies[0] so it can't be changed alone. All stale test methods were updated in-place to the new schemas; no application code was modified. The frontend correctly renders enabled tabs (verified: enabling rsi_only via StrategyBuilder makes it appear as a second tab within 500ms). WebSocket /api/ws serves rule_states, candle, signal, daily_reset messages - toast 'Verbunden mit Scanner' confirms connection. AutoTradeModal exposes all documented fields, Save calls POST /api/autotrade/config then POST /api/autotrade/coin/{symbol}. Chart uses locale en-US which is what fixed the black-screen crash (confirmed - no crash on GOLD switch, 200 bars render)."
+}

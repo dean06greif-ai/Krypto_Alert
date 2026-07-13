@@ -1,279 +1,260 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
+import './components/extra.css';
 import Header from './components/Header';
 import CoinSidebar from './components/CoinSidebar';
 import MainChart from './components/MainChart';
 import SignalPanel from './components/SignalPanel';
+import StrategyTabs from './components/StrategyTabs';
 import PerformanceAnalytics from './components/PerformanceAnalytics';
 import AlertModal from './components/AlertModal';
 import SettingsPanel from './components/SettingsPanel';
+import StrategyBuilder from './components/StrategyBuilder';
+import AutoTradeModal from './components/AutoTradeModal';
+import ErrorBoundary from './components/ErrorBoundary';
 import { Toaster, toast } from 'sonner';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
 function App() {
   const [selectedCoin, setSelectedCoin] = useState('BTCUSDT');
+  const [strategies, setStrategies] = useState([]);
+  const [enabledIds, setEnabledIds] = useState([]);
+  const [signalsEnabled, setSignalsEnabled] = useState({});
+  const [selectedStrategy, setSelectedStrategy] = useState(null);
   const [signals, setSignals] = useState([]);
   const [performance, setPerformance] = useState([]);
+  const [ruleStates, setRuleStates] = useState({});
+  const [candleData, setCandleData] = useState({});
+  const [notifications, setNotifications] = useState({});
+  const [autotradeCoins, setAutotradeCoins] = useState({});
   const [sessionActive, setSessionActive] = useState(false);
   const [currentSession, setCurrentSession] = useState('');
   const [customSessions, setCustomSessions] = useState([]);
-  const [activeStrategy, setActiveStrategy] = useState(null);
-  const [strategyParams, setStrategyParams] = useState({});
+  const [berlinTime, setBerlinTime] = useState('');
   const [showAlert, setShowAlert] = useState(false);
   const [currentAlert, setCurrentAlert] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [candleData, setCandleData] = useState({});
-  const [notifications, setNotifications] = useState({});
+  const [showBuilder, setShowBuilder] = useState(false);
+  const [autoTradeSymbol, setAutoTradeSymbol] = useState(null);
+
   const wsRef = useRef(null);
   const audioRef = useRef(null);
   const notificationsRef = useRef({});
+  const reconnectRef = useRef(null);
 
-  // keep a ref in sync so the websocket handler always reads the latest map
-  useEffect(() => {
-    notificationsRef.current = notifications;
-  }, [notifications]);
+  useEffect(() => { notificationsRef.current = notifications; }, [notifications]);
 
-  // WebSocket connection
-  useEffect(() => {
-    const wsUrl = API_URL.replace('http', 'ws') + '/ws';
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
+  // ---- data loaders ----
+  const loadStrategies = useCallback(async () => {
+    try {
+      const data = await fetch(`${API_URL}/api/strategies`).then(r => r.json());
+      setStrategies(data.strategies || []);
+      setEnabledIds(data.enabled || []);
+      setSignalsEnabled(data.signals_enabled || {});
+      setSelectedStrategy(prev => {
+        if (prev && (data.enabled || []).includes(prev)) return prev;
+        return (data.enabled || [])[0] || null;
+      });
+    } catch (e) { console.error(e); }
+  }, []);
 
-    ws.onopen = () => {
-      console.log('WebSocket connected');
-      toast.success('Connected to scanner');
-    };
+  const loadAutotrade = useCallback(async () => {
+    try {
+      const data = await fetch(`${API_URL}/api/autotrade/config`).then(r => r.json());
+      setAutotradeCoins((data.config && data.config.coins) || {});
+    } catch (e) { console.error(e); }
+  }, []);
 
-    ws.onmessage = (event) => {
-      const message = JSON.parse(event.data);
+  const loadSignals = useCallback(async () => {
+    try {
+      const data = await fetch(`${API_URL}/api/signals?limit=80`).then(r => r.json());
+      setSignals(data.signals || []);
+    } catch (e) { console.error(e); }
+  }, []);
 
-      if (message.type === 'signal') {
-        const signal = message.data;
-        setSignals(prev => [signal, ...prev]);
+  const loadPerformance = useCallback(async () => {
+    try {
+      const data = await fetch(`${API_URL}/api/performance`).then(r => r.json());
+      setPerformance(data.performance || []);
+    } catch (e) { console.error(e); }
+  }, []);
 
-        // Respect per-instrument notification toggle (default = enabled)
-        const notifyEnabled = notificationsRef.current[signal.symbol] !== false;
-        if (!notifyEnabled) {
-          return;
+  // ---- WebSocket with auto-reconnect ----
+  const connectWS = useCallback(() => {
+    try {
+      const wsUrl = API_URL.replace('http', 'ws') + '/api/ws';
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => { toast.success('Verbunden mit Scanner'); };
+      ws.onmessage = (event) => {
+        let message;
+        try { message = JSON.parse(event.data); } catch { return; }
+        if (message.type === 'signal') {
+          const signal = message.data;
+          setSignals(prev => [signal, ...prev].slice(0, 120));
+          const notifyEnabled = notificationsRef.current[signal.symbol] !== false;
+          if (notifyEnabled && signal.signal_class !== 'PRE_SIGNAL') {
+            setCurrentAlert(signal); setShowAlert(true);
+            if (audioRef.current) audioRef.current.play().catch(() => {});
+            toast.success(`${signal.type} · ${signal.symbol.replace('USDT','')}`, {
+              description: `${signal.strategy_name} · Entry $${signal.entry_price}`, duration: 5000,
+            });
+          }
+        } else if (message.type === 'candle') {
+          setCandleData(prev => ({ ...prev, [message.symbol]: message.data }));
+        } else if (message.type === 'rule_states') {
+          setRuleStates(prev => ({ ...prev, [message.symbol]: message.data }));
+        } else if (message.type === 'daily_reset') {
+          setSignals([]);
+          toast.info('Täglicher Reset: Signale zurückgesetzt, Analyse bleibt erhalten');
+          loadPerformance();
         }
+      };
+      ws.onerror = () => {};
+      ws.onclose = () => {
+        if (reconnectRef.current) clearTimeout(reconnectRef.current);
+        reconnectRef.current = setTimeout(connectWS, 3000);
+      };
+    } catch (e) { console.error('WS connect failed', e); }
+  }, [loadPerformance]);
 
-        // Show alert
-        setCurrentAlert(signal);
-        setShowAlert(true);
-        
-        // Play sound
-        playAlertSound();
-        
-        // Show toast notification
-        toast.success(`${signal.type} Signal für ${signal.symbol}!`, {
-          description: `Entry: $${signal.entry_price}`,
-          duration: 5000
-        });
-        
-        // Request browser notification
-        if (Notification.permission === 'granted') {
-          new Notification(`${signal.type} Signal!`, {
-            body: `${signal.symbol} - Entry: $${signal.entry_price}`,
-            icon: '/favicon.ico'
-          });
-        }
-      } else if (message.type === 'candle') {
-        setCandleData(prev => ({
-          ...prev,
-          [message.symbol]: message.data
-        }));
-      }
-    };
-
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      toast.error('Connection error');
-    };
-
-    ws.onclose = () => {
-      console.log('WebSocket disconnected');
-      toast.warning('Disconnected from scanner');
-    };
-
+  useEffect(() => {
+    connectWS();
+    if (Notification && Notification.permission === 'default') Notification.requestPermission();
     return () => {
-      ws.close();
+      if (reconnectRef.current) clearTimeout(reconnectRef.current);
+      if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); }
     };
-  }, []);
+  }, [connectWS]);
 
-  // Request notification permission
+  useEffect(() => { loadStrategies(); loadAutotrade(); loadSignals(); loadPerformance(); }, [loadStrategies, loadAutotrade, loadSignals, loadPerformance]);
   useEffect(() => {
-    if (Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
-  }, []);
+    const iv = setInterval(loadPerformance, 60000);
+    return () => clearInterval(iv);
+  }, [loadPerformance]);
 
-  // Fetch strategies + settings for active strategy display
+  // session + notifications
   useEffect(() => {
-    const fetchStrategies = async () => {
+    const fetchSession = async () => {
       try {
-        const response = await fetch(`${API_URL}/api/strategies`);
-        const data = await response.json();
-        const activeId = data.active;
-        const strategy = data.strategies.find(s => s.id === activeId);
-        setActiveStrategy(strategy);
-        setStrategyParams(strategy?.current_params || {});
-      } catch (error) {
-        console.error('Error fetching strategies:', error);
-      }
-    };
-
-    fetchStrategies();
-    const interval = setInterval(fetchStrategies, 15000); // Update every 15s
-
-    return () => clearInterval(interval);
-  }, [showSettings]);
-
-  // Fetch session status
-  useEffect(() => {
-    const fetchSessionStatus = async () => {
-      try {
-        const response = await fetch(`${API_URL}/api/session/status`);
-        const data = await response.json();
+        const data = await fetch(`${API_URL}/api/session/status`).then(r => r.json());
         setSessionActive(data.is_active);
         setCurrentSession(data.current_session || '');
         setCustomSessions(data.custom_sessions || []);
-      } catch (error) {
-        console.error('Error fetching session status:', error);
-      }
+        setBerlinTime(data.berlin_time || '');
+      } catch (e) { console.error(e); }
     };
-
-    fetchSessionStatus();
-    const interval = setInterval(fetchSessionStatus, 30000); // Update every 30s
-
-    return () => clearInterval(interval);
-  }, [showSettings]);
-
-  // Fetch per-instrument notification settings
-  useEffect(() => {
-    const fetchNotifications = async () => {
+    const fetchNotif = async () => {
       try {
-        const response = await fetch(`${API_URL}/api/settings`);
-        const data = await response.json();
+        const data = await fetch(`${API_URL}/api/settings`).then(r => r.json());
         setNotifications(data.notifications || {});
-      } catch (error) {
-        console.error('Error fetching notification settings:', error);
-      }
+      } catch (e) { console.error(e); }
     };
-    fetchNotifications();
+    fetchSession(); fetchNotif();
+    const iv = setInterval(fetchSession, 30000);
+    return () => clearInterval(iv);
   }, [showSettings]);
 
+  // ---- actions ----
   const toggleNotification = async (symbol) => {
-    const current = notifications[symbol] !== false; // default enabled
+    const current = notifications[symbol] !== false;
     const updated = { ...notifications, [symbol]: !current };
     setNotifications(updated);
-    try {
-      await fetch(`${API_URL}/api/settings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ notifications: updated })
-      });
-      toast.success(`${symbol.replace('USDT', '')}: Alerts ${!current ? 'AN' : 'AUS'}`);
-    } catch (error) {
-      toast.error('Fehler beim Speichern');
-    }
+    await fetch(`${API_URL}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notifications: updated }) });
+    toast.success(`${symbol.replace('USDT','')}: Alerts ${!current ? 'AN' : 'AUS'}`);
   };
 
-  // Fetch signals
-  useEffect(() => {
-    const fetchSignals = async () => {
-      try {
-        const response = await fetch(`${API_URL}/api/signals?limit=20`);
-        const data = await response.json();
-        setSignals(data.signals || []);
-      } catch (error) {
-        console.error('Error fetching signals:', error);
-      }
-    };
-
-    fetchSignals();
-  }, []);
-
-  // Fetch performance
-  useEffect(() => {
-    const fetchPerformance = async () => {
-      try {
-        const response = await fetch(`${API_URL}/api/performance`);
-        const data = await response.json();
-        setPerformance(data.performance || []);
-      } catch (error) {
-        console.error('Error fetching performance:', error);
-      }
-    };
-
-    fetchPerformance();
-    const interval = setInterval(fetchPerformance, 300000); // Update every 5 minutes
-
-    return () => clearInterval(interval);
-  }, []);
-
-  const playAlertSound = () => {
-    if (audioRef.current) {
-      audioRef.current.play().catch(e => console.error('Error playing sound:', e));
-    }
+  const toggleSignals = async (strategyId) => {
+    const current = signalsEnabled[strategyId] !== false;
+    const updated = { ...signalsEnabled, [strategyId]: !current };
+    setSignalsEnabled(updated);
+    await fetch(`${API_URL}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ strategy_signals_enabled: updated }) });
+    toast.success(`Signale ${!current ? 'AN' : 'AUS'}`);
   };
+
+  const strategyMeta = strategies.find(s => s.id === selectedStrategy);
+  const ruleState = ruleStates[selectedCoin]?.[selectedStrategy];
+  const latestSignal = signals.find(s => s.symbol === selectedCoin && s.strategy_id === selectedStrategy);
 
   return (
     <div className="App">
       <Toaster position="top-right" theme="dark" richColors />
       <audio ref={audioRef} src="/alert.mp3" preload="auto" />
-      
-      <Header 
+
+      <Header
         sessionActive={sessionActive}
         currentSession={currentSession}
         customSessions={customSessions}
-        activeStrategy={activeStrategy}
+        activeStrategy={strategyMeta}
+        berlinTime={berlinTime}
         onSettingsClick={() => setShowSettings(true)}
       />
-      
+
       <div className="app-layout">
-        <CoinSidebar 
+        <CoinSidebar
           selectedCoin={selectedCoin}
           onSelectCoin={setSelectedCoin}
           performance={performance}
           notifications={notifications}
           onToggleNotification={toggleNotification}
+          ruleStates={ruleStates}
+          selectedStrategy={selectedStrategy}
+          autotradeCoins={autotradeCoins}
+          onOpenAutoTrade={(sym) => setAutoTradeSymbol(sym)}
         />
-        
+
         <div className="main-content">
-          <MainChart 
-            symbol={selectedCoin}
-            candleData={candleData[selectedCoin]}
+          <StrategyTabs
+            strategies={strategies}
+            enabledIds={enabledIds}
+            selected={selectedStrategy}
+            signalsEnabled={signalsEnabled}
+            onSelect={setSelectedStrategy}
+            onToggleSignals={toggleSignals}
+            onManage={() => setShowBuilder(true)}
+            onEditParams={() => setShowSettings(true)}
           />
-          
-          <SignalPanel 
+          <ErrorBoundary onReset={() => setSelectedCoin('BTCUSDT')}>
+            <MainChart symbol={selectedCoin} candleData={candleData[selectedCoin]} />
+          </ErrorBoundary>
+          <SignalPanel
             symbol={selectedCoin}
-            signals={signals.filter(s => s.symbol === selectedCoin)}
-            activeStrategy={activeStrategy}
-            strategyParams={strategyParams}
+            ruleState={ruleState}
+            latestSignal={latestSignal}
+            strategyMeta={strategyMeta}
           />
         </div>
-        
+
         <div className="right-panel">
-          <PerformanceAnalytics 
-            performance={performance}
-            signals={signals}
-            selectedCoin={selectedCoin}
-          />
+          <ErrorBoundary>
+            <PerformanceAnalytics
+              performance={performance}
+              signals={signals}
+              selectedCoin={selectedCoin}
+              selectedStrategy={selectedStrategy}
+            />
+          </ErrorBoundary>
         </div>
       </div>
-      
+
       {showAlert && currentAlert && (
-        <AlertModal 
-          signal={currentAlert}
-          onClose={() => setShowAlert(false)}
+        <AlertModal signal={currentAlert} onClose={() => setShowAlert(false)} />
+      )}
+      {showSettings && (
+        <SettingsPanel onClose={() => { setShowSettings(false); loadStrategies(); }} focusStrategy={selectedStrategy} />
+      )}
+      {showBuilder && (
+        <StrategyBuilder
+          strategies={strategies}
+          enabledIds={enabledIds}
+          onClose={() => setShowBuilder(false)}
+          onChanged={loadStrategies}
         />
       )}
-      
-      {showSettings && (
-        <SettingsPanel 
-          onClose={() => setShowSettings(false)}
-        />
+      {autoTradeSymbol && (
+        <AutoTradeModal symbol={autoTradeSymbol} onClose={() => { setAutoTradeSymbol(null); loadAutotrade(); }} />
       )}
     </div>
   );

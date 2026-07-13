@@ -1,224 +1,208 @@
 """
-Strategy Scanner - Coordinates strategy execution across coins.
-Supports multiple strategies via the strategy registry.
+Strategy Scanner - evaluates ALL enabled strategies per coin.
+Tracks live rule-state (for circle pre-fill) and emits full signals.
 """
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional
 import logging
 from services.technical_indicators import TechnicalIndicators
 from strategies.registry import registry
 
 logger = logging.getLogger(__name__)
+BERLIN = ZoneInfo("Europe/Berlin")
 
 DEFAULT_SETTINGS = {
-    "active_strategy": "scalping_4_rules",
-    "strategy_params": {},  # {strategy_id: {param_key: value}}
-    "custom_sessions": [],  # empty => 24/7 mode (default: never miss a signal)
+    "active_strategy": "scalping_4_rules",          # kept for backwards-compat
+    "enabled_strategies": ["scalping_4_rules"],     # tabs shown in dashboard
+    "strategy_signals_enabled": {},                 # {strategy_id: bool} missing => on
+    "strategy_params": {},                          # {strategy_id: {param: value}}
+    "coin_params": {},                              # {strategy_id: {symbol: {param: value}}}
+    "custom_sessions": [],                          # empty => 24/7
     "pre_signal_enabled": True,
-    "notifications": {},  # {symbol: bool} - missing => enabled. Per-instrument alert toggle
+    "notifications": {},                            # {symbol: bool}
 }
 
 
 class StrategyScanner:
-    """Coordinates strategy checks and session management"""
-    
     def __init__(self):
         self.indicators = TechnicalIndicators()
-        self.candle_buffer = {}   # closed candles per symbol
-        self.forming = {}         # current forming candle per symbol
+        self.candle_buffer = {}
+        self.forming = {}
         self.last_pre_signal = {}
+        self.rule_states = {}   # {symbol: {strategy_id: {...}}}
         self.settings = dict(DEFAULT_SETTINGS)
 
+    # ---------- setup ----------
     def bootstrap(self, symbol: str, candles: list):
-        """Seed the buffer with historical closed candles (oldest-first)."""
         if not candles:
             return
-        self.candle_buffer[symbol] = candles[-100:]
-        # The most recent historical candle may still be forming; track it separately
+        self.candle_buffer[symbol] = candles[-120:]
         self.forming[symbol] = dict(candles[-1])
-        logger.info(f"Bootstrapped {symbol} with {len(self.candle_buffer[symbol])} closed candles")
 
-    def debug_snapshot(self, symbol: str) -> Dict:
-        """Diagnostic snapshot of live indicator state for a coin (no signal required)."""
-        candles = self.candle_buffer.get(symbol, [])
-        info = {
-            "symbol": symbol,
-            "closed_candles": len(candles),
-            "last_candle_time": candles[-1]["timestamp"] if candles else None,
-            "price": candles[-1]["close"] if candles else None,
-            "rsi": None,
-            "ema_fast": None,
-            "ema_slow": None,
-        }
-        if len(candles) >= 15:
-            closes = [c["close"] for c in candles]
-            rsi = self.indicators.calculate_rsi(closes, 14)
-            ema_fast = self.indicators.calculate_ema(closes, 9)
-            ema_slow = self.indicators.calculate_ema(closes, 50)
-            info["rsi"] = round(rsi[-1], 2) if rsi and rsi[-1] is not None else None
-            info["ema_fast"] = round(ema_fast[-1], 6) if ema_fast and ema_fast[-1] is not None else None
-            info["ema_slow"] = round(ema_slow[-1], 6) if ema_slow and ema_slow[-1] is not None else None
-        return info
-    
     def update_settings(self, new_settings: Dict):
         for key, value in new_settings.items():
             if key in DEFAULT_SETTINGS:
                 self.settings[key] = value
-        logger.info(f"Settings updated: {self.settings}")
+        # keep active_strategy inside enabled list
+        enabled = self.settings.get("enabled_strategies") or ["scalping_4_rules"]
+        if self.settings.get("active_strategy") not in enabled and enabled:
+            self.settings["active_strategy"] = enabled[0]
 
     def is_notify_enabled(self, symbol: str) -> bool:
-        """Per-instrument notification toggle. Missing entry => enabled."""
         return self.settings.get("notifications", {}).get(symbol, True)
-    
-    def get_active_strategy(self):
-        """Get the currently active strategy"""
-        strategy_id = self.settings.get("active_strategy", "scalping_4_rules")
-        strategy = registry.get(strategy_id)
-        if not strategy:
-            logger.warning(f"Strategy {strategy_id} not found, falling back to default")
-            return registry.get_default()
-        return strategy
-    
-    def _parse_time(self, time_str: str) -> tuple:
+
+    def enabled_strategies(self) -> List[str]:
+        ids = self.settings.get("enabled_strategies") or ["scalping_4_rules"]
+        return [s for s in ids if registry.get(s)]
+
+    def is_signals_enabled(self, strategy_id: str) -> bool:
+        return self.settings.get("strategy_signals_enabled", {}).get(strategy_id, True)
+
+    # ---------- time / session ----------
+    @staticmethod
+    def berlin_now() -> datetime:
+        return datetime.now(BERLIN)
+
+    @staticmethod
+    def berlin_date() -> str:
+        return datetime.now(BERLIN).strftime("%Y-%m-%d")
+
+    def _parse_time(self, s: str) -> tuple:
         try:
-            parts = time_str.split(':')
-            return (int(parts[0]), int(parts[1]))
+            p = s.split(":")
+            return (int(p[0]), int(p[1]))
         except Exception:
             return (0, 0)
-    
+
     def is_trading_session(self) -> bool:
-        sessions = self.settings.get("custom_sessions", [])
-        enabled_sessions = [s for s in sessions if s.get("enabled", True)]
-        
-        # No sessions → 24/7 mode
-        if not enabled_sessions:
+        sessions = [s for s in self.settings.get("custom_sessions", []) if s.get("enabled", True)]
+        if not sessions:
             return True
-        
-        now = datetime.now(timezone.utc)
-        german_hour = (now.hour + 1) % 24
-        german_minute = now.minute
-        current_time = (german_hour, german_minute)
-        
-        for session in enabled_sessions:
-            start = self._parse_time(session.get("start", "00:00"))
-            end = self._parse_time(session.get("end", "23:59"))
-            
-            if start <= current_time < end:
+        now = self.berlin_now()
+        cur = (now.hour, now.minute)
+        for s in sessions:
+            if self._parse_time(s.get("start", "00:00")) <= cur < self._parse_time(s.get("end", "23:59")):
                 return True
-        
         return False
-    
+
     def get_current_session(self) -> str:
-        sessions = self.settings.get("custom_sessions", [])
-        enabled_sessions = [s for s in sessions if s.get("enabled", True)]
-        
-        if not enabled_sessions:
+        sessions = [s for s in self.settings.get("custom_sessions", []) if s.get("enabled", True)]
+        if not sessions:
             return "24/7 Mode"
-        
-        now = datetime.now(timezone.utc)
-        german_hour = (now.hour + 1) % 24
-        german_minute = now.minute
-        current_time = (german_hour, german_minute)
-        
-        for session in enabled_sessions:
-            start = self._parse_time(session.get("start", "00:00"))
-            end = self._parse_time(session.get("end", "23:59"))
-            
-            if start <= current_time < end:
-                return session.get("name", "Custom")
-        
+        now = self.berlin_now()
+        cur = (now.hour, now.minute)
+        for s in sessions:
+            if self._parse_time(s.get("start", "00:00")) <= cur < self._parse_time(s.get("end", "23:59")):
+                return s.get("name", "Custom")
         return "Closed"
-    
+
+    # ---------- candles ----------
     def add_closed_candle(self, symbol: str, candle: Dict) -> bool:
-        """
-        Append an already-CLOSED candle (from REST polling). Deduplicates by
-        timestamp so each 1-minute candle is only evaluated once.
-        Returns True if this is a genuinely new closed candle.
-        """
         buf = self.candle_buffer.setdefault(symbol, [])
         if buf and candle["timestamp"] <= buf[-1]["timestamp"]:
             return False
         buf.append(candle)
-        if len(buf) > 100:
-            self.candle_buffer[symbol] = buf[-100:]
+        if len(buf) > 120:
+            self.candle_buffer[symbol] = buf[-120:]
         return True
 
-    def add_candle(self, symbol: str, candle: Dict) -> bool:
-        """
-        Ingest a live candle snapshot.
+    # ---------- analysis ----------
+    def analyze_symbol(self, symbol: str) -> List[Dict]:
+        """Run all enabled strategies. Update rule_states. Return NEW full signals."""
+        candles = self.candle_buffer.get(symbol, [])
+        signals = []
+        states = {}
+        for sid in self.enabled_strategies():
+            strategy = registry.get(sid)
+            params = strategy.get_params(self.settings, symbol)
+            try:
+                res = strategy.analyze(candles, symbol, params)
+            except Exception as e:
+                logger.error(f"analyze error {sid}/{symbol}: {e}")
+                res = None
+            if not res:
+                continue
+            states[sid] = {
+                "strategy_id": sid,
+                "strategy_name": strategy.STRATEGY_NAME,
+                "rules": res.get("rules", []),
+                "bias": res.get("bias"),
+                "long_count": res.get("long_count", 0),
+                "short_count": res.get("short_count", 0),
+                "rules_total": res.get("rules_total", len(res.get("rules", []))),
+                "indicators": res.get("indicators", {}),
+                "signal_active": bool(res.get("signal_type")) and not res.get("is_pre_signal"),
+                "signal_type": res.get("signal_type"),
+                "is_pre_signal": res.get("is_pre_signal", False),
+            }
+            sig = self._maybe_signal(symbol, strategy, res)
+            if sig:
+                signals.append(sig)
+        if states:
+            self.rule_states[symbol] = states
+        return signals
 
-        Bitunix streams ~2 snapshots/second for the *current forming* minute.
-        We keep only distinct closed 1-minute candles in candle_buffer.
-
-        Returns True when a candle has just CLOSED (i.e. a new minute started),
-        which is the moment the strategy should be evaluated.
-        """
-        forming = self.forming.get(symbol)
-
-        # First candle ever for this symbol
-        if forming is None:
-            self.forming[symbol] = candle
-            return False
-
-        # Same minute -> just update the forming candle (no evaluation)
-        if candle["timestamp"] == forming["timestamp"]:
-            self.forming[symbol] = candle
-            return False
-
-        # New minute -> the previous forming candle is now CLOSED
-        if candle["timestamp"] > forming["timestamp"]:
-            buf = self.candle_buffer.setdefault(symbol, [])
-            # Avoid duplicating a candle already present (e.g. from bootstrap)
-            if buf and buf[-1]["timestamp"] == forming["timestamp"]:
-                buf[-1] = forming
-            else:
-                buf.append(forming)
-            if len(buf) > 100:
-                self.candle_buffer[symbol] = buf[-100:]
-            # Start tracking the new forming candle
-            self.forming[symbol] = candle
-            return True
-
-        # Out-of-order / stale message
-        return False
-    
-    def check_signal(self, symbol: str) -> Optional[Dict]:
-        """Check for signal using active strategy"""
+    def _maybe_signal(self, symbol, strategy, res) -> Optional[Dict]:
+        if not res.get("signal_type"):
+            return None
+        if not self.is_signals_enabled(strategy.STRATEGY_ID):
+            return None
         if not self.is_trading_session():
             return None
-        
-        candles = self.candle_buffer.get(symbol, [])
-        
-        # Get active strategy and check
-        strategy = self.get_active_strategy()
-        result = strategy.check_signal(candles, symbol, self.settings)
-        
-        if not result:
+        is_pre = res.get("is_pre_signal", False)
+        if is_pre and not self.settings.get("pre_signal_enabled", True):
             return None
-        
-        # Deduplicate pre-signals
-        if result.get("signal_class") == "PRE_SIGNAL":
-            last_pre = self.last_pre_signal.get(symbol)
-            now_ts = datetime.now(timezone.utc).timestamp()
-            if last_pre and (now_ts - last_pre) < 300:
+        key = (strategy.STRATEGY_ID, symbol)
+        now_ts = datetime.now(timezone.utc).timestamp()
+        if is_pre:
+            last = self.last_pre_signal.get(key)
+            if last and (now_ts - last) < 300:
                 return None
-            self.last_pre_signal[symbol] = now_ts
-        
-        # Enrich signal with time metadata
-        now = datetime.now(timezone.utc)
-        german_hour = (now.hour + 1) % 24
-        weekday = now.weekday()
-        
-        signal = {
-            **result,
+            self.last_pre_signal[key] = now_ts
+
+        levels = res.get("levels") or {}
+        ind = res.get("indicators", {})
+        rules_met = {r["id"]: (r["long"] if res["signal_type"] == "LONG" else r["short"])
+                     for r in res.get("rules", [])}
+        now = self.berlin_now()
+        return {
             "symbol": symbol,
-            "timestamp": now.isoformat(),
-            "hour": german_hour,
-            "weekday": weekday,
+            "type": res["signal_type"],
+            "signal_class": "PRE_SIGNAL" if is_pre else "SIGNAL",
+            "entry_price": levels.get("entry"),
+            "stop_loss": levels.get("stop_loss"),
+            "take_profit_1": levels.get("take_profit_1"),
+            "take_profit_full": levels.get("take_profit_full"),
+            "crv": levels.get("crv", 0),
+            "rsi": ind.get("rsi", 0),
+            "ema_fast": ind.get("ema_fast", 0),
+            "ema_slow": ind.get("ema_slow", 0),
+            "rules_met": rules_met,
+            "rules_met_count": sum(1 for v in rules_met.values() if v),
+            "rules_total": len(rules_met),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "trade_date": self.berlin_date(),
+            "hour": now.hour,
+            "weekday": now.weekday(),
             "session": self.get_current_session(),
             "strategy_id": strategy.STRATEGY_ID,
             "strategy_name": strategy.STRATEGY_NAME,
+            "status": "active",
         }
-        
-        logger.info(f"{'PRE-' if result.get('signal_class') == 'PRE_SIGNAL' else ''}Signal ({strategy.STRATEGY_ID}): {result['type']} for {symbol} at {result['entry_price']}")
-        return signal
+
+    def get_rule_states(self, symbols: List[str]) -> Dict:
+        return {s: self.rule_states.get(s, {}) for s in symbols if s in self.rule_states}
+
+    def current_price(self, symbol: str) -> Optional[float]:
+        f = self.forming.get(symbol)
+        if f:
+            return f.get("close")
+        buf = self.candle_buffer.get(symbol)
+        return buf[-1]["close"] if buf else None
+
+    def debug_snapshot(self, symbol: str) -> Dict:
+        candles = self.candle_buffer.get(symbol, [])
+        return {"symbol": symbol, "closed_candles": len(candles),
+                "price": candles[-1]["close"] if candles else None,
+                "strategies": list(self.rule_states.get(symbol, {}).keys())}

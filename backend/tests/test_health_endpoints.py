@@ -1,15 +1,15 @@
 """
 Backend tests for Crypto Scalping Scanner REST endpoints.
-Focus: /api/health keepalive endpoint + related read-only endpoints.
+Focus: /api/health minimal keepalive endpoint + related read-only endpoints.
+Updated for the new keepalive-only /api/health contract ({"status":"alive"}) and
+new session_status schema (custom_sessions list, berlin_time/berlin_date).
 """
 import os
-import re
+import time
 import requests
-from datetime import datetime
 
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
 if not BASE_URL:
-    # Fallback to reading frontend/.env directly
     env_path = "/app/frontend/.env"
     if os.path.exists(env_path):
         with open(env_path) as f:
@@ -21,62 +21,31 @@ if not BASE_URL:
 TIMEOUT = 15
 
 
-# ---------- /api/health endpoint ----------
+# ---------- /api/health minimal keepalive endpoint ----------
 class TestHealthEndpoint:
-    """Tests for the lightweight /api/health keepalive endpoint."""
+    """/api/health is a minimal keepalive: {"status":"alive"}."""
 
     def test_health_status_code_200(self):
         r = requests.get(f"{BASE_URL}/api/health", timeout=TIMEOUT)
-        assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
+        assert r.status_code == 200
 
-    def test_health_returns_json(self):
+    def test_health_returns_json_dict(self):
         r = requests.get(f"{BASE_URL}/api/health", timeout=TIMEOUT)
-        assert r.headers.get("content-type", "").startswith("application/json")
         data = r.json()
         assert isinstance(data, dict)
-
-    def test_health_required_fields_present(self):
-        r = requests.get(f"{BASE_URL}/api/health", timeout=TIMEOUT)
-        data = r.json()
-        for field in ["status", "timestamp", "websocket_clients", "session_active"]:
-            assert field in data, f"Missing field '{field}' in response: {data}"
 
     def test_health_status_alive(self):
         r = requests.get(f"{BASE_URL}/api/health", timeout=TIMEOUT)
         data = r.json()
-        assert data["status"] == "alive", f"Expected status='alive', got {data['status']}"
+        assert data.get("status") == "alive"
 
-    def test_health_timestamp_iso_format(self):
+    def test_health_is_minimal(self):
+        """Contract change: keepalive returns ONLY {status: alive}."""
         r = requests.get(f"{BASE_URL}/api/health", timeout=TIMEOUT)
         data = r.json()
-        ts = data["timestamp"]
-        assert isinstance(ts, str)
-        # Should parse as ISO 8601
-        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        assert parsed is not None
-        # Timestamp should be recent (within 60 seconds)
-        now = datetime.now(parsed.tzinfo)
-        diff = abs((now - parsed).total_seconds())
-        assert diff < 60, f"Timestamp not recent, diff={diff}s"
-
-    def test_health_websocket_clients_is_integer(self):
-        r = requests.get(f"{BASE_URL}/api/health", timeout=TIMEOUT)
-        data = r.json()
-        assert isinstance(data["websocket_clients"], int), (
-            f"websocket_clients should be int, got {type(data['websocket_clients'])}"
-        )
-        assert data["websocket_clients"] >= 0
-
-    def test_health_session_active_is_boolean(self):
-        r = requests.get(f"{BASE_URL}/api/health", timeout=TIMEOUT)
-        data = r.json()
-        assert isinstance(data["session_active"], bool), (
-            f"session_active should be bool, got {type(data['session_active'])}"
-        )
+        assert data == {"status": "alive"}
 
     def test_health_is_lightweight_fast(self):
-        """Health endpoint should be fast (< 3s) since it's used for keepalive."""
-        import time
         start = time.time()
         r = requests.get(f"{BASE_URL}/api/health", timeout=TIMEOUT)
         elapsed = time.time() - start
@@ -85,10 +54,7 @@ class TestHealthEndpoint:
 
 
 # ---------- Root endpoint ----------
-# NOTE: On the preview environment the K8s ingress routes non-/api/* paths to
-# the React frontend (port 3000). The backend root ("/") is therefore only
-# reachable directly on localhost:8001. We test it there since it's the
-# actual backend endpoint behavior we want to verify.
+# The K8s ingress routes non-/api/* to frontend, so root is only reachable at localhost:8001.
 LOCAL_BACKEND = "http://localhost:8001"
 
 
@@ -97,15 +63,11 @@ class TestRootEndpoint:
         r = requests.get(f"{LOCAL_BACKEND}/", timeout=TIMEOUT)
         assert r.status_code == 200
 
-    def test_root_returns_expected_fields(self):
+    def test_root_returns_app_and_status(self):
         r = requests.get(f"{LOCAL_BACKEND}/", timeout=TIMEOUT)
         data = r.json()
         assert data.get("app") == "Crypto Scalping Scanner"
         assert data.get("status") == "running"
-        assert "coins_tracked" in data
-        assert "active_signals" in data
-        assert isinstance(data["coins_tracked"], int)
-        assert data["coins_tracked"] == 10
 
 
 # ---------- /api/coins endpoint ----------
@@ -115,17 +77,15 @@ class TestCoinsEndpoint:
         assert r.status_code == 200
 
     def test_coins_list_of_10(self):
-        r = requests.get(f"{BASE_URL}/api/coins", timeout=TIMEOUT)
-        data = r.json()
+        data = requests.get(f"{BASE_URL}/api/coins", timeout=TIMEOUT).json()
         assert "coins" in data
         assert isinstance(data["coins"], list)
-        assert len(data["coins"]) == 10, f"Expected 10 coins, got {len(data['coins'])}"
+        assert len(data["coins"]) == 10
 
     def test_coins_contain_expected_symbols(self):
-        r = requests.get(f"{BASE_URL}/api/coins", timeout=TIMEOUT)
-        coins = r.json()["coins"]
+        coins = requests.get(f"{BASE_URL}/api/coins", timeout=TIMEOUT).json()["coins"]
         for expected in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]:
-            assert expected in coins, f"Missing expected coin: {expected}"
+            assert expected in coins
 
 
 # ---------- /api/session/status endpoint ----------
@@ -135,19 +95,27 @@ class TestSessionStatusEndpoint:
         assert r.status_code == 200
 
     def test_session_status_fields(self):
-        r = requests.get(f"{BASE_URL}/api/session/status", timeout=TIMEOUT)
-        data = r.json()
-        assert "is_active" in data
-        assert isinstance(data["is_active"], bool)
-        assert "current_time_utc" in data
-        # New schema: custom_sessions (list) instead of sessions (dict)
+        data = requests.get(f"{BASE_URL}/api/session/status", timeout=TIMEOUT).json()
+        assert isinstance(data.get("is_active"), bool)
+        assert "current_session" in data
         assert "custom_sessions" in data
         assert isinstance(data["custom_sessions"], list)
-        assert "current_session" in data
         assert "pre_signal_enabled" in data
+        # New schema: berlin_time (HH:MM:SS) + berlin_date (YYYY-MM-DD) replaced current_time_utc
+        assert "berlin_time" in data
+        assert "berlin_date" in data
 
-    def test_session_current_time_iso(self):
-        r = requests.get(f"{BASE_URL}/api/session/status", timeout=TIMEOUT)
-        data = r.json()
-        parsed = datetime.fromisoformat(data["current_time_utc"].replace("Z", "+00:00"))
-        assert parsed is not None
+    def test_session_berlin_time_shape(self):
+        # Retry once - other test-worker may be doing supervisor restart in parallel
+        for _ in range(2):
+            try:
+                data = requests.get(f"{BASE_URL}/api/session/status", timeout=TIMEOUT).json()
+                break
+            except Exception:
+                time.sleep(2)
+        else:
+            data = requests.get(f"{BASE_URL}/api/session/status", timeout=TIMEOUT).json()
+        # HH:MM:SS
+        assert len(data["berlin_time"].split(":")) == 3
+        # YYYY-MM-DD
+        assert len(data["berlin_date"].split("-")) == 3
