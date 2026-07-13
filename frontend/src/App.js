@@ -126,7 +126,11 @@ function App() {
 
   useEffect(() => {
     connectWS();
-    if (Notification && Notification.permission === 'default') Notification.requestPermission();
+    try {
+      if (typeof window !== 'undefined' && 'Notification' in window && window.Notification.permission === 'default') {
+        window.Notification.requestPermission().catch(() => {});
+      }
+    } catch (_) { /* iOS Safari & private mode: Notification API not available */ }
     return () => {
       if (reconnectRef.current) clearTimeout(reconnectRef.current);
       if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); }
@@ -193,6 +197,7 @@ function App() {
   const latestSignal = signals.find(s => s.symbol === selectedCoin && s.strategy_id === selectedStrategy);
 
   return (
+    <ErrorBoundary onReset={() => window.location.reload()}>
     <div className="App">
       <Toaster position="top-right" theme="dark" richColors />
       <audio ref={audioRef} src="/alert.mp3" preload="auto" />
@@ -272,7 +277,14 @@ function App() {
       {autoTradeSymbol && (
         <AutoTradeModal symbol={autoTradeSymbol} onClose={() => { setAutoTradeSymbol(null); loadAutotrade(); }} />
       )}
+      {showLogin && (
+        <AdminLogin
+          onClose={() => setShowLogin(false)}
+          onSuccess={() => setAdminAuthed(true)}
+        />
+      )}
     </div>
+    </ErrorBoundary>
   );
 }
 
