@@ -1,0 +1,38 @@
+{
+  "summary": "Backend-only testing of the newly added /api/health keepalive endpoint plus related read-only endpoints (root, /api/coins, /api/session/status). 16/16 pytest tests pass. The /api/health endpoint returns HTTP 200 in ~90-150ms externally with the correct shape (status='alive', ISO timestamp, integer websocket_clients, bool session_active). It is DB-free and safe for cron-job.org to ping every 10 minutes to keep the Render free tier awake.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_health_endpoints.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is ~314 lines: still manageable, but the WebSocket broadcast logic + background scanner startup could be moved into services/ for cleaner separation as the file grows.",
+    "broadcast_signal / broadcast_candle share the same disconnect-cleanup pattern -- consider extracting a single _broadcast(message) helper (DRY).",
+    "websocket_clients is a module-level list mutated from multiple async tasks; on a single Uvicorn worker this is safe, but if scaled to multiple workers on Render it will silently only broadcast to clients on the same worker. Worth documenting.",
+    "The external Kubernetes ingress routes '/' to the React frontend, so the backend root endpoint ('/') is only reachable via port 8001 directly. On Render this is not an issue (Render exposes the FastAPI service directly), so no action needed here -- just noted for awareness. cron-job.org should ping /api/health, not /.",
+    "/api/health does NOT touch MongoDB or the Bitunix WebSocket -- confirmed lightweight (avg ~90ms external latency). Good design choice for a keepalive endpoint."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_health_endpoints.py (new)",
+    "/app/test_reports/pytest/pytest_results.xml (generated)"
+  ],
+  "success_rate": {
+    "backend": "100% (16/16)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "test_credentials": "N/A - endpoints tested are public/unauthenticated",
+  "seed_data_creation": "None required",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Test file /app/backend/tests/test_health_endpoints.py covers: (1) /api/health -- status 200, JSON shape, status='alive', ISO timestamp <60s old, websocket_clients int, session_active bool, response <3s; (2) backend root '/' -- tested via http://localhost:8001 because K8s ingress serves React app at '/' externally; (3) /api/coins -- 10 coins, contains BTCUSDT/ETHUSDT/SOLUSDT; (4) /api/session/status -- is_active bool, ISO current_time_utc, sessions dict. External URL used: REACT_APP_BACKEND_URL from /app/frontend/.env. Measured external latency of /api/health: ~90-150ms across 3 requests.",
+  "rca of the issue": "No issues found. The initial test for root '/' via external URL failed because the K8s ingress in the preview environment routes non-/api/* paths to the frontend; fixed by testing root via localhost:8001 which is where the FastAPI '/' endpoint actually lives. This is a preview-env artifact, not a code bug -- on Render.com the FastAPI '/' will be directly exposed."
+}

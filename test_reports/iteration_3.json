@@ -1,0 +1,50 @@
+{
+  "summary": "Backend-only regression + feature tests for the new Multi-Strategy system + Telegram improvements. 36/36 pytest tests pass (15 in TestSettingsPersistence including new active_strategy switching + restart persistence; 5 read-only tests in new test_strategies.py; 16 pre-existing health/coins/root/session tests). Verified: GET /api/strategies returns scalping_4_rules + rsi_only with full metadata (id/name/description/timeframe), active field matches settings.active_strategy. POST /api/settings switches active_strategy in both directions and survives supervisorctl restart backend. Partial POSTs preserve active_strategy. /api/session/status still returns is_active=true + current_session='24/7 Mode' when custom_sessions is empty. /api/coins still returns 10 coins, /api/health still returns 200 with expected fields, POST /api/telegram/test succeeds with status=success (real message sent to configured chat).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/settings", "issue": "Silently drops unknown fields including invalid active_strategy IDs. E.g. POST {active_strategy: 'nonexistent'} returns 200 and stores 'nonexistent'; check_signal then logs a warning and falls back to scalping_4_rules. Consider validating against strategy_registry.list_all() ids and returning 422."},
+      {"endpoint": "GET /api/session/status / is_trading_session", "issue": "Still DST-naive: strategy_scanner.py uses (utcnow.hour + 1) % 24 to compute 'German time'. Correct in winter (UTC+1) but off by 1h in summer (CEST = UTC+2). London/US window boundaries drift. Use zoneinfo('Europe/Berlin')."},
+      {"endpoint": "POST /api/telegram/test", "issue": "Sends a real message to the configured TELEGRAM_CHAT_ID on every call. Fine for keepalive but noisy; consider an idempotency window or a 'quiet=true' flag to just verify token validity via getMe()."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_settings_persistence.py",
+    "/app/backend/tests/test_strategies.py",
+    "/app/backend/tests/test_health_endpoints.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: reject invalid active_strategy IDs in POST /api/settings with 422 by validating against strategy_registry ids.",
+    "OPTIONAL: switch strategy_scanner.py to zoneinfo('Europe/Berlin') for DST-correct session windows.",
+    "OPTIONAL: add /api/telegram/test 'quiet mode' that verifies bot connectivity without spamming the chat.",
+    "OPTIONAL: convert POST /api/settings body to a Pydantic model (custom_sessions, pre_signal_enabled, pre_signal_rsi_zone, active_strategy) so unknown/invalid fields yield 422 instead of being silently dropped/accepted."
+  ],
+  "critical_code_review_comments": [
+    "strategies/registry.py registers strategies at module import time. Any exception raised inside a strategy __init__ will crash server startup silently through the FastAPI lifespan - wrap register() calls in try/except and log failures so a broken strategy doesn't take down the whole scanner.",
+    "strategy_scanner.update_settings still uses `if key in DEFAULT_SETTINGS`. active_strategy is in DEFAULT_SETTINGS so it's accepted, but there is NO check that the value is a known strategy id. Silently persisting an unknown id (e.g. 'foobar') leaves the app in a state where get_active_strategy falls back to scalping but /api/settings and /api/strategies disagree on the 'active' field.",
+    "Telegram frontend_url has a hardcoded default 'https://crypto-scanner-frontend-a98r.onrender.com' - the deep-link in messages will point to the wrong domain unless FRONTEND_URL is explicitly set in backend/.env. Consider requiring it or reading from REACT_APP_BACKEND_URL rewrite at deploy time.",
+    "server.py get_signals / get_symbol_signals cast signal['_id'] to str after fetching - but the freshly inserted `signal` object in start_bitunix_scanner is appended to active_signals AFTER Mongo insert_one, which mutates the dict to add ObjectId('_id'). If any downstream consumer serializes active_signals to JSON, it will crash. Not covered by these tests but flagged for review.",
+    "strategy_scanner._parse_time silently returns (0,0) on invalid time strings. A user submitting {start:'invalid'} would collapse the session window to (0,0)-(23,59) or similar - prefer raising a validation error at POST time."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_settings_persistence.py (added tests 10-15: active_strategy switching, partial-update preservation, restart persistence with active_strategy, telegram /test)",
+    "/app/backend/tests/test_strategies.py (NEW: 5 read-only tests for /api/strategies)",
+    "/app/test_reports/pytest/pytest_results.xml (regenerated)"
+  ],
+  "success_rate": {
+    "backend": "100% (36/36)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "test_credentials": "N/A - endpoints are public. Telegram creds are set in backend/.env (TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID).",
+  "seed_data_creation": "TestSettingsPersistence snapshots the original settings in setup_class and POSTs them back in teardown_class so the backend is left in its pre-test state. Note: teardown restores original active_strategy so the app is left on scalping_4_rules (or whatever was originally active).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Test files: /app/backend/tests/test_settings_persistence.py (all settings-mutating tests including active_strategy live here; xdist loadscope pins them to one worker), /app/backend/tests/test_strategies.py (read-only /api/strategies checks), /app/backend/tests/test_health_endpoints.py (health/coins/root/session/status). Run: `cd /app/backend && python -m pytest tests/ -v --tb=short --junitxml=/app/test_reports/pytest/pytest_results.xml`. DO NOT split the TestSettingsPersistence class - the shared scanner singleton would race across workers otherwise. External URL from /app/frontend/.env is picked up automatically via REACT_APP_BACKEND_URL. Note: test_15 sends a REAL Telegram message to the configured chat; this is intentional per the review request.",
+  "rca_of_the_issue": "Multi-Strategy refactor moved the original scalping logic into strategies/scalping_strategy.py (ScalpingStrategy.check_signal) unchanged, and added strategies/rsi_only_strategy.py + strategies/registry.py. strategy_scanner.py now holds `active_strategy` in DEFAULT_SETTINGS ('scalping_4_rules' default), get_active_strategy() reads the setting and dispatches via the registry with fallback to default. server.py exposes GET /api/strategies which returns registry.list_all() + scanner.settings.active_strategy. active_strategy is persisted through the same MongoDB upsert path as custom_sessions (test_14 confirms restart persistence). Scalping behavior is untouched - the class is a pure move of the previous inline logic, verified by code review. Header '24/7 Mode' bug is covered by tests 03 and 08 (empty or all-disabled custom_sessions => is_active=true + current_session contains '24/7')."
+}
