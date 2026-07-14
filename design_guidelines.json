@@ -1,0 +1,101 @@
+{
+  "theme": "dark",
+  "typography": {
+    "headings": {
+      "font_family": "Chivo",
+      "weights": ["light", "black"],
+      "banned_fonts": ["Inter", "Roboto", "Open Sans", "Space Grotesk"]
+    },
+    "body": {
+      "font_family": "Manrope"
+    },
+    "numbers_and_data": {
+      "font_family": "JetBrains Mono",
+      "instruction": "All trading numbers, prices, and metrics MUST use monospace for vertical alignment and technical feel."
+    },
+    "hierarchy_rules": "H1 max text-5xl, tight letter spacing for headings, uppercase tracking-wide for overlines/labels."
+  },
+  "colors": {
+    "archetype": "Swiss & High-Contrast (Trading Terminal Variant)",
+    "backgrounds": {
+      "base": "#0A0A0A",
+      "surface_level_1": "#121212",
+      "surface_level_2": "#1A1C23"
+    },
+    "accents": {
+      "long_signal_green": "#00FF66",
+      "short_signal_red": "#FF3366",
+      "warning_yellow": "#FFD700"
+    },
+    "text": {
+      "primary": "#FFFFFF",
+      "secondary": "#A1A4B0",
+      "muted": "#5C6070"
+    },
+    "borders": "#2A2D3A",
+    "forbidden_colors": ["#1B93A4", "#7351B7", "Generic full-screen gradients"]
+  },
+  "visual_enhancers": {
+    "surfaces": "Grid Borders (Technical Look). Expose the skeleton. Container uses border-collapse style layout. Solid backgrounds with a hard bottom border.",
+    "borders": "1px sharp borders. No soft UI shadows. Use 0px or 2px border-radius. Avoid muddy gray transparency.",
+    "effects": "Subtle grain texture on empty states. Flash neon borders when a trade rule triggers. Use 'The Tracing Beam' strategy for active signal cards."
+  },
+  "grids_and_layouts": {
+    "strategy": "Mode B: High Density Grid (Data-Heavy Dashboard)",
+    "structure": "Strict grid-cols-12 layout. Top Navigation, Sidebar (Top 10 Coins), Main Content (Charts), Right Panel (Signals & Trade Execution Info).",
+    "gaps": "Tight gaps (gap-2 to gap-4)",
+    "paddings": "Internal padding p-4 or p-6 to prevent text collision. Optical alignment for numerical values."
+  },
+  "components": {
+    "buttons": "Sharp edges (rounded-none or rounded-sm), 1px solid border, subtle inner highlight on hover. No generic pill shapes for pro trading tools.",
+    "cards": "Flat background, 1px border. No shadows by default. Rectangular, dense styles.",
+    "charts": "Use lightweight-charts (TradingView library) for the main Heikin Ashi 1min chart to achieve the exact requested TradingView feel. Use recharts for Top 10 coin sparklines.",
+    "notifications": "sonner for toasts (In-App notifications, full volume sound alerts).",
+    "indicators": "RSI (32/64 zones) and EMA (9/50) overlays must use high contrast accent colors with thin 1px stroke lines."
+  },
+  "motion_and_interactions": {
+    "hover_states": "ALWAYS explicitly set text color on hover. Use border color brightening instead of generic background shifts.",
+    "data_updates": "Flash green/red on real-time price changes (100ms flash).",
+    "loading": "Technical scanning lines or ASCII progress bars. Meaningful animations."
+  },
+  "accessibility": {
+    "contrast": "Minimum 4.5:1. Text shadow where needed over chart grids.",
+    "data_testid": "MANDATORY on all interactive elements (buttons, links, inputs, and trade action elements like data-testid='trigger-long-signal')."
+  },
+  "media_and_icons": {
+    "icon_library": "@phosphor-icons/react",
+    "images": [
+      {
+        "url": "https://images.unsplash.com/photo-1626162953675-544bf5a61ca6?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1MDV8MHwxfHNlYXJjaHwyfHxjcnlwdG8lMjBjb2luJTIwM2QlMjByZW5kZXJ8ZW58MHx8fHwxNzgzODcwOTE2fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Silver round crypto coin 3d render",
+        "category": "Empty State / Welcome Screen Background"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzd8MHwxfHNlYXJjaHwxfHx0cmFkaW5nJTIwY2hhcnQlMjBhYnN0cmFjdHxlbnwwfHx8fDE3ODM4NzA5MTZ8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Stock market candlestick chart abstract",
+        "category": "Settings Panel Background Overlay"
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Execute commands to install required dependencies: yarn add @phosphor-icons/react lightweight-charts recharts sonner framer-motion",
+    "Build a Dark-Theme only React dashboard in .js (JSX) format. Do NOT use .tsx or TypeScript syntax.",
+    "Construct the Layout: Header (Session Timer: London/US), Left Sidebar (Top 10 Coins Scanner with toggle), Main View (1min Heikin Ashi Chart), Right Sidebar (Live 4-Rule Signal Detection Checkbox System, TP/SL Levels, Performance Analytics).",
+    "Implement the 4-rule strategy UI visually: Rule 1 (EMA 50), Rule 2 (RSI 32/64), Rule 3 (EMA 9 Trigger), Rule 4 (2 Candle Time Limit). Create visual indicators when a condition is met.",
+    "Do NOT use HTML input type='date'. Customize Shadcn components to have sharp, 0px radius borders.",
+    "Create a 'Full-Screen Alert' Modal component that z-indexes over everything (z-[9999]) as requested for out-of-browser full-screen game interruptions.",
+    "Integrate sonner for standard notification tracking and emulate a Telegram bot settings panel.",
+    "Ensure all price and metric text elements use the JetBrains Mono font class for tabular lining."
+  ],
+  "universal_guidelines_for_main_agent": [
+    "Do not use transparent backgrounds under content or dropdowns.",
+    "Always use data-testid on every interactive element.",
+    "Do not apply global transitions (transition: all). Ensure specific properties.",
+    "Do not center-align the main app container. Always left-align data-heavy tables and grids.",
+    "Ensure crisp edges via semi-transparent borders. Avoid muddy shadows.",
+    "Create depth with layered z-indexes and 1px inner borders.",
+    "Avoid AI emojis. Use the specified Phosphor icons exclusively.",
+    "Do not invent placeholder image URLs. Only use the provided Unsplash URLs.",
+    "Follow standard UI/UX patterns for Dense Trading Dashboards: every pixel utilized, strict column alignments, and extremely high contrast on key call-to-action indicators."
+  ]
+}
