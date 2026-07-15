@@ -59,6 +59,13 @@ async def lifespan(app: FastAPI):
     app.mongodb_client = AsyncIOMotorClient(os.getenv("MONGO_URL"))
     app.mongodb = app.mongodb_client[os.getenv("DB_NAME", "crypto_scanner")]
     autotrader.set_db(app.mongodb)
+    autotrader.set_telegram(telegram)
+    # Load Bitunix contract catalogue so the symbol mapping is validated
+    # against the real contract list and qty/price step sizes are known.
+    try:
+        await trade_client.load_trading_pairs()
+    except Exception as e:
+        logger.error(f"Bitunix trading_pairs load failed: {e}")
     logger.info("Connected to MongoDB")
 
     saved = await app.mongodb.settings.find_one({"_id": "scanner_settings"})

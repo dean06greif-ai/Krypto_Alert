@@ -90,6 +90,31 @@ class TelegramNotifier:
             logger.error(f"Failed to send Telegram notification: {e}")
             return False
     
+    async def send_rejection(self, symbol: str, side: str, reason: str) -> bool:
+        """Notify that a live order was rejected by Bitunix and the trade
+        was NOT opened locally (no ghost position)."""
+        if not self.bot or not self.chat_id:
+            logger.warning("Telegram not configured, skipping rejection alert")
+            return False
+        try:
+            message = (
+                f"⛔ *ORDER ABGEBROCHEN*\n\n"
+                f"💰 *{symbol}* · {side}\n"
+                f"❌ Bitunix hat die Order abgelehnt:\n"
+                f"`{reason}`\n\n"
+                f"⚠️ Es wurde *kein* Trade lokal geöffnet."
+            )
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send rejection notification: {e}")
+            return False
+
     async def send_test_message(self) -> bool:
         """Send test message to verify bot setup"""
         if not self.bot or not self.chat_id:
