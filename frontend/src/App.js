@@ -212,7 +212,6 @@ function App() {
       toast.info('Admin-Login erforderlich');
       return;
     }
-    // Optimistic UI update
     setAutotradeCoins(prev => ({
       ...prev,
       [symbol]: { ...(prev[symbol] || {}), enabled: !!next },
@@ -242,12 +241,10 @@ function App() {
   };
 
   const toggleSignals = async (strategyId) => {
-    // Now uses strategy override for signals_enabled
     const currentOverride = strategyOverrides[strategyId] || {};
     const current = currentOverride.signals_enabled !== false;
     const newEnabled = !current;
     
-    // Update via new strategy endpoint
     try {
       const res = await fetch(`${API_URL}/api/autotrade/strategy/${strategyId}`, {
         method: 'POST',
@@ -283,12 +280,7 @@ function App() {
         customSessions={customSessions}
         activeStrategy={strategyMeta}
         berlinTime={berlinTime}
-        isAdmin={adminAuthed}
-        onAdminClick={handleAdminClick}
         onSettingsClick={() => requireAdmin(() => setShowSettings(true))}
-        controlState={controlState}
-        onControlChanged={loadControlState}
-        onRequireAdmin={() => requireAdmin(() => {})}
       />
 
       <div className="app-layout">

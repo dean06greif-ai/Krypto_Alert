@@ -76,6 +76,13 @@
   gap: 10px;
 }
 
+/* ---- Balance Widget Wrapper (Live + Paper side by side) ---- */
+.balance-widget-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .balance-widget {
   display: flex;
   align-items: center;
@@ -143,54 +150,72 @@
   align-items: center;
 }
 
-/* -------- admin control toggles (Stop Trades / Stop Signals) -------- */
-.control-toggles {
+/* Divider between Total Balance and Freies Kapital */
+.bw-divider {
+  width: 1px;
+  height: 24px;
+  background: #2A2D3A;
+  flex-shrink: 0;
+}
+
+/* ---- Paper Overlay Badge ---- */
+.paper-overlay {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.ctrl-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 40px;
-  padding: 0 10px;
-  border-radius: 10px;
   background: #0A0A0A;
-  border: 1px solid #2A2D3A;
-  color: #E6E7EE;
-  font-weight: 700;
-  font-size: 12px;
-  letter-spacing: 0.04em;
-  cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease, transform 80ms ease;
-}
-.ctrl-toggle:hover:not(:disabled) { border-color: #3A3E52; }
-.ctrl-toggle:active:not(:disabled) { transform: translateY(1px); }
-.ctrl-toggle:disabled { opacity: 0.55; cursor: not-allowed; }
-
-.ctrl-toggle.ctrl-on { color: #E6E7EE; }
-.ctrl-toggle.ctrl-on:hover:not(:disabled) { color: #FF4D4D; }
-
-.ctrl-toggle.ctrl-off {
-  color: #FFB020;
-  border-color: rgba(255, 176, 32, 0.5);
-  background: rgba(255, 176, 32, 0.08);
+  border: 1px solid rgba(0, 255, 102, 0.3);
+  border-radius: 10px;
+  padding: 6px 12px;
+  height: 40px;
+  animation: paperGlow 3s ease-in-out infinite;
 }
 
-.ctrl-label { font-size: 12px; }
+@keyframes paperGlow {
+  0%, 100% {
+    border-color: rgba(0, 255, 102, 0.3);
+  }
+  50% {
+    border-color: rgba(0, 255, 102, 0.6);
+  }
+}
 
-.ctrl-pill {
+.paper-overlay-mode {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   font-size: 10px;
-  font-weight: 900;
-  letter-spacing: 0.08em;
-  padding: 2px 7px;
-  border-radius: 999px;
-  line-height: 1;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #00FF66;
+  background: rgba(0, 255, 102, 0.12);
 }
-.ctrl-pill.on { color: #00FF66; background: rgba(0, 255, 102, 0.14); }
-.ctrl-pill.off { color: #FFB020; background: rgba(255, 176, 32, 0.18); }
+
+.paper-overlay-pnl {
+  display: flex;
+  align-items: center;
+}
+
+.paper-overlay-pnl .bw-value {
+  font-size: 12px;
+}
+
+.paper-overlay-open {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.1;
+}
+
+.paper-overlay-open .bw-label {
+  font-size: 8px;
+}
+
+.paper-overlay-open .bw-value {
+  font-size: 11px;
+}
 
 @media (max-width: 968px) {
   .header {
@@ -203,5 +228,9 @@
     grid-column: 1 / -1;
     order: 3;
     margin-top: 12px;
+  }
+
+  .balance-widget-wrapper {
+    flex-wrap: wrap;
   }
 }

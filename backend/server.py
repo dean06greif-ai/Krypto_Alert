@@ -1064,12 +1064,23 @@ async def close_trade(trade_id: str, _: bool = Depends(require_admin)):
 
 @app.get("/api/autotrade/balance")
 async def get_balance():
+    # Current mode (live or paper)
+    mode = autotrader.config.get("mode", "paper")
+
+    # ---- Primary mode stats (live or paper) ----
     open_ct = await app.mongodb.auto_trades.count_documents({"status": "open"})
     closed = await app.mongodb.auto_trades.find({"status": "closed"}).to_list(1000)
     pnl = round(sum(t.get("realized_pnl", 0) for t in closed), 4)
-    mode = autotrader.config.get("mode", "paper")
-    result = {"mode": mode, "realized_pnl": pnl, "open_trades": open_ct,
-              "closed_trades": len(closed), "bitunix_configured": trade_client.configured()}
+
+    result = {
+        "mode": mode,
+        "realized_pnl": pnl,
+        "open_trades": open_ct,
+        "closed_trades": len(closed),
+        "bitunix_configured": trade_client.configured(),
+    }
+
+    # ---- Live mode: fetch Bitunix balance ----
     if mode == "live" and trade_client.configured():
         try:
             bal = await trade_client.get_balance()
@@ -1082,8 +1093,27 @@ async def get_balance():
             result["bitunix_code"] = bal.get("code") if isinstance(bal, dict) else None
         except Exception as e:
             result["bitunix_error"] = str(e)[:120]
-    return result
 
+    # ---- Paper overlay: paper trade stats alongside live ----
+    # Only add paper stats if mode is live AND there are paper trades in DB
+    if mode == "live":
+        try:
+            paper_open = await app.mongodb.auto_trades.count_documents(
+                {"status": "open", "mode": "paper"}
+            )
+            paper_closed = await app.mongodb.auto_trades.find(
+                {"status": "closed", "mode": "paper"}
+            ).to_list(500)
+            paper_pnl = round(sum(t.get("realized_pnl", 0) for t in paper_closed), 4)
+            # Only include if there's actual paper activity
+            if paper_open > 0 or paper_pnl != 0 or len(paper_closed) > 0:
+                result["paper_pnl"] = paper_pnl
+                result["paper_open_trades"] = paper_open
+                result["paper_closed_trades"] = len(paper_closed)
+        except Exception:
+            pass  # Don't break the main balance if paper query fails
+
+    return result
 
 @app.post("/api/telegram/test")
 async def test_telegram(_: bool = Depends(require_admin)):
