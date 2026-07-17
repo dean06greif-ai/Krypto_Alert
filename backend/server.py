@@ -666,17 +666,21 @@ async def ai_review(body: Dict = None):
     body = body or {}
     strategy_id = body.get("strategy_id")
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise HTTPException(
             status_code=500,
-            detail="OPENAI_API_KEY nicht in backend/.env gesetzt. "
-                   "Trage deinen OpenAI Secret Key (sk-...) dort ein und starte das Backend neu."
+            detail="GEMINI_API_KEY nicht in backend/.env gesetzt. "
+                   "Hol dir einen kostenlosen Key unter https://aistudio.google.com/apikey, "
+                   "trage ihn dort ein und starte das Backend neu."
         )
 
-    # Modell konfigurierbar über .env (Default: gpt-4o-mini – günstig & zuverlässig
-    # für Krypto-Analyse; alternativ z.B. OPENAI_MODEL=gpt-4o für höhere Qualität).
-    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    # Modell konfigurierbar über .env. Default: gemini-2.5-pro – Googles
+    # Flaggschiff, beste Analyse-Qualität, ebenfalls im Free-Tier verfügbar
+    # (niedrigere Rate-Limits als Flash, für Coach-Analysen aber mehr als genug).
+    # Alternativen: gemini-2.5-flash (schneller, höhere Limits) oder
+    # gemini-2.0-flash.
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 
     stats = await _aggregate_ai_stats(strategy_id)
 
@@ -701,10 +705,15 @@ async def ai_review(body: Dict = None):
     )
 
     try:
-        # Offizielle OpenAI-Bibliothek (async) mit dem persönlichen Secret Key.
+        # Google Gemini via OpenAI-kompatiblem Endpoint – nutzt die bereits
+        # installierte openai-Bibliothek, spart eine zusätzliche Abhängigkeit.
+        # Doku: https://ai.google.dev/gemini-api/docs/openai
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=api_key)
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
         completion = await client.chat.completions.create(
             model=model_name,
             temperature=0.4,
@@ -715,7 +724,7 @@ async def ai_review(body: Dict = None):
         )
         review = (completion.choices[0].message.content or "").strip()
         if not review:
-            raise RuntimeError("Leere Antwort vom OpenAI-Modell erhalten.")
+            raise RuntimeError("Leere Antwort vom Gemini-Modell erhalten.")
     except HTTPException:
         raise
     except Exception as e:
