@@ -332,7 +332,8 @@ async def start_scanner():
 
 
 async def daily_reset_loop():
-    """At Berlin midnight: aggregate the day into compact analytics, delete raw signals."""
+    """At Berlin midnight: aggregate the day into compact analytics.
+    (Raw signals & closed trades are NOT deleted anymore – auf Nutzerwunsch.)"""
     global _last_reset_date
     _last_reset_date = scanner.berlin_date()
     while True:
@@ -374,10 +375,13 @@ async def perform_daily_reset(prev_date: str):
             await app.mongodb.trade_stats.update_one({"date": prev_date}, {"$set": {
                 "date": prev_date, "trades": ts["trades"], "pnl": round(ts.get("pnl") or 0, 4),
                 "wins": ts["wins"]}}, upsert=True)
-        # delete raw signals + closed trades from previous days (keep DB small)
-        await app.mongodb.signals.delete_many({"trade_date": {"$ne": scanner.berlin_date()}})
-        await app.mongodb.auto_trades.delete_many({"status": "closed",
-                                                   "trade_date": {"$ne": scanner.berlin_date()}})
+        # NOTE: Auto-Löschung deaktiviert – Signale und geschlossene Trades
+        # bleiben dauerhaft in der DB erhalten (auf Nutzerwunsch).
+        # Falls du die DB manuell aufräumen willst, nutze den POST /api/clear/{scope}
+        # Endpoint (siehe CLEAR_DELTAS).
+        # await app.mongodb.signals.delete_many({"trade_date": {"$ne": scanner.berlin_date()}})
+        # await app.mongodb.auto_trades.delete_many({"status": "closed",
+        #                                            "trade_date": {"$ne": scanner.berlin_date()}})
         open_signal_evals.clear()
         await broadcast({"type": "daily_reset", "date": prev_date})
     except Exception as e:
