@@ -97,6 +97,19 @@
   color: #fff;
 }
 
+/* Yellow dot indicator for LIVE auto-trade (replaces old red "L" badge).
+   Same visual language as the Lightning icon (small, coloured, no letter). */
+.strategy-trade-dot-live {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #FACC15; /* Tailwind yellow-400 */
+  box-shadow: 0 0 0 2px #0E0E0E;
+}
+
 .strategy-tabs-actions { display: flex; gap: 6px; }
 .strategy-tab-action {
   display: flex; align-items: center; justify-content: center;

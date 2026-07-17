@@ -52,6 +52,18 @@ _last_reset_date = None
 # without disabling per-coin/strategy configuration.
 control_state: Dict[str, bool] = {"trades_paused": False, "signals_paused": False}
 
+# In-memory cache of (strategy_id, symbol) -> enabled. Missing entry defaults
+# to True so per-strategy behaviour is unchanged for any combo that has not
+# been explicitly toggled off. Persisted in `strategy_coin_toggles`.
+strategy_coin_toggles: Dict[tuple, bool] = {}
+
+
+def toggle_enabled(strategy_id: str, symbol: str) -> bool:
+    """Return whether (strategy, coin) auto-trade is enabled. Default True."""
+    if not strategy_id or not symbol:
+        return True
+    return strategy_coin_toggles.get((strategy_id, symbol), True)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -98,6 +110,46 @@ async def lifespan(app: FastAPI):
         control_state["signals_paused"] = bool(ctrl.get("signals_paused", False))
     else:
         await app.mongodb.settings.insert_one({"_id": "control_state", **control_state})
+
+    # ---- strategy_coin_toggles: index + migration + in-memory cache ----
+    try:
+        await app.mongodb.strategy_coin_toggles.create_index(
+            [("strategy_id", 1), ("symbol", 1)], unique=True
+        )
+    except Exception as e:
+        logger.warning(f"strategy_coin_toggles index setup: {e}")
+
+    # Migration: seed enabled=True for every (existing strategy, symbol) combo
+    # that has no record yet. Missing rows already default to enabled=True via
+    # `toggle_enabled`, so this is idempotent and non-destructive.
+    all_strategy_ids = [m["id"] for m in strategy_registry.list_all()]
+    deleted_strats = set(scanner.settings.get("deleted_strategies", []))
+    all_strategy_ids = [sid for sid in all_strategy_ids if sid not in deleted_strats]
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if all_strategy_ids:
+        migration_ops = []
+        for sid in all_strategy_ids:
+            for sym in ALL_SYMBOLS:
+                migration_ops.append({
+                    "filter": {"strategy_id": sid, "symbol": sym},
+                    "update": {"$setOnInsert": {
+                        "strategy_id": sid, "symbol": sym,
+                        "enabled": True, "updated_at": now_iso,
+                    }},
+                })
+        for op in migration_ops:
+            try:
+                await app.mongodb.strategy_coin_toggles.update_one(
+                    op["filter"], op["update"], upsert=True
+                )
+            except Exception as e:
+                logger.debug(f"toggle migration skip {op['filter']}: {e}")
+
+    # Load toggles into cache
+    async for row in app.mongodb.strategy_coin_toggles.find({}):
+        strategy_coin_toggles[(row.get("strategy_id"), row.get("symbol"))] = \
+            bool(row.get("enabled", True))
+    logger.info(f"Loaded {len(strategy_coin_toggles)} strategy_coin_toggles")
 
     logger.info("Probing market data sources...")
     await feed.probe("BTCUSDT")
@@ -184,6 +236,11 @@ async def admin_verify(_: bool = Depends(require_admin)):
 async def process_signal(signal: Dict, candles: List[Dict]):
     # Global admin kill-switch for signals -> completely suppress emission
     if control_state.get("signals_paused"):
+        return
+    # Per-(coin, strategy) toggle: if this combination is disabled, skip
+    # BOTH signal emission and auto-trade for the pair. Other coins/strategies
+    # remain unaffected.
+    if not toggle_enabled(signal.get("strategy_id"), signal.get("symbol")):
         return
     signal["id"] = str(uuid.uuid4())
     symbol = signal["symbol"]
@@ -956,6 +1013,34 @@ async def get_strategy_autotrade(strategy_id: str):
     overrides = autotrader.config.get("strategy_overrides", {})
     cfg = overrides.get(strategy_id, dict(DEFAULT_STRATEGY_OVERRIDE))
     return {"strategy_id": strategy_id, "config": cfg, "defaults": DEFAULT_STRATEGY_OVERRIDE}
+
+
+# ---- NEW: per (strategy, coin) enable/disable toggle ----
+@app.get("/api/strategies/{strategy_id}/coins")
+async def get_strategy_coin_toggles(strategy_id: str):
+    """Return {symbol: enabled} map for the given strategy across ALL_SYMBOLS.
+    Missing rows default to True (kept enabled)."""
+    result: Dict[str, bool] = {}
+    for sym in ALL_SYMBOLS:
+        result[sym] = strategy_coin_toggles.get((strategy_id, sym), True)
+    return {"strategy_id": strategy_id, "coins": result}
+
+
+@app.put("/api/strategies/{strategy_id}/coins/{symbol}")
+async def set_strategy_coin_toggle(strategy_id: str, symbol: str,
+                                    body: Dict, _: bool = Depends(require_admin)):
+    """Enable/disable auto-trade + signals for ONE (strategy, coin) pair."""
+    enabled = bool(body.get("enabled", True))
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await app.mongodb.strategy_coin_toggles.update_one(
+        {"strategy_id": strategy_id, "symbol": symbol},
+        {"$set": {"strategy_id": strategy_id, "symbol": symbol,
+                  "enabled": enabled, "updated_at": now_iso}},
+        upsert=True,
+    )
+    strategy_coin_toggles[(strategy_id, symbol)] = enabled
+    return {"status": "success", "strategy_id": strategy_id,
+            "symbol": symbol, "enabled": enabled}
 
 
 @app.get("/api/autotrade/trades")

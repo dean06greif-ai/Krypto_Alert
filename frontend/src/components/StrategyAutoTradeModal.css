@@ -29,3 +29,46 @@
   background: #FF336622;
   color: #FF3366;
 }
+
+/* Per-coin toggle grid inside the strategy modal */
+.sat-coin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+  gap: 6px;
+  margin-top: 4px;
+}
+.sat-coin-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid #2A2D3A;
+  background: #151515;
+  color: #A1A4B0;
+  font-family: 'Manrope', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.sat-coin-chip:hover { border-color: #3A3D4A; }
+.sat-coin-chip .sat-coin-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #5C6070;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.sat-coin-chip.on {
+  border-color: #00FF66;
+  background: #00FF6614;
+  color: #FFFFFF;
+}
+.sat-coin-chip.on .sat-coin-dot {
+  background: #00FF66;
+  box-shadow: 0 0 6px #00FF6688;
+}
+.sat-coin-chip.off {
+  opacity: 0.65;
+}

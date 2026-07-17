@@ -32,12 +32,14 @@ const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) 
   const [cfg, setCfg] = useState(null);
   const [saving, setSaving] = useState(false);
   const [bitunixOk, setBitunixOk] = useState(false);
+  const [coinToggles, setCoinToggles] = useState({}); // {SYMBOL: bool}
 
   const load = async () => {
     try {
-      const [stratRes, configRes] = await Promise.all([
+      const [stratRes, configRes, coinsRes] = await Promise.all([
         fetch(`${API_URL}/api/autotrade/strategy/${strategyId}`).then(r => r.json()),
         fetch(`${API_URL}/api/autotrade/config`).then(r => r.json()),
+        fetch(`${API_URL}/api/strategies/${strategyId}/coins`).then(r => r.json()),
       ]);
       // Merge: coin defaults (backend) -> strategy override -> local defaults
       const coinDefaults = configRes.defaults || {};
@@ -54,6 +56,7 @@ const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) 
       }
       setCfg(loadedCfg);
       setBitunixOk(configRes.bitunix_configured);
+      setCoinToggles(coinsRes.coins || {});
     } catch (e) {
       console.error('Failed to load strategy autotrade config', e);
       setCfg({ ...DEFAULT_CFG });
@@ -63,6 +66,34 @@ const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [strategyId]);
 
   const update = (k, v) => setCfg(prev => ({ ...prev, [k]: v }));
+
+  const toggleCoin = async (symbol) => {
+    if (!isAdmin()) {
+      toast.error('Admin-Login erforderlich');
+      return;
+    }
+    const next = !(coinToggles[symbol] !== false); // flip; missing => true, so first click => false
+    const prev = coinToggles;
+    // Optimistic update
+    setCoinToggles({ ...prev, [symbol]: next });
+    try {
+      const res = await fetch(
+        `${API_URL}/api/strategies/${strategyId}/coins/${symbol}`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ enabled: next }),
+        }
+      );
+      if (!res.ok) {
+        setCoinToggles(prev); // rollback
+        toast.error(`Fehler bei ${symbol}`);
+      }
+    } catch (e) {
+      setCoinToggles(prev); // rollback
+      toast.error('Verbindungsfehler');
+    }
+  };
 
   const setMode = (newMode) => {
     setCfg(prev => ({
@@ -324,6 +355,36 @@ const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) 
             />
             <span>Signal-Benachrichtigungen (Telegram) aktiv</span>
           </label>
+        </div>
+
+        {/* Per-coin activation grid: enable/disable this strategy for
+             individual coins. Parameters above stay the same for all coins.
+             Missing entries default to enabled=true. */}
+        <div className="at-block">
+          <div className="at-block-title">AKTIVE COINS FÜR DIESE STRATEGIE</div>
+          <div className="sat-coin-grid" data-testid="sat-coin-grid">
+            {['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','DOTUSDT','POLUSDT','GOLD','SILVER','OIL'].map(sym => {
+              const on = coinToggles[sym] !== false;
+              const short = ['GOLD','SILVER','OIL'].includes(sym) ? sym : sym.replace('USDT','');
+              return (
+                <button
+                  key={sym}
+                  type="button"
+                  className={`sat-coin-chip ${on ? 'on' : 'off'}`}
+                  onClick={() => toggleCoin(sym)}
+                  data-testid={`sat-coin-toggle-${sym}`}
+                  title={on ? `Aktiv – klick zum Ausschalten (${sym})` : `Inaktiv – klick zum Einschalten (${sym})`}
+                >
+                  <span className="sat-coin-dot" />
+                  <span className="sat-coin-name">{short}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ color: '#5C6070', fontSize: '11px', marginTop: '6px' }}>
+            Parameter oben gelten für alle aktiven Coins. Deaktivierte Coins
+            werden von dieser Strategie ignoriert (keine Signale, keine Trades).
+          </div>
         </div>
 
         <button

@@ -63,7 +63,8 @@ const StrategyTabs = ({
                 data-testid={`strategy-trade-toggle-${strat.id}`}
               >
                 <Lightning size={13} weight={atStatus ? 'fill' : 'regular'} />
-                {atStatus && <span className="strategy-trade-badge">{atStatus}</span>}
+                {atStatus === 'L' && <span className="strategy-trade-dot-live" data-testid={`strategy-live-dot-${strat.id}`} />}
+                {atStatus === 'P' && <span className="strategy-trade-badge">P</span>}
               </button>
 
               {/* Bell Icon - Signal Notifications Toggle */}
