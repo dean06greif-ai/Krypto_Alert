@@ -573,6 +573,142 @@ async def clear_analytics(body: Dict, _: bool = Depends(require_admin)):
     return {"status": "success", "range": rng, "deleted": deleted}
 
 
+# ---------------- KI-Analyse (GPT-4o via Emergent Universal Key) ----------------
+async def _aggregate_ai_stats(strategy_id: str = None) -> Dict:
+    """Aggregate signals, trades and strategy definitions for the AI review."""
+    q = {"strategy_id": strategy_id} if strategy_id else {}
+    signals = await app.mongodb.signals.find(q).sort("timestamp", -1).limit(5000).to_list(5000)
+    trades = await app.mongodb.auto_trades.find({"status": "closed"}).sort("closed_at", -1).limit(500).to_list(500)
+
+    total = len(signals)
+    wins = sum(1 for s in signals if s.get("result") == "win")
+    losses = sum(1 for s in signals if s.get("result") == "loss")
+    decided = wins + losses
+    win_rate = round(wins / decided * 100, 1) if decided else 0.0
+    avg_crv = round(sum((s.get("crv") or 0) for s in signals) / total, 2) if total else 0.0
+
+    trade_wins = sum(1 for t in trades if t.get("result") == "win")
+    trade_losses = sum(1 for t in trades if t.get("result") == "loss")
+    tdec = trade_wins + trade_losses
+    trade_win_rate = round(trade_wins / tdec * 100, 1) if tdec else 0.0
+    total_pnl = round(sum((t.get("realized_pnl") or 0) for t in trades), 2)
+
+    # Max Drawdown aus kumulierter PnL-Kurve
+    sorted_trades = sorted(trades, key=lambda t: t.get("opened_at") or "")
+    equity, peak, max_dd = 0.0, 0.0, 0.0
+    for t in sorted_trades:
+        equity += (t.get("realized_pnl") or 0)
+        peak = max(peak, equity)
+        max_dd = max(max_dd, peak - equity)
+
+    # Statistik pro Strategie
+    by_strategy: Dict[str, Dict] = {}
+    for s in signals:
+        sid = s.get("strategy_id", "unknown")
+        e = by_strategy.setdefault(sid, {"total": 0, "wins": 0, "losses": 0, "crv_sum": 0.0})
+        e["total"] += 1
+        if s.get("result") == "win":
+            e["wins"] += 1
+        elif s.get("result") == "loss":
+            e["losses"] += 1
+        e["crv_sum"] += (s.get("crv") or 0)
+    strat_stats = []
+    for sid, e in by_strategy.items():
+        strat = strategy_registry.get(sid)
+        d = e["wins"] + e["losses"]
+        strat_stats.append({
+            "id": sid,
+            "name": getattr(strat, "STRATEGY_NAME", sid) if strat else sid,
+            "total_signals": e["total"],
+            "wins": e["wins"],
+            "losses": e["losses"],
+            "win_rate_prozent": round(e["wins"] / d * 100, 1) if d else 0.0,
+            "avg_crv": round(e["crv_sum"] / e["total"], 2) if e["total"] else 0.0,
+        })
+
+    # Häufigste Verlust-Setups (Kombination erfüllter Regeln)
+    setup_counts: Dict[str, int] = {}
+    for s in signals:
+        if s.get("result") != "loss":
+            continue
+        rules = s.get("rules_met") or {}
+        met = sorted(k for k, v in rules.items() if v)
+        key = " + ".join(met) if met else "(keine Regel als erfüllt geloggt)"
+        setup_counts[key] = setup_counts.get(key, 0) + 1
+    top_losing = [{"regeln": k, "verluste": v}
+                  for k, v in sorted(setup_counts.items(), key=lambda x: -x[1])[:5]]
+
+    # Regel-Definitionen der Strategien
+    strategies_meta = strategy_registry.list_all()
+
+    return {
+        "gefiltert_auf_strategie": strategy_id,
+        "signale_gesamt": {"anzahl": total, "wins": wins, "losses": losses,
+                           "win_rate_prozent": win_rate, "avg_crv": avg_crv},
+        "trades_geschlossen": {"anzahl": len(trades), "wins": trade_wins, "losses": trade_losses,
+                               "win_rate_prozent": trade_win_rate, "pnl_gesamt_usdt": total_pnl,
+                               "max_drawdown_usdt": round(max_dd, 2)},
+        "je_strategie": sorted(strat_stats, key=lambda x: -x["total_signals"]),
+        "haeufigste_verlust_setups": top_losing,
+        "strategien_definitionen": strategies_meta,
+    }
+
+
+@app.post("/api/analytics/ai-review")
+async def ai_review(body: Dict = None):
+    """Sendet aggregierte Trading-Statistiken an GPT-4o und liefert eine deutsche
+    Coach-Auswertung zurück (welche Regeln nicht funktionieren + konkrete Vorschläge)."""
+    import json as _json
+    body = body or {}
+    strategy_id = body.get("strategy_id")
+
+    api_key = os.getenv("EMERGENT_LLM_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500,
+                            detail="EMERGENT_LLM_KEY (oder OPENAI_API_KEY) nicht in .env gesetzt")
+
+    stats = await _aggregate_ai_stats(strategy_id)
+
+    system_msg = (
+        "Du bist ein erfahrener Trading-Coach mit Fokus auf Krypto-Daytrading und Scalping. "
+        "Analysiere die übergebenen Statistiken sachlich, prägnant und pragmatisch. "
+        "Nenne konkret welche Regeln nicht funktionieren und schlage präzise, umsetzbare "
+        "Änderungen vor. Antworte auf Deutsch in Markdown mit klaren Sektionen."
+    )
+    user_text = (
+        "Hier sind die aktuellen aggregierten Trading-Statistiken und Regel-Definitionen "
+        "als JSON:\n\n```json\n"
+        + _json.dumps(stats, ensure_ascii=False, indent=2, default=str)
+        + "\n```\n\nAufgabe:\n"
+        "1) **Kurz-Fazit** (2–3 Sätze zur Gesamtlage).\n"
+        "2) **Problematische Regeln / Setups** – nenne konkret welche Regeln oder "
+        "Regelkombinationen unterdurchschnittlich performen und WARUM (Zahlen zitieren).\n"
+        "3) **Konkrete Änderungsvorschläge** – parameterbezogen oder logikbezogen, "
+        "so präzise wie möglich (z.B. RSI-Schwelle anpassen, TP/SL-Ratio ändern, "
+        "Setup entfernen, Filter hinzufügen).\n"
+        "Antworte auf Deutsch."
+    )
+
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = (LlmChat(api_key=api_key,
+                        session_id=f"ai-review-{uuid.uuid4()}",
+                        system_message=system_msg)
+                .with_model("openai", "gpt-4o"))
+        try:
+            chat.with_params(temperature=0.4)
+        except Exception:
+            pass
+        review = await chat.send_message(UserMessage(text=user_text))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("KI-Analyse fehlgeschlagen")
+        raise HTTPException(status_code=502, detail=f"KI-Analyse fehlgeschlagen: {e}")
+
+    return {"review": review, "stats": stats}
+
+
 @app.get("/api/analytics/time-based/{symbol}")
 async def get_time_based(symbol: str):
     pipeline = [

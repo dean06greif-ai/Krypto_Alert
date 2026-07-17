@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { TrendUp, TrendDown, Target, Clock, ChartBar, Lightning, CheckCircle, XCircle, Trash, Warning } from '@phosphor-icons/react';
+import { TrendUp, TrendDown, Target, Clock, ChartBar, Lightning, CheckCircle, XCircle, Trash, Warning, Sparkle } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import { authHeaders } from '../auth';
 import './PerformanceAnalytics.css';
@@ -23,6 +23,9 @@ const PerformanceAnalytics = ({ performance, strategies = [], signals, selectedC
   const [clearRange, setClearRange] = useState('24h');
   const [clearing, setClearing] = useState(false);
   const [tradeFilter, setTradeFilter] = useState('all');
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiReview, setAiReview] = useState(null);
+  const [aiError, setAiError] = useState(null);
 
   const getCoinName = (s) => s?.replace('USDT', '') || '';
   const stratName = (t) => t?.strategy_name || strategies.find(s => s.id === t?.strategy_id)?.name || t?.strategy_id || '—';
@@ -114,6 +117,33 @@ const PerformanceAnalytics = ({ performance, strategies = [], signals, selectedC
 
   const rangeLabel = CLEAR_RANGES.find(r => r.key === clearRange)?.label || '';
 
+  const runAiReview = async () => {
+    setAiLoading(true);
+    setAiError(null);
+    setAiReview(null);
+    try {
+      const res = await fetch(`${API_URL}/api/analytics/ai-review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(selectedStrategy ? { strategy_id: selectedStrategy } : {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = data?.detail || `Fehler ${res.status}`;
+        setAiError(msg);
+        toast.error(`KI-Analyse fehlgeschlagen: ${msg}`);
+      } else {
+        setAiReview(data.review || 'Keine Antwort erhalten.');
+        toast.success('KI-Analyse fertig');
+      }
+    } catch (e) {
+      setAiError('Verbindungsfehler zum Backend');
+      toast.error('Verbindungsfehler');
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
   return (
     <div className="performance-analytics" data-testid="performance-analytics">
       <div className="analytics-header">
@@ -178,6 +208,38 @@ const PerformanceAnalytics = ({ performance, strategies = [], signals, selectedC
               ))}
               {stratSignals.length === 0 && <div className="no-data">Keine Signale heute</div>}
             </div>
+          </div>
+
+          <div className="analytics-section ai-review-section">
+            <div className="section-title">KI-COACH ANALYSE</div>
+            <p className="ai-review-hint">
+              Aggregiert Win-Rate, CRV, Drawdown, häufigste Verlust-Setups und Regel-Definitionen
+              und lässt GPT-4o eine kompakte Coach-Auswertung erstellen (Deutsch).
+            </p>
+            <button
+              className="ai-review-btn"
+              onClick={runAiReview}
+              disabled={aiLoading}
+              data-testid="ai-review-start-btn"
+            >
+              <Sparkle size={14} weight="bold" />
+              {aiLoading ? 'Analysiere...' : 'KI-Analyse starten'}
+            </button>
+            {aiLoading && (
+              <div className="ai-review-loading" data-testid="ai-review-loading">
+                <div className="ai-spinner" /> Coach denkt nach...
+              </div>
+            )}
+            {aiError && !aiLoading && (
+              <div className="ai-review-error" data-testid="ai-review-error">
+                <Warning size={14} weight="bold" /> {aiError}
+              </div>
+            )}
+            {aiReview && !aiLoading && (
+              <div className="ai-review-card" data-testid="ai-review-result">
+                <pre className="ai-review-text">{aiReview}</pre>
+              </div>
+            )}
           </div>
         </>
       )}

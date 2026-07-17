@@ -126,3 +126,6 @@ watchfiles==1.2.0
 websockets==16.0
 yarl==1.24.2
 zipp==4.1.0
+# --- KI-Analyse (GPT-4o via Emergent Universal Key) ---
+# Install: pip install emergentintegrations --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
+emergentintegrations
