@@ -662,10 +662,17 @@ async def ai_review(body: Dict = None):
     body = body or {}
     strategy_id = body.get("strategy_id")
 
-    api_key = os.getenv("EMERGENT_LLM_KEY") or os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500,
-                            detail="EMERGENT_LLM_KEY (oder OPENAI_API_KEY) nicht in .env gesetzt")
+        raise HTTPException(
+            status_code=500,
+            detail="OPENAI_API_KEY nicht in backend/.env gesetzt. "
+                   "Trage deinen OpenAI Secret Key (sk-...) dort ein und starte das Backend neu."
+        )
+
+    # Modell konfigurierbar über .env (Default: gpt-4o-mini – günstig & zuverlässig
+    # für Krypto-Analyse; alternativ z.B. OPENAI_MODEL=gpt-4o für höhere Qualität).
+    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     stats = await _aggregate_ai_stats(strategy_id)
 
@@ -690,23 +697,28 @@ async def ai_review(body: Dict = None):
     )
 
     try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-        chat = (LlmChat(api_key=api_key,
-                        session_id=f"ai-review-{uuid.uuid4()}",
-                        system_message=system_msg)
-                .with_model("openai", "gpt-4o"))
-        try:
-            chat.with_params(temperature=0.4)
-        except Exception:
-            pass
-        review = await chat.send_message(UserMessage(text=user_text))
+        # Offizielle OpenAI-Bibliothek (async) mit dem persönlichen Secret Key.
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=api_key)
+        completion = await client.chat.completions.create(
+            model=model_name,
+            temperature=0.4,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_text},
+            ],
+        )
+        review = (completion.choices[0].message.content or "").strip()
+        if not review:
+            raise RuntimeError("Leere Antwort vom OpenAI-Modell erhalten.")
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("KI-Analyse fehlgeschlagen")
         raise HTTPException(status_code=502, detail=f"KI-Analyse fehlgeschlagen: {e}")
 
-    return {"review": review, "stats": stats}
+    return {"review": review, "stats": stats, "model": model_name}
 
 
 @app.get("/api/analytics/time-based/{symbol}")

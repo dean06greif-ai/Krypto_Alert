@@ -211,11 +211,6 @@ const PerformanceAnalytics = ({ performance, strategies = [], signals, selectedC
           </div>
 
           <div className="analytics-section ai-review-section">
-            <div className="section-title">KI-COACH ANALYSE</div>
-            <p className="ai-review-hint">
-              Aggregiert Win-Rate, CRV, Drawdown, häufigste Verlust-Setups und Regel-Definitionen
-              und lässt GPT-4o eine kompakte Coach-Auswertung erstellen (Deutsch).
-            </p>
             <button
               className="ai-review-btn"
               onClick={runAiReview}
