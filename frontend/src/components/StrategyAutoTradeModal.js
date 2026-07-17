@@ -7,14 +7,25 @@ import './StrategyAutoTradeModal.css';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
+// Full parity with coin AutoTradeModal + explicit "off" mode.
+// Reihenfolge der Tabs: LIVE | PAPER | AUS (AUS voreingestellt).
 const DEFAULT_CFG = {
   enabled: false,
   mode: 'off',
-  max_capital: 2.0,
-  sl_pct: 1.0,
-  tp_pct: 2.0,
-  leverage: 5,
   signals_enabled: true,
+  max_capital: 100.0,
+  leverage: 10,
+  order_type: 'MARKET',
+  sl_mode: 'structure',
+  sl_fixed_percent: 1.0,
+  sl_ticks: 4,
+  sl_lookback: 10,
+  tp1_crv: 1.0,
+  tp1_close_percent: 50,
+  tp_full_crv: 2.0,
+  breakeven_enabled: true,
+  fee_percent: 0.06,
+  trade_pre_signals: false,
 };
 
 const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) => {
@@ -28,7 +39,19 @@ const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) 
         fetch(`${API_URL}/api/autotrade/strategy/${strategyId}`).then(r => r.json()),
         fetch(`${API_URL}/api/autotrade/config`).then(r => r.json()),
       ]);
-      const loadedCfg = { ...DEFAULT_CFG, ...stratRes.config };
+      // Merge: coin defaults (backend) -> strategy override -> local defaults
+      const coinDefaults = configRes.defaults || {};
+      const stratDefaults = stratRes.defaults || {};
+      const loadedCfg = {
+        ...DEFAULT_CFG,
+        ...coinDefaults,
+        ...stratDefaults,
+        ...(stratRes.config || {}),
+      };
+      // Ensure mode is one of live|paper|off
+      if (!['live', 'paper', 'off'].includes(loadedCfg.mode)) {
+        loadedCfg.mode = 'off';
+      }
       setCfg(loadedCfg);
       setBitunixOk(configRes.bitunix_configured);
     } catch (e) {
@@ -45,7 +68,8 @@ const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) 
     setCfg(prev => ({
       ...prev,
       mode: newMode,
-      enabled: newMode !== 'off' ? true : prev.enabled,
+      // enabled tracks mode: off -> disabled, live/paper -> enabled
+      enabled: newMode !== 'off',
     }));
   };
 
@@ -66,7 +90,9 @@ const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) 
         return;
       }
       if (res.ok) {
-        toast.success(`Auto-Trade für ${strategyName || strategyId} gespeichert`);
+        toast.success(
+          `Auto-Trade ${strategyName || strategyId} gespeichert (${cfg.mode.toUpperCase()})`
+        );
         onSaved && onSaved();
         onClose();
       } else {
@@ -81,6 +107,7 @@ const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) 
   };
 
   if (!cfg) return null;
+  const posSize = ((cfg.max_capital || 0) * (cfg.leverage || 1)).toFixed(0);
 
   return (
     <div className="at-overlay" onClick={onClose}>
@@ -95,15 +122,15 @@ const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) 
           </button>
         </div>
 
-        {/* Mode Selection - same style as coin AutoTradeModal */}
+        {/* Mode Selection – Reihenfolge: LIVE | PAPER | AUS (AUS default rechts) */}
         <div className="at-mode-row">
           <div className="at-mode-toggle sat-mode-3" data-testid="sat-mode-toggle">
             <button
-              className={cfg.mode === 'off' ? 'active off' : ''}
-              onClick={() => setMode('off')}
-              data-testid="sat-mode-off"
+              className={cfg.mode === 'live' ? 'active live' : ''}
+              onClick={() => setMode('live')}
+              data-testid="sat-mode-live"
             >
-              AUS
+              LIVE
             </button>
             <button
               className={cfg.mode === 'paper' ? 'active' : ''}
@@ -113,11 +140,11 @@ const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) 
               PAPER
             </button>
             <button
-              className={cfg.mode === 'live' ? 'active live' : ''}
-              onClick={() => setMode('live')}
-              data-testid="sat-mode-live"
+              className={cfg.mode === 'off' ? 'active off' : ''}
+              onClick={() => setMode('off')}
+              data-testid="sat-mode-off"
             >
-              LIVE
+              AUS
             </button>
           </div>
         </div>
@@ -126,22 +153,22 @@ const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) 
           <div className={`at-warn ${bitunixOk ? '' : 'err'}`}>
             <Warning size={16} weight="fill" />
             {bitunixOk
-              ? 'LIVE Modus: Echte Orders auf Bitunix werden ausgeführt.'
+              ? 'LIVE Modus: Echte Orders auf Bitunix (nur auf deinem Server ausführbar).'
               : 'Bitunix API nicht konfiguriert!'}
           </div>
         )}
 
         {cfg.mode !== 'off' && (
           <>
-            {/* Capital & Leverage */}
+            {/* Capital + leverage (Bitunix-like) */}
             <div className="at-section">
               <div className="at-field">
-                <label>Max. Kapital (USDT)</label>
+                <label>Max. Kapital (USDT Margin)</label>
                 <input
                   type="number"
                   value={cfg.max_capital}
-                  min={0.1}
-                  step={0.1}
+                  min={1}
+                  step={1}
                   onChange={e => update('max_capital', parseFloat(e.target.value) || 0)}
                   data-testid="sat-max-capital"
                 />
@@ -158,45 +185,140 @@ const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) 
                 />
               </div>
             </div>
-
-            {/* SL & TP */}
-            <div className="at-section">
-              <div className="at-field">
-                <label>Stop Loss %</label>
-                <input
-                  type="number"
-                  value={cfg.sl_pct}
-                  min={0.1}
-                  step={0.1}
-                  onChange={e => update('sl_pct', parseFloat(e.target.value) || 0)}
-                  data-testid="sat-sl-pct"
-                />
-              </div>
-              <div className="at-field">
-                <label>Take Profit %</label>
-                <input
-                  type="number"
-                  value={cfg.tp_pct}
-                  min={0.1}
-                  step={0.1}
-                  onChange={e => update('tp_pct', parseFloat(e.target.value) || 0)}
-                  data-testid="sat-tp-pct"
-                />
-              </div>
+            <div className="at-possize">
+              Positionsgröße: <b>{posSize} USDT</b> · Order: {cfg.order_type || 'MARKET'}
             </div>
 
-            <div className="at-possize">
-              Positionsgröße: <b>{((cfg.max_capital || 0) * (cfg.leverage || 1)).toFixed(0)} USDT</b>
+            {/* SL system */}
+            <div className="at-block">
+              <div className="at-block-title">STOP LOSS</div>
+              <div className="at-seg">
+                <button
+                  className={cfg.sl_mode === 'structure' ? 'active' : ''}
+                  onClick={() => update('sl_mode', 'structure')}
+                  data-testid="sat-sl-mode-structure"
+                >
+                  Struktur (Support/Widerstand)
+                </button>
+                <button
+                  className={cfg.sl_mode === 'fixed' ? 'active' : ''}
+                  onClick={() => update('sl_mode', 'fixed')}
+                  data-testid="sat-sl-mode-fixed"
+                >
+                  Fest %
+                </button>
+              </div>
+              {cfg.sl_mode === 'structure' ? (
+                <div className="at-section">
+                  <div className="at-field">
+                    <label>Ticks unter/über Tief/Hoch</label>
+                    <input
+                      type="number"
+                      value={cfg.sl_ticks}
+                      onChange={e => update('sl_ticks', parseInt(e.target.value) || 0)}
+                      data-testid="sat-sl-ticks"
+                    />
+                  </div>
+                  <div className="at-field">
+                    <label>Lookback (Kerzen)</label>
+                    <input
+                      type="number"
+                      value={cfg.sl_lookback}
+                      onChange={e => update('sl_lookback', parseInt(e.target.value) || 0)}
+                      data-testid="sat-sl-lookback"
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="at-field">
+                  <label>SL Abstand %</label>
+                  <input
+                    type="number"
+                    step={0.1}
+                    value={cfg.sl_fixed_percent}
+                    onChange={e => update('sl_fixed_percent', parseFloat(e.target.value) || 0)}
+                    data-testid="sat-sl-percent"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* TP system */}
+            <div className="at-block">
+              <div className="at-block-title">TAKE PROFIT (dynamisch)</div>
+              <div className="at-section">
+                <div className="at-field">
+                  <label>TP1 bei CRV</label>
+                  <input
+                    type="number"
+                    step={0.1}
+                    value={cfg.tp1_crv}
+                    onChange={e => update('tp1_crv', parseFloat(e.target.value) || 0)}
+                    data-testid="sat-tp1-crv"
+                  />
+                </div>
+                <div className="at-field">
+                  <label>TP1 schließt % der Position</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={99}
+                    value={cfg.tp1_close_percent}
+                    onChange={e => update('tp1_close_percent', parseInt(e.target.value) || 0)}
+                    data-testid="sat-tp1-close"
+                  />
+                </div>
+              </div>
+              <div className="at-field">
+                <label>TP Full bei CRV</label>
+                <input
+                  type="number"
+                  step={0.1}
+                  value={cfg.tp_full_crv}
+                  onChange={e => update('tp_full_crv', parseFloat(e.target.value) || 0)}
+                  data-testid="sat-tpfull-crv"
+                />
+              </div>
+              <label className="at-check">
+                <input
+                  type="checkbox"
+                  checked={!!cfg.breakeven_enabled}
+                  onChange={e => update('breakeven_enabled', e.target.checked)}
+                  data-testid="sat-breakeven"
+                />
+                <span>Bei CRV 1 → Stop Loss auf Break-Even + Gebühren</span>
+              </label>
+              {cfg.breakeven_enabled && (
+                <div className="at-field small">
+                  <label>Gebühren % (Round-Trip Offset)</label>
+                  <input
+                    type="number"
+                    step={0.01}
+                    value={cfg.fee_percent}
+                    onChange={e => update('fee_percent', parseFloat(e.target.value) || 0)}
+                    data-testid="sat-fee"
+                  />
+                </div>
+              )}
+              <label className="at-check">
+                <input
+                  type="checkbox"
+                  checked={!!cfg.trade_pre_signals}
+                  onChange={e => update('trade_pre_signals', e.target.checked)}
+                  data-testid="sat-pre-signals"
+                />
+                <span>Auch Pre-Signale traden</span>
+              </label>
             </div>
           </>
         )}
 
-        {/* Signal Notifications Toggle */}
+        {/* Signal Notifications Toggle – always visible */}
         <div className="at-block">
           <label className="at-check">
             <input
               type="checkbox"
-              checked={cfg.signals_enabled}
+              checked={cfg.signals_enabled !== false}
               onChange={e => update('signals_enabled', e.target.checked)}
               data-testid="sat-signals-enabled"
             />
@@ -214,7 +336,10 @@ const StrategyAutoTradeModal = ({ strategyId, strategyName, onClose, onSaved }) 
         </button>
 
         <div style={{ textAlign: 'center', color: '#5C6070', fontSize: '11px', lineHeight: 1.4 }}>
-          <small>Diese Einstellungen überschreiben die globalen Auto-Trade Settings für Signale dieser Strategie.</small>
+          <small>
+            Diese Einstellungen überschreiben die globalen Auto-Trade Settings für Signale
+            dieser Strategie. Modus &quot;AUS&quot; deaktiviert Trades und ist voreingestellt.
+          </small>
         </div>
       </div>
     </div>

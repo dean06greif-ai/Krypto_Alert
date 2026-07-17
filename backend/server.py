@@ -899,14 +899,30 @@ async def set_coin_config(symbol: str, cfg: Dict, _: bool = Depends(require_admi
 
 
 # ---- NEW: Strategy-level auto-trade override ----
+# Mirrors the coin-level DEFAULT_COIN_CFG so a strategy can fully override
+# the trade parameters. `mode` here is per-strategy ('live'|'paper'|'off')
+# and takes precedence over the global config mode. 'off' disables the
+# strategy entirely (no trades, no signal notifications override happens
+# through signals_enabled).
 DEFAULT_STRATEGY_OVERRIDE = {
     "enabled": False,
     "mode": "off",  # "live" | "paper" | "off"
-    "max_capital": 2.0,
-    "sl_pct": 1.0,
-    "tp_pct": 2.0,
-    "leverage": 5,
     "signals_enabled": True,  # Bell toggle for signal notifications
+    # Trade sizing
+    "max_capital": 100.0,
+    "leverage": 10,
+    # SL config
+    "sl_mode": "structure",       # structure | fixed
+    "sl_fixed_percent": 1.0,
+    "sl_ticks": 4,
+    "sl_lookback": 10,
+    # TP config
+    "tp1_crv": 1.0,
+    "tp1_close_percent": 50,
+    "tp_full_crv": 2.0,
+    "breakeven_enabled": True,
+    "fee_percent": 0.06,
+    "trade_pre_signals": False,
 }
 
 

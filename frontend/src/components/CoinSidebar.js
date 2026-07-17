@@ -8,7 +8,7 @@ const GROUPS = [
 ];
 
 const CoinSidebar = ({ selectedCoin, onSelectCoin, performance, notifications = {}, onToggleNotification,
-                       ruleStates = {}, selectedStrategy, autotradeCoins = {}, onOpenAutoTrade }) => {
+                       ruleStates = {}, selectedStrategy, autotradeCoins = {}, onToggleAutoTrade }) => {
   const getCoinName = (s) => (["GOLD", "SILVER", "OIL"].includes(s) ? s : s.replace('USDT', ''));
   const getPerf = (s) => performance.find(p => p.symbol === s) || {};
 
@@ -39,8 +39,8 @@ const CoinSidebar = ({ selectedCoin, onSelectCoin, performance, notifications = 
           <div className="coin-header-right">
             <button
               className={`auto-toggle ${autoOn ? 'auto-on' : ''}`}
-              onClick={(e) => { e.stopPropagation(); onOpenAutoTrade && onOpenAutoTrade(coin); }}
-              title={autoOn ? 'Auto-Trade AKTIV (klicken zum Konfigurieren)' : 'Auto-Trade konfigurieren'}
+              onClick={(e) => { e.stopPropagation(); onToggleAutoTrade && onToggleAutoTrade(coin, !autoOn); }}
+              title={autoOn ? 'Auto-Trade AKTIV – klicken zum Deaktivieren' : 'Auto-Trade INAKTIV – klicken zum Aktivieren'}
               data-testid={`autotrade-btn-${coin}`}
             >
               <Lightning size={14} weight={autoOn ? 'fill' : 'regular'} />

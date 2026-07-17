@@ -10,7 +10,6 @@ import PerformanceAnalytics from './components/PerformanceAnalytics';
 import AlertModal from './components/AlertModal';
 import SettingsPanel from './components/SettingsPanel';
 import StrategyBuilder from './components/StrategyBuilder';
-import AutoTradeModal from './components/AutoTradeModal';
 import StrategyAutoTradeModal from './components/StrategyAutoTradeModal';
 import ErrorBoundary from './components/ErrorBoundary';
 import AdminLogin from './components/AdminLogin';
@@ -41,7 +40,6 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showStrategySettings, setShowStrategySettings] = useState(false);
   const [showBuilder, setShowBuilder] = useState(false);
-  const [autoTradeSymbol, setAutoTradeSymbol] = useState(null);
   const [strategyAutoTradeId, setStrategyAutoTradeId] = useState(null);
   const [adminAuthed, setAdminAuthed] = useState(isAdminFn());
   const [showLogin, setShowLogin] = useState(false);
@@ -208,6 +206,41 @@ function App() {
     toast.success(`${symbol.replace('USDT','')}: Alerts ${!current ? 'AN' : 'AUS'}`);
   };
 
+  const toggleCoinAutoTrade = async (symbol, next) => {
+    if (!isAdminFn()) {
+      setShowLogin(true);
+      toast.info('Admin-Login erforderlich');
+      return;
+    }
+    // Optimistic UI update
+    setAutotradeCoins(prev => ({
+      ...prev,
+      [symbol]: { ...(prev[symbol] || {}), enabled: !!next },
+    }));
+    try {
+      const res = await fetch(`${API_URL}/api/autotrade/coin/${symbol}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ enabled: !!next }),
+      });
+      if (res.status === 401) {
+        toast.error('Nicht autorisiert – bitte als Admin anmelden');
+        loadAutotrade();
+        return;
+      }
+      if (!res.ok) {
+        toast.error('Fehler beim Umschalten');
+        loadAutotrade();
+        return;
+      }
+      toast.success(`${symbol.replace('USDT', '')}: Auto-Trade ${next ? 'AN' : 'AUS'}`);
+      loadAutotrade();
+    } catch (e) {
+      toast.error('Verbindungsfehler');
+      loadAutotrade();
+    }
+  };
+
   const toggleSignals = async (strategyId) => {
     // Now uses strategy override for signals_enabled
     const currentOverride = strategyOverrides[strategyId] || {};
@@ -268,7 +301,7 @@ function App() {
           ruleStates={ruleStates}
           selectedStrategy={selectedStrategy}
           autotradeCoins={autotradeCoins}
-          onOpenAutoTrade={(sym) => setAutoTradeSymbol(sym)}
+          onToggleAutoTrade={toggleCoinAutoTrade}
         />
 
         <div className="main-content">
@@ -339,9 +372,6 @@ function App() {
           onClose={() => setShowBuilder(false)}
           onChanged={loadStrategies}
         />
-      )}
-      {autoTradeSymbol && (
-        <AutoTradeModal symbol={autoTradeSymbol} onClose={() => { setAutoTradeSymbol(null); loadAutotrade(); }} />
       )}
       {strategyAutoTradeId && (
         <StrategyAutoTradeModal

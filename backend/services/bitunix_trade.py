@@ -469,12 +469,44 @@ class AutoTradeManager:
 
     def set_config(self, config: Dict):
         self.config = {"mode": config.get("mode", "paper"),
-                       "coins": config.get("coins", {})}
+                       "coins": config.get("coins", {}),
+                       "strategy_overrides": config.get("strategy_overrides", {})}
 
     def coin_cfg(self, symbol: str) -> Dict:
         c = dict(DEFAULT_COIN_CFG)
         c.update(self.config.get("coins", {}).get(symbol, {}))
         return c
+
+    def strategy_override(self, strategy_id: Optional[str]) -> Dict:
+        if not strategy_id:
+            return {}
+        return dict(self.config.get("strategy_overrides", {}).get(strategy_id, {}))
+
+    def effective_cfg(self, symbol: str, strategy_id: Optional[str]) -> Dict:
+        """
+        Merge coin defaults with any strategy-level override. Strategy override
+        values (max_capital, leverage, sl_*, tp_*, breakeven, fee, pre_signals)
+        take precedence when set. Reserved keys ('mode', 'enabled',
+        'signals_enabled') are handled separately by the caller.
+        """
+        cfg = self.coin_cfg(symbol)
+        so = self.strategy_override(strategy_id)
+        RESERVED = {"mode", "enabled", "signals_enabled"}
+        for k, v in so.items():
+            if k in RESERVED or v is None:
+                continue
+            cfg[k] = v
+        return cfg
+
+    def effective_mode(self, strategy_id: Optional[str]) -> str:
+        """Return effective trading mode. Strategy override wins if set to
+        'live' or 'paper'. 'off' means the strategy is disabled and no trade
+        should be opened. Falls back to global config mode."""
+        so = self.strategy_override(strategy_id)
+        sm = so.get("mode")
+        if sm in ("live", "paper", "off"):
+            return sm
+        return self.config.get("mode", "paper")
 
     def is_enabled(self, symbol: str) -> bool:
         return self.coin_cfg(symbol).get("enabled", False)
@@ -549,7 +581,14 @@ class AutoTradeManager:
 
     async def on_signal(self, signal: Dict, candles: List[Dict]) -> Optional[Dict]:
         symbol = signal["symbol"]
-        cfg = self.coin_cfg(symbol)
+        strategy_id = signal.get("strategy_id")
+        # Effective mode: strategy override wins over global mode.
+        # 'off' means this strategy is disabled -> no trade.
+        eff_mode = self.effective_mode(strategy_id)
+        if eff_mode == "off":
+            return None
+        cfg = self.effective_cfg(symbol, strategy_id)
+        # Coin-level enable flag is still the master switch.
         if not cfg["enabled"]:
             return None
         if signal.get("signal_class") == "PRE_SIGNAL" and not cfg["trade_pre_signals"]:
@@ -566,7 +605,7 @@ class AutoTradeManager:
         sl, tp1, tpf, risk, atr = self._levels(cfg, side, entry, candles, signal)
         qty = round((float(cfg["max_capital"]) * float(cfg["leverage"])) / entry, 6)
 
-        mode = self.config.get("mode", "paper")
+        mode = eff_mode
 
         # ---- LIVE MODE: hit the exchange FIRST; only persist on success ----
         if mode == "live" and self.client.configured():
