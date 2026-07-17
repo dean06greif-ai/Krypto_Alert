@@ -55,16 +55,6 @@ const StrategyTabs = ({
               <span className="strategy-tab-name">{strat.name}</span>
               {strat.is_custom && <span className="strategy-tab-custom">C</span>}
               
-              {/* Bell Icon - Signal Notifications Toggle */}
-              <button
-                className={`strategy-tab-bell ${sigOn ? 'on' : 'off'}`}
-                onClick={(e) => { e.stopPropagation(); onToggleSignals(strat.id); }}
-                title={sigOn ? 'Signale AN (klick zum Ausschalten)' : 'Signale AUS (klick zum Einschalten)'}
-                data-testid={`strategy-bell-toggle-${strat.id}`}
-              >
-                {sigOn ? <Bell size={13} weight="fill" /> : <BellSlash size={13} weight="regular" />}
-              </button>
-              
               {/* Lightning Icon - Auto-Trade Status */}
               <button
                 className={`strategy-tab-trade ${atStatus ? 'active' : ''} ${atStatus === 'L' ? 'live' : ''}`}
@@ -74,6 +64,16 @@ const StrategyTabs = ({
               >
                 <Lightning size={13} weight={atStatus ? 'fill' : 'regular'} />
                 {atStatus && <span className="strategy-trade-badge">{atStatus}</span>}
+              </button>
+
+              {/* Bell Icon - Signal Notifications Toggle */}
+              <button
+                className={`strategy-tab-bell ${sigOn ? 'on' : 'off'}`}
+                onClick={(e) => { e.stopPropagation(); onToggleSignals(strat.id); }}
+                title={sigOn ? 'Signale AN (klick zum Ausschalten)' : 'Signale AUS (klick zum Einschalten)'}
+                data-testid={`strategy-bell-toggle-${strat.id}`}
+              >
+                {sigOn ? <Bell size={13} weight="fill" /> : <BellSlash size={13} weight="regular" />}
               </button>
             </div>
           );

@@ -1,17 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { X, TelegramLogo, Warning, Lightning, ChartLineUp, Plus, Trash, ArrowLeft, Sliders } from '@phosphor-icons/react';
+import { X, TelegramLogo, Lightning, ChartLineUp, Plus, Trash, Sliders, PauseCircle, PlayCircle, Power } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import { authHeaders, isAdmin } from '../auth';
 import './SettingsPanel.css';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
-const SettingsPanel = ({ onClose, focusStrategy, mode = 'all' }) => {
-  // mode: 'all' = alle Tabs, 'general' = nur Telegram, 'strategy' = Strategie + Zeitfenster
+const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onControlChanged }) => {
+  // mode: 'all' = alle Tabs, 'general' = Steuerung + Telegram, 'strategy' = Strategie + Zeitfenster
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
-  const defaultTab = mode === 'general' ? 'telegram' : 'strategy';
-  const [activeTab, setActiveTab] = useState(defaultTab); // strategy, sessions, telegram
+  const defaultTab = mode === 'general' ? 'control' : 'strategy';
+  const [activeTab, setActiveTab] = useState(defaultTab); // strategy, sessions, control, telegram
   const [settings, setSettings] = useState({
     custom_sessions: [],
     pre_signal_enabled: true,
@@ -22,6 +22,7 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all' }) => {
   const [strategies, setStrategies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [paramCoin, setParamCoin] = useState(''); // '' = Global, else per-coin override
+  const [busy, setBusy] = useState(false);
   const ALL_COINS = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","AVAXUSDT","DOTUSDT","POLUSDT","GOLD","SILVER","OIL"];
 
   useEffect(() => {
@@ -75,6 +76,33 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all' }) => {
       toast.error('Verbindungsfehler beim Speichern');
     } finally {
       setSaving(false);
+    }
+  };
+
+  // ---- Control State Toggle (same API as Header) ----
+  const toggleControl = async (kind) => {
+    if (!isAdmin()) { toast.error('Admin-Login erforderlich'); return; }
+    if (busy) return;
+    setBusy(true);
+    try {
+      const path = kind === 'trades' ? 'stop-trades' : 'stop-signals';
+      const r = await fetch(`${API_URL}/api/control/${path}`, {
+        method: 'POST', headers: { ...authHeaders() },
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const d = await r.json();
+      if (kind === 'trades') {
+        toast.success(d.trades_paused
+          ? `Trades gestoppt${d.closed_trades ? ` – ${d.closed_trades} Bot-Trade(s) geschlossen` : ''}`
+          : 'Trades wieder aktiv');
+      } else {
+        toast.success(d.signals_paused ? 'Signals gestoppt' : 'Signals wieder aktiv');
+      }
+      onControlChanged && onControlChanged();
+    } catch (e) {
+      toast.error('Fehler: ' + (e.message || 'unbekannt'));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -227,6 +255,17 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all' }) => {
               Zeitfenster
             </button>
           )}
+          {/* NEW: Steuerung Tab - links neben Telegram */}
+          {mode !== 'strategy' && (
+            <button 
+              className={`settings-tab ${activeTab === 'control' ? 'active' : ''}`}
+              onClick={() => setActiveTab('control')}
+              data-testid="tab-control"
+            >
+              <Power size={16} weight="bold" />
+              Steuerung
+            </button>
+          )}
           {mode !== 'strategy' && (
             <button 
               className={`settings-tab ${activeTab === 'telegram' ? 'active' : ''}`}
@@ -243,7 +282,6 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all' }) => {
           {/* STRATEGY TAB */}
           {activeTab === 'strategy' && (
             <>
-              {/* Parameter Editor for the ACTIVE (selected tab) strategy only */}
               {activeStrategy && (
                 <div className="settings-section">
                   <div className="section-simple-header">
@@ -319,7 +357,6 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all' }) => {
                 </div>
               )}
 
-              {/* Pre-Signal Setting */}
               <div className="settings-section">
                 <div className="setting-toggle">
                   <div className="toggle-info">
@@ -420,6 +457,78 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all' }) => {
                 
                 <div className="info-hint">
                   💡 Alle Zeiten in deutscher Zeit (MEZ/CET). Ohne Zeitfenster → 24/7 Modus.
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* NEW: STEUERUNG TAB */}
+          {activeTab === 'control' && (
+            <>
+              <div className="settings-section">
+                <div className="section-simple-header">
+                  <h3>
+                    <Power size={18} weight="bold" style={{marginRight: '8px', display: 'inline-block', verticalAlign: 'middle'}} />
+                    Master-Steuerung
+                  </h3>
+                </div>
+
+                <div className="control-card" data-testid="control-trades-card">
+                  <div className="control-card-header">
+                    <div className="control-card-info">
+                      <div className="control-card-title">Bot-Trades</div>
+                      <div className="control-card-desc">
+                        Alle automatischen Trades global starten oder stoppen. Beim Stoppen werden offene Bot-Trades geschlossen.
+                      </div>
+                    </div>
+                    <button
+                      className={`control-master-btn ${controlState?.trades_paused ? 'paused' : 'active'}`}
+                      onClick={() => toggleControl('trades')}
+                      disabled={busy}
+                      data-testid="control-toggle-trades"
+                    >
+                      {controlState?.trades_paused
+                        ? <PlayCircle size={22} weight="fill" />
+                        : <PauseCircle size={22} weight="fill" />}
+                      <span className="control-master-label">
+                        {controlState?.trades_paused ? 'TRADES AUS' : 'TRADES AN'}
+                      </span>
+                      <span className={`control-master-pill ${controlState?.trades_paused ? 'off' : 'on'}`}>
+                        {controlState?.trades_paused ? 'GESTOPPT' : 'AKTIV'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="control-card" data-testid="control-signals-card">
+                  <div className="control-card-header">
+                    <div className="control-card-info">
+                      <div className="control-card-title">Signale</div>
+                      <div className="control-card-desc">
+                        Alle Signal-Benachrichtigungen global aktivieren oder deaktivieren.
+                      </div>
+                    </div>
+                    <button
+                      className={`control-master-btn ${controlState?.signals_paused ? 'paused' : 'active'}`}
+                      onClick={() => toggleControl('signals')}
+                      disabled={busy}
+                      data-testid="control-toggle-signals"
+                    >
+                      {controlState?.signals_paused
+                        ? <PlayCircle size={22} weight="fill" />
+                        : <PauseCircle size={22} weight="fill" />}
+                      <span className="control-master-label">
+                        {controlState?.signals_paused ? 'SIGNALE AUS' : 'SIGNALE AN'}
+                      </span>
+                      <span className={`control-master-pill ${controlState?.signals_paused ? 'off' : 'on'}`}>
+                        {controlState?.signals_paused ? 'GESTOPPT' : 'AKTIV'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="info-hint">
+                  💡 Diese Einstellungen gelten global für alle Strategien und Coins. Änderungen werden sofort wirksam.
                 </div>
               </div>
             </>

@@ -315,10 +315,22 @@ function App() {
         <AlertModal signal={currentAlert} onClose={() => setShowAlert(false)} />
       )}
       {showSettings && (
-        <SettingsPanel onClose={() => { setShowSettings(false); loadStrategies(); }} focusStrategy={selectedStrategy} mode="general" />
+        <SettingsPanel
+          onClose={() => { setShowSettings(false); loadStrategies(); }}
+          focusStrategy={selectedStrategy}
+          mode="general"
+          controlState={controlState}
+          onControlChanged={loadControlState}
+        />
       )}
       {showStrategySettings && (
-        <SettingsPanel onClose={() => { setShowStrategySettings(false); loadStrategies(); }} focusStrategy={selectedStrategy} mode="strategy" />
+        <SettingsPanel
+          onClose={() => { setShowStrategySettings(false); loadStrategies(); }}
+          focusStrategy={selectedStrategy}
+          mode="strategy"
+          controlState={controlState}
+          onControlChanged={loadControlState}
+        />
       )}
       {showBuilder && (
         <StrategyBuilder
