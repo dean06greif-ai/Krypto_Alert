@@ -87,7 +87,7 @@ async def lifespan(app: FastAPI):
         at_cfg.pop("_id", None)
         autotrader.set_config(at_cfg)
     else:
-        cfg = {"mode": os.getenv("TRADING_MODE", "paper"), "coins": {}}
+        cfg = {"mode": os.getenv("TRADING_MODE", "paper"), "coins": {}, "strategy_overrides": {}}
         await app.mongodb.settings.insert_one({"_id": "autotrade_config", **cfg})
         autotrader.set_config(cfg)
 
@@ -187,6 +187,7 @@ async def process_signal(signal: Dict, candles: List[Dict]):
         return
     signal["id"] = str(uuid.uuid4())
     symbol = signal["symbol"]
+    strategy_id = signal.get("strategy_id")
     notify = scanner.is_notify_enabled(symbol)
     signal["notify"] = notify
     await app.mongodb.signals.insert_one(dict(signal))
@@ -194,9 +195,15 @@ async def process_signal(signal: Dict, candles: List[Dict]):
         open_signal_evals.append({
             "id": signal["id"], "symbol": symbol, "type": signal["type"],
             "sl": signal["stop_loss"], "tp1": signal["take_profit_1"],
-            "strategy_id": signal.get("strategy_id"),
+            "strategy_id": strategy_id,
         })
-    if notify:
+    
+    # Check strategy override for signal notifications (bell)
+    strategy_overrides = autotrader.config.get("strategy_overrides", {})
+    strat_override = strategy_overrides.get(strategy_id, {})
+    signals_enabled_for_strategy = strat_override.get("signals_enabled", True)
+    
+    if notify and signals_enabled_for_strategy:
         # Enrich the signal with the per-coin TP1 close percent so the
         # Telegram message reflects the actual configured partial (was
         # hardcoded to 40% before).
@@ -696,7 +703,8 @@ async def builder_options():
 @app.get("/api/autotrade/config")
 async def get_autotrade_config():
     return {"config": autotrader.config, "defaults": DEFAULT_COIN_CFG,
-            "bitunix_configured": trade_client.configured()}
+            "bitunix_configured": trade_client.configured(),
+            "strategy_overrides": autotrader.config.get("strategy_overrides", {})}
 
 
 @app.post("/api/autotrade/config")
@@ -704,9 +712,11 @@ async def set_autotrade_config(config: Dict, _: bool = Depends(require_admin)):
     if "mode" not in config:
         config["mode"] = autotrader.config.get("mode", "paper")
     config.setdefault("coins", autotrader.config.get("coins", {}))
+    config.setdefault("strategy_overrides", autotrader.config.get("strategy_overrides", {}))
     autotrader.set_config(config)
     await app.mongodb.settings.update_one({"_id": "autotrade_config"},
-                                          {"$set": {"mode": config["mode"], "coins": config["coins"]}},
+                                          {"$set": {"mode": config["mode"], "coins": config["coins"], 
+                                                    "strategy_overrides": config.get("strategy_overrides", {})}},
                                           upsert=True)
     return {"status": "success", "config": autotrader.config}
 
@@ -718,11 +728,57 @@ async def set_coin_config(symbol: str, cfg: Dict, _: bool = Depends(require_admi
     merged.update(coins.get(symbol, {}))
     merged.update(cfg)
     coins[symbol] = merged
-    new_cfg = {"mode": autotrader.config.get("mode", "paper"), "coins": coins}
+    new_cfg = {"mode": autotrader.config.get("mode", "paper"), "coins": coins,
+               "strategy_overrides": autotrader.config.get("strategy_overrides", {})}
     autotrader.set_config(new_cfg)
     await app.mongodb.settings.update_one({"_id": "autotrade_config"},
-                                          {"$set": {"mode": new_cfg["mode"], "coins": coins}}, upsert=True)
+                                          {"$set": {"mode": new_cfg["mode"], "coins": coins,
+                                                    "strategy_overrides": new_cfg.get("strategy_overrides", {})}}, upsert=True)
     return {"status": "success", "coin": symbol, "config": merged}
+
+
+# ---- NEW: Strategy-level auto-trade override ----
+DEFAULT_STRATEGY_OVERRIDE = {
+    "enabled": False,
+    "mode": "off",  # "live" | "paper" | "off"
+    "max_capital": 2.0,
+    "sl_pct": 1.0,
+    "tp_pct": 2.0,
+    "leverage": 5,
+    "signals_enabled": True,  # Bell toggle for signal notifications
+}
+
+
+@app.post("/api/autotrade/strategy/{strategy_id}")
+async def set_strategy_autotrade(strategy_id: str, cfg: Dict, _: bool = Depends(require_admin)):
+    """Set auto-trade configuration for a specific strategy.
+    This overrides the global mode and coin-level settings when this strategy fires."""
+    overrides = dict(autotrader.config.get("strategy_overrides", {}))
+    current = overrides.get(strategy_id, dict(DEFAULT_STRATEGY_OVERRIDE))
+    current.update(cfg)
+    overrides[strategy_id] = current
+    
+    new_cfg = {
+        "mode": autotrader.config.get("mode", "paper"),
+        "coins": autotrader.config.get("coins", {}),
+        "strategy_overrides": overrides
+    }
+    autotrader.set_config(new_cfg)
+    await app.mongodb.settings.update_one(
+        {"_id": "autotrade_config"},
+        {"$set": {"mode": new_cfg["mode"], "coins": new_cfg["coins"], 
+                  "strategy_overrides": overrides}},
+        upsert=True
+    )
+    return {"status": "success", "strategy_id": strategy_id, "config": current}
+
+
+@app.get("/api/autotrade/strategy/{strategy_id}")
+async def get_strategy_autotrade(strategy_id: str):
+    """Get auto-trade configuration for a specific strategy."""
+    overrides = autotrader.config.get("strategy_overrides", {})
+    cfg = overrides.get(strategy_id, dict(DEFAULT_STRATEGY_OVERRIDE))
+    return {"strategy_id": strategy_id, "config": cfg, "defaults": DEFAULT_STRATEGY_OVERRIDE}
 
 
 @app.get("/api/autotrade/trades")

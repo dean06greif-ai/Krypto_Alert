@@ -1,18 +1,50 @@
 import React from 'react';
-import { Plus, Gear, Lightning } from '@phosphor-icons/react';
+import { Plus, Gear, Lightning, Bell, BellSlash } from '@phosphor-icons/react';
 import './StrategyTabs.css';
 
-const StrategyTabs = ({ strategies, enabledIds, selected, signalsEnabled, onSelect, onToggleSignals, onManage, onEditParams }) => {
+const StrategyTabs = ({ 
+  strategies, 
+  enabledIds, 
+  selected, 
+  signalsEnabled, 
+  strategyOverrides,
+  onSelect, 
+  onToggleSignals, 
+  onManage, 
+  onEditParams,
+  onOpenStrategyAutoTrade 
+}) => {
   const tabs = enabledIds
     .map(id => strategies.find(s => s.id === id))
     .filter(Boolean);
+
+  // Get auto-trade status badge for a strategy
+  const getAutoTradeStatus = (strategyId) => {
+    const override = strategyOverrides?.[strategyId];
+    if (!override || !override.enabled || override.mode === 'off') {
+      return null; // No badge when off
+    }
+    return override.mode === 'live' ? 'L' : 'P';
+  };
+
+  // Check if signals are enabled for a strategy (Bell icon state)
+  const isSignalsEnabled = (strategyId) => {
+    const override = strategyOverrides?.[strategyId];
+    // Default to signalsEnabled state if no override
+    if (override && override.signals_enabled !== undefined) {
+      return override.signals_enabled;
+    }
+    return signalsEnabled[strategyId] !== false;
+  };
 
   return (
     <div className="strategy-tabs-bar" data-testid="strategy-tabs">
       <div className="strategy-tabs-scroll">
         {tabs.map(strat => {
           const isActive = selected === strat.id;
-          const sigOn = signalsEnabled[strat.id] !== false;
+          const sigOn = isSignalsEnabled(strat.id);
+          const atStatus = getAutoTradeStatus(strat.id);
+          
           return (
             <div
               key={strat.id}
@@ -22,13 +54,26 @@ const StrategyTabs = ({ strategies, enabledIds, selected, signalsEnabled, onSele
             >
               <span className="strategy-tab-name">{strat.name}</span>
               {strat.is_custom && <span className="strategy-tab-custom">C</span>}
+              
+              {/* Bell Icon - Signal Notifications Toggle */}
               <button
-                className={`strategy-tab-signal ${sigOn ? 'on' : 'off'}`}
+                className={`strategy-tab-bell ${sigOn ? 'on' : 'off'}`}
                 onClick={(e) => { e.stopPropagation(); onToggleSignals(strat.id); }}
-                title={sigOn ? 'Signale AN (klick zum Ausschalten)' : 'Signale AUS'}
-                data-testid={`strategy-signal-toggle-${strat.id}`}
+                title={sigOn ? 'Signale AN (klick zum Ausschalten)' : 'Signale AUS (klick zum Einschalten)'}
+                data-testid={`strategy-bell-toggle-${strat.id}`}
               >
-                <Lightning size={13} weight={sigOn ? 'fill' : 'regular'} />
+                {sigOn ? <Bell size={13} weight="fill" /> : <BellSlash size={13} weight="regular" />}
+              </button>
+              
+              {/* Lightning Icon - Auto-Trade Status */}
+              <button
+                className={`strategy-tab-trade ${atStatus ? 'active' : ''} ${atStatus === 'L' ? 'live' : ''}`}
+                onClick={(e) => { e.stopPropagation(); onOpenStrategyAutoTrade && onOpenStrategyAutoTrade(strat.id); }}
+                title={atStatus === 'L' ? 'Auto-Trade LIVE (klick zum Konfigurieren)' : atStatus === 'P' ? 'Auto-Trade PAPER (klick zum Konfigurieren)' : 'Auto-Trade AUS (klick zum Konfigurieren)'}
+                data-testid={`strategy-trade-toggle-${strat.id}`}
+              >
+                <Lightning size={13} weight={atStatus ? 'fill' : 'regular'} />
+                {atStatus && <span className="strategy-trade-badge">{atStatus}</span>}
               </button>
             </div>
           );

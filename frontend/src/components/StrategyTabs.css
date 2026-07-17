@@ -44,13 +44,59 @@
   font-size: 9px; font-weight: 800; background: #00A8FF; color: #001018;
   border-radius: 4px; padding: 1px 4px;
 }
-.strategy-tab-signal {
-  display: flex; align-items: center; justify-content: center;
-  border: none; background: transparent; cursor: pointer; padding: 2px; border-radius: 4px;
+
+/* Bell Icon - Signal Notifications */
+.strategy-tab-bell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
 }
-.strategy-tab-signal.on { color: #00FF66; }
-.strategy-tab-signal.off { color: #5C6070; }
-.strategy-tab-signal:hover { background: #ffffff10; }
+.strategy-tab-bell.on { color: #00FF66; }
+.strategy-tab-bell.off { color: #5C6070; }
+.strategy-tab-bell:hover { background: #ffffff10; }
+
+/* Lightning Icon - Auto-Trade Status */
+.strategy-tab-trade {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  position: relative;
+  transition: color 0.15s, background 0.15s;
+  color: #5C6070;
+}
+.strategy-tab-trade.active { color: #00A8FF; }
+.strategy-tab-trade.active.live { color: #FF3366; }
+.strategy-tab-trade:hover { background: #ffffff10; }
+
+/* Trade Status Badge (L/P) */
+.strategy-trade-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  font-size: 8px;
+  font-weight: 900;
+  padding: 1px 3px;
+  border-radius: 3px;
+  line-height: 1;
+  background: #00A8FF;
+  color: #001018;
+}
+.strategy-tab-trade.live .strategy-trade-badge {
+  background: #FF3366;
+  color: #fff;
+}
+
 .strategy-tabs-actions { display: flex; gap: 6px; }
 .strategy-tab-action {
   display: flex; align-items: center; justify-content: center;

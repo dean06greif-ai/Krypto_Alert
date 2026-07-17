@@ -11,6 +11,7 @@ import AlertModal from './components/AlertModal';
 import SettingsPanel from './components/SettingsPanel';
 import StrategyBuilder from './components/StrategyBuilder';
 import AutoTradeModal from './components/AutoTradeModal';
+import StrategyAutoTradeModal from './components/StrategyAutoTradeModal';
 import ErrorBoundary from './components/ErrorBoundary';
 import AdminLogin from './components/AdminLogin';
 import { Toaster, toast } from 'sonner';
@@ -30,6 +31,7 @@ function App() {
   const [candleData, setCandleData] = useState({});
   const [notifications, setNotifications] = useState({});
   const [autotradeCoins, setAutotradeCoins] = useState({});
+  const [strategyOverrides, setStrategyOverrides] = useState({});
   const [sessionActive, setSessionActive] = useState(false);
   const [currentSession, setCurrentSession] = useState('');
   const [customSessions, setCustomSessions] = useState([]);
@@ -39,6 +41,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showBuilder, setShowBuilder] = useState(false);
   const [autoTradeSymbol, setAutoTradeSymbol] = useState(null);
+  const [strategyAutoTradeId, setStrategyAutoTradeId] = useState(null);
   const [adminAuthed, setAdminAuthed] = useState(isAdminFn());
   const [showLogin, setShowLogin] = useState(false);
   const [controlState, setControlState] = useState({ trades_paused: false, signals_paused: false });
@@ -68,6 +71,7 @@ function App() {
     try {
       const data = await fetch(`${API_URL}/api/autotrade/config`).then(r => r.json());
       setAutotradeCoins((data.config && data.config.coins) || {});
+      setStrategyOverrides(data.strategy_overrides || (data.config && data.config.strategy_overrides) || {});
     } catch (e) { console.error(e); }
   }, []);
 
@@ -204,11 +208,29 @@ function App() {
   };
 
   const toggleSignals = async (strategyId) => {
-    const current = signalsEnabled[strategyId] !== false;
-    const updated = { ...signalsEnabled, [strategyId]: !current };
-    setSignalsEnabled(updated);
-    await fetch(`${API_URL}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ strategy_signals_enabled: updated }) });
-    toast.success(`Signale ${!current ? 'AN' : 'AUS'}`);
+    // Now uses strategy override for signals_enabled
+    const currentOverride = strategyOverrides[strategyId] || {};
+    const current = currentOverride.signals_enabled !== false;
+    const newEnabled = !current;
+    
+    // Update via new strategy endpoint
+    try {
+      const res = await fetch(`${API_URL}/api/autotrade/strategy/${strategyId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ signals_enabled: newEnabled })
+      });
+      if (res.ok) {
+        setStrategyOverrides(prev => ({
+          ...prev,
+          [strategyId]: { ...prev[strategyId], signals_enabled: newEnabled }
+        }));
+        toast.success(`Signale ${newEnabled ? 'AN' : 'AUS'}`);
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error('Fehler beim Umschalten');
+    }
   };
 
   const strategyMeta = strategies.find(s => s.id === selectedStrategy);
@@ -254,10 +276,12 @@ function App() {
             enabledIds={enabledIds}
             selected={selectedStrategy}
             signalsEnabled={signalsEnabled}
+            strategyOverrides={strategyOverrides}
             onSelect={setSelectedStrategy}
-            onToggleSignals={toggleSignals}
+            onToggleSignals={(id) => requireAdmin(() => toggleSignals(id))}
             onManage={() => setShowBuilder(true)}
             onEditParams={() => setShowSettings(true)}
+            onOpenStrategyAutoTrade={(id) => requireAdmin(() => setStrategyAutoTradeId(id))}
           />
           <ErrorBoundary onReset={() => setSelectedCoin('BTCUSDT')}>
             <MainChart symbol={selectedCoin} candleData={candleData[selectedCoin]} />
@@ -302,6 +326,14 @@ function App() {
       )}
       {autoTradeSymbol && (
         <AutoTradeModal symbol={autoTradeSymbol} onClose={() => { setAutoTradeSymbol(null); loadAutotrade(); }} />
+      )}
+      {strategyAutoTradeId && (
+        <StrategyAutoTradeModal
+          strategyId={strategyAutoTradeId}
+          strategyName={strategies.find(s => s.id === strategyAutoTradeId)?.name}
+          onClose={() => setStrategyAutoTradeId(null)}
+          onSaved={loadAutotrade}
+        />
       )}
       {showLogin && (
         <AdminLogin
