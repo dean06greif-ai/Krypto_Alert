@@ -6,10 +6,12 @@ import './SettingsPanel.css';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
-const SettingsPanel = ({ onClose, focusStrategy }) => {
+const SettingsPanel = ({ onClose, focusStrategy, mode = 'all' }) => {
+  // mode: 'all' = alle Tabs, 'general' = nur Telegram, 'strategy' = Strategie + Zeitfenster
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [activeTab, setActiveTab] = useState('strategy'); // strategy, sessions, telegram
+  const defaultTab = mode === 'general' ? 'telegram' : 'strategy';
+  const [activeTab, setActiveTab] = useState(defaultTab); // strategy, sessions, telegram
   const [settings, setSettings] = useState({
     custom_sessions: [],
     pre_signal_enabled: true,
@@ -205,30 +207,36 @@ const SettingsPanel = ({ onClose, focusStrategy }) => {
 
         {/* Tab Navigation */}
         <div className="settings-tabs">
-          <button 
-            className={`settings-tab ${activeTab === 'strategy' ? 'active' : ''}`}
-            onClick={() => setActiveTab('strategy')}
-            data-testid="tab-strategy"
-          >
-            <ChartLineUp size={16} weight="bold" />
-            Strategie
-          </button>
-          <button 
-            className={`settings-tab ${activeTab === 'sessions' ? 'active' : ''}`}
-            onClick={() => setActiveTab('sessions')}
-            data-testid="tab-sessions"
-          >
-            <Lightning size={16} weight="bold" />
-            Zeitfenster
-          </button>
-          <button 
-            className={`settings-tab ${activeTab === 'telegram' ? 'active' : ''}`}
-            onClick={() => setActiveTab('telegram')}
-            data-testid="tab-telegram"
-          >
-            <TelegramLogo size={16} weight="bold" />
-            Telegram
-          </button>
+          {mode !== 'general' && (
+            <button 
+              className={`settings-tab ${activeTab === 'strategy' ? 'active' : ''}`}
+              onClick={() => setActiveTab('strategy')}
+              data-testid="tab-strategy"
+            >
+              <ChartLineUp size={16} weight="bold" />
+              Strategie
+            </button>
+          )}
+          {mode !== 'general' && (
+            <button 
+              className={`settings-tab ${activeTab === 'sessions' ? 'active' : ''}`}
+              onClick={() => setActiveTab('sessions')}
+              data-testid="tab-sessions"
+            >
+              <Lightning size={16} weight="bold" />
+              Zeitfenster
+            </button>
+          )}
+          {mode !== 'strategy' && (
+            <button 
+              className={`settings-tab ${activeTab === 'telegram' ? 'active' : ''}`}
+              onClick={() => setActiveTab('telegram')}
+              data-testid="tab-telegram"
+            >
+              <TelegramLogo size={16} weight="bold" />
+              Telegram
+            </button>
+          )}
         </div>
 
         <div className="settings-content">

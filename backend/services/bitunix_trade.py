@@ -813,7 +813,8 @@ class AutoTradeManager:
         if t["mode"] != "live" or not self.client.configured():
             return False
         try:
-            await self.client.flash_close(t["symbol"], t.get("bitunix_order_id"), t["side"], qty)
+            pos_id = t.get("bitunix_position_id") or t.get("bitunix_order_id")
+            await self.client.flash_close(t["symbol"], pos_id, t["side"], qty)
             return True
         except Exception as e:
             logger.error(f"partial close failed: {e}")
@@ -846,7 +847,10 @@ class AutoTradeManager:
 
     async def _live_flash_close(self, t, qty):
         try:
-            await self.client.flash_close(t["symbol"], t.get("bitunix_order_id"), t["side"], qty or t["qty_remaining"])
+            # Use bitunix_position_id (not order_id) so only the bot's
+            # specific position is closed – manual user positions stay open.
+            pos_id = t.get("bitunix_position_id") or t.get("bitunix_order_id")
+            await self.client.flash_close(t["symbol"], pos_id, t["side"], qty or t["qty_remaining"])
         except Exception as e:
             logger.error(f"flash close failed: {e}")
 

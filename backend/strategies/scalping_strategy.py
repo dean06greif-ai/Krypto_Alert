@@ -1,12 +1,11 @@
 """
-Smart-Money Scalping strategy on Heikin Ashi - fully configurable.
+Scalping strategy on Heikin Ashi - fully configurable.
 
-Upgraded entry logic (5-rule confluence for a HIGH win-rate):
-  1. Trend       - price on the correct side of EMA-slow  (+ optional VWAP bias)
+Entry logic (4-rule confluence):
+  1. Trend       - price on the correct side of EMA-slow
   2. RSI         - momentum extreme (pullback/exhaustion)
   3. Trigger     - Heikin-Ashi candle reclaims EMA-fast
   4. Volume      - above-average participation (real move, not noise)
-  5. Smart Money - discount/premium location OR a liquidity sweep of a swing level
 
 Exits are volatility-aware: stop-loss sits beyond market structure with an ATR
 buffer (so normal wicks / stop-hunts don't take you out), TP1 at 1R for a partial
@@ -19,8 +18,8 @@ from strategies.base_strategy import BaseStrategy
 
 class ScalpingStrategy(BaseStrategy):
     STRATEGY_ID = "scalping_4_rules"
-    STRATEGY_NAME = "Smart Money Scalping"
-    STRATEGY_DESCRIPTION = "EMA-Trend + RSI + EMA-Trigger + Volumen + Liquidity/VWAP (Smart Money) auf Heikin-Ashi"
+    STRATEGY_NAME = "Scalping"
+    STRATEGY_DESCRIPTION = "EMA-Trend + RSI + EMA-Trigger + Volumen auf Heikin-Ashi"
     STRATEGY_TIMEFRAME = "1m"
 
     DEFAULT_PARAMS = {
@@ -48,10 +47,6 @@ class ScalpingStrategy(BaseStrategy):
                           "label": "Volumen Faktor", "description": "Volumen muss x-fach über dem Durchschnitt liegen"},
         "volume_lookback": {"value": 20, "min": 5, "max": 60, "step": 1,
                             "label": "Volumen Lookback", "description": "Kerzen für Volumen-Durchschnitt"},
-        "use_vwap_filter": {"value": 1, "min": 0, "max": 1, "step": 1,
-                            "label": "VWAP Filter", "description": "1 = nur LONG über / SHORT unter VWAP als Confluence"},
-        "smc_lookback": {"value": 20, "min": 10, "max": 60, "step": 1,
-                         "label": "Smart-Money Lookback", "description": "Range/Liquidity Fenster"},
     }
 
     def analyze(self, candles: List[Dict], symbol: str, params: Dict) -> Optional[Dict]:
@@ -67,8 +62,6 @@ class ScalpingStrategy(BaseStrategy):
         atr_mult = float(params.get("atr_sl_multiplier", 1.2))
         vol_factor = float(params.get("volume_factor", 1.1))
         vol_lookback = int(params.get("volume_lookback", 20))
-        use_vwap = bool(int(params.get("use_vwap_filter", 1)))
-        smc_lb = int(params.get("smc_lookback", 20))
 
         min_candles = max(ema_slow_period + 10, 60)
         if len(candles) < min_candles:
@@ -80,25 +73,21 @@ class ScalpingStrategy(BaseStrategy):
         ema_fast_arr = self.indicators.calculate_ema(closes, ema_fast_period)
         rsi_arr = self.indicators.calculate_rsi(closes, rsi_period)
         atr_arr = self.indicators.calculate_atr(candles, atr_period)
-        vwap_arr = self.indicators.calculate_vwap(candles)
 
         price = closes[-1]
         ema_slow = ema_slow_arr[-1]
         ema_fast = ema_fast_arr[-1]
         rsi = rsi_arr[-1]
         atr = atr_arr[-1]
-        vwap = vwap_arr[-1]
         ha_last = ha[-1]
         if None in [ema_slow, ema_fast, rsi]:
             return None
 
         rel_vol = self.indicators.relative_volume(candles, vol_lookback) or 0.0
-        range_pos = self.indicators.range_position(candles, smc_lb)
-        sweep = self.indicators.liquidity_sweep(candles)
 
-        # Rule 1 - Trend (+ VWAP bias as confluence)
-        r1_long = price > ema_slow and (not use_vwap or price >= vwap)
-        r1_short = price < ema_slow and (not use_vwap or price <= vwap)
+        # Rule 1 - Trend
+        r1_long = price > ema_slow
+        r1_short = price < ema_slow
         # Rule 2 - RSI momentum extreme
         r2_long = rsi < rsi_long
         r2_short = rsi > rsi_short
@@ -108,13 +97,10 @@ class ScalpingStrategy(BaseStrategy):
         # Rule 4 - Volume confirmation
         r4_long = rel_vol >= vol_factor
         r4_short = rel_vol >= vol_factor
-        # Rule 5 - Smart Money: discount/premium location OR liquidity sweep
-        r5_long = (range_pos <= 0.55) or (sweep == "bullish")
-        r5_short = (range_pos >= 0.45) or (sweep == "bearish")
 
         rules = [
             {"id": "rule1_trend", "label": f"Trend EMA {ema_slow_period}",
-             "description": f"Preis über/unter EMA {ema_slow_period}" + (" & VWAP" if use_vwap else ""),
+             "description": f"Preis über/unter EMA {ema_slow_period}",
              "long": r1_long, "short": r1_short},
             {"id": "rule2_rsi", "label": "RSI Momentum",
              "description": f"RSI < {rsi_long} (Long) / > {rsi_short} (Short)", "long": r2_long, "short": r2_short},
@@ -123,12 +109,10 @@ class ScalpingStrategy(BaseStrategy):
             {"id": "rule4_volume", "label": "Volumen",
              "description": f"Volumen ≥ {vol_factor}x Durchschnitt (rel: {round(rel_vol,2)})",
              "long": r4_long, "short": r4_short},
-            {"id": "rule5_smart_money", "label": "Smart Money / Liquidity",
-             "description": "Discount/Premium-Zone oder Liquidity-Sweep", "long": r5_long, "short": r5_short},
         ]
 
-        long_flags = [r1_long, r2_long, r3_long, r4_long, r5_long]
-        short_flags = [r1_short, r2_short, r3_short, r4_short, r5_short]
+        long_flags = [r1_long, r2_long, r3_long, r4_long]
+        short_flags = [r1_short, r2_short, r3_short, r4_short]
         long_cnt = sum(long_flags)
         short_cnt = sum(short_flags)
         bias = "LONG" if long_cnt > short_cnt else ("SHORT" if short_cnt > long_cnt else None)
@@ -140,7 +124,7 @@ class ScalpingStrategy(BaseStrategy):
         elif all(short_flags):
             signal_type = "SHORT"
         else:
-            # Pre-signal: structure+trigger+volume aligned, RSI approaching the zone
+            # Pre-signal: trend+trigger+volume aligned, RSI approaching the zone
             if r1_long and r3_long and r4_long and rsi < rsi_long + pre_zone:
                 signal_type, is_pre = "LONG", True
             elif r1_short and r3_short and r4_short and rsi > rsi_short - pre_zone:
@@ -154,13 +138,10 @@ class ScalpingStrategy(BaseStrategy):
             "indicators": {"rsi": round(rsi, 2), "ema_fast": round(ema_fast, 6),
                            "ema_slow": round(ema_slow, 6), "price": round(price, 6),
                            "atr": round(atr, 6) if atr else 0,
-                           "vwap": round(vwap, 6) if vwap else 0,
-                           "rel_volume": round(rel_vol, 2),
-                           "range_pos": round(range_pos, 2),
-                           "liquidity_sweep": sweep or "none"},
+                           "rel_volume": round(rel_vol, 2)},
             "rules": rules,
             "bias": bias,
-            "long_count": long_cnt, "short_count": short_cnt, "rules_total": 5,
+            "long_count": long_cnt, "short_count": short_cnt, "rules_total": 4,
             "signal_type": signal_type,
             "is_pre_signal": is_pre,
             "levels": levels,

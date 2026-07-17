@@ -39,6 +39,7 @@ function App() {
   const [showAlert, setShowAlert] = useState(false);
   const [currentAlert, setCurrentAlert] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showStrategySettings, setShowStrategySettings] = useState(false);
   const [showBuilder, setShowBuilder] = useState(false);
   const [autoTradeSymbol, setAutoTradeSymbol] = useState(null);
   const [strategyAutoTradeId, setStrategyAutoTradeId] = useState(null);
@@ -280,7 +281,7 @@ function App() {
             onSelect={setSelectedStrategy}
             onToggleSignals={(id) => requireAdmin(() => toggleSignals(id))}
             onManage={() => setShowBuilder(true)}
-            onEditParams={() => setShowSettings(true)}
+            onEditParams={() => setShowStrategySettings(true)}
             onOpenStrategyAutoTrade={(id) => requireAdmin(() => setStrategyAutoTradeId(id))}
           />
           <ErrorBoundary onReset={() => setSelectedCoin('BTCUSDT')}>
@@ -314,7 +315,10 @@ function App() {
         <AlertModal signal={currentAlert} onClose={() => setShowAlert(false)} />
       )}
       {showSettings && (
-        <SettingsPanel onClose={() => { setShowSettings(false); loadStrategies(); }} focusStrategy={selectedStrategy} />
+        <SettingsPanel onClose={() => { setShowSettings(false); loadStrategies(); }} focusStrategy={selectedStrategy} mode="general" />
+      )}
+      {showStrategySettings && (
+        <SettingsPanel onClose={() => { setShowStrategySettings(false); loadStrategies(); }} focusStrategy={selectedStrategy} mode="strategy" />
       )}
       {showBuilder && (
         <StrategyBuilder
