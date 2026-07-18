@@ -189,6 +189,36 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(start_scanner())
     asyncio.create_task(daily_reset_loop())
+
+    # BUGFIX (win-rate): re-hydrate the in-memory open_signal_evals from today's
+    # still-open signals so evaluate_open_signals() can mark them as win/loss
+    # after a restart. Without this any signal that emitted before the restart
+    # never got its `result` filled in.
+    try:
+        today = scanner.berlin_date()
+        cursor = app.mongodb.signals.find({
+            "trade_date": today,
+            "signal_class": {"$ne": "PRE_SIGNAL"},
+            "$or": [{"result": {"$exists": False}}, {"result": None}],
+        })
+        rehydrated = 0
+        async for s in cursor:
+            if not s.get("tp1") or not s.get("sl"):
+                continue
+            open_signal_evals.append({
+                "id": s.get("id"),
+                "symbol": s.get("symbol"),
+                "type": s.get("type"),
+                "tp1": s.get("tp1"),
+                "sl": s.get("sl"),
+                "strategy_id": s.get("strategy_id", "unknown"),
+            })
+            rehydrated += 1
+        if rehydrated:
+            logger.info(f"Re-hydrated {rehydrated} open signal evaluations from DB")
+    except Exception as e:
+        logger.warning(f"open_signal_evals rehydration failed: {e}")
+
     # initial analyze so rule-states are populated immediately
     for symbol in ALL_SYMBOLS:
         try:
@@ -285,6 +315,19 @@ async def process_signal(signal: Dict, candles: List[Dict]):
     notify = scanner.is_notify_enabled(symbol)
     signal["notify"] = notify
     await app.mongodb.signals.insert_one(dict(signal))
+
+    # BUGFIX (win-rate): track this signal in-memory so evaluate_open_signals()
+    # can later mark it as win/loss based on price hitting TP1 or SL. Without
+    # this the wins/losses counters (and thus win_rate) stayed 0 forever.
+    if signal.get("signal_class") != "PRE_SIGNAL" and signal.get("tp1") and signal.get("sl"):
+        open_signal_evals.append({
+            "id": signal["id"],
+            "symbol": symbol,
+            "type": signal["type"],
+            "tp1": signal["tp1"],
+            "sl": signal["sl"],
+            "strategy_id": signal.get("strategy_id", "unknown"),
+        })
 
     # FIX 1: Telegram-Benachrichtigung senden (wenn aktiviert)
     if notify and signals_enabled_for_strategy:
@@ -625,8 +668,73 @@ async def get_rule_states(symbol: str = None):
 
 @app.get("/api/performance")
 async def get_performance():
-    perf = await app.mongodb.performance.find().to_list(100)
-    perf = [_clean(p) for p in perf]
+    """Return per-symbol performance.
+
+    BUGFIX (win-rate always 0%):
+      The stored `performance` collection only got wins/losses via
+      evaluate_open_signals() which relied on `open_signal_evals` – a list
+      that historically was never populated. As a result wins/losses/win_rate
+      never left 0 even though real auto-trades were being closed with a
+      proper "win"/"loss"/"breakeven" result.
+
+      We now derive wins/losses on the fly from the `auto_trades` collection
+      (which IS the source of truth for closed trades) and merge them with
+      the stored signal counters (total_signals, long_signals, short_signals).
+      Any wins/losses that DO exist on stored performance docs (from signal-
+      level evaluation going forward) are additionally combined.
+    """
+    stored = {}
+    for p in await app.mongodb.performance.find().to_list(500):
+        stored[p["symbol"]] = _clean(p)
+
+    # Aggregate closed auto-trades → real win/loss numbers per symbol
+    trade_pipeline = [
+        {"$match": {"status": "closed", "result": {"$in": ["win", "loss", "breakeven"]}}},
+        {"$group": {
+            "_id": "$symbol",
+            "trade_wins": {"$sum": {"$cond": [{"$eq": ["$result", "win"]}, 1, 0]}},
+            "trade_losses": {"$sum": {"$cond": [{"$eq": ["$result", "loss"]}, 1, 0]}},
+            "trade_breakevens": {"$sum": {"$cond": [{"$eq": ["$result", "breakeven"]}, 1, 0]}},
+        }},
+    ]
+    trade_rows = await app.mongodb.auto_trades.aggregate(trade_pipeline).to_list(500)
+
+    result_map: Dict[str, Dict] = {}
+    # start with everything we already have stored (keeps total/long/short counts)
+    for symbol, p in stored.items():
+        result_map[symbol] = {
+            "symbol": symbol,
+            "total_signals": p.get("total_signals", 0),
+            "long_signals": p.get("long_signals", 0),
+            "short_signals": p.get("short_signals", 0),
+            "wins": p.get("wins", 0),
+            "losses": p.get("losses", 0),
+            "breakevens": p.get("breakevens", 0),
+            "avg_crv": p.get("avg_crv", 0.0),
+            "win_rate": p.get("win_rate", 0.0),
+            "by_strategy": p.get("by_strategy", {}),
+            "last_signal": p.get("last_signal"),
+        }
+
+    for tr in trade_rows:
+        symbol = tr["_id"]
+        p = result_map.setdefault(symbol, {
+            "symbol": symbol, "total_signals": 0, "long_signals": 0, "short_signals": 0,
+            "wins": 0, "losses": 0, "breakevens": 0, "avg_crv": 0.0, "win_rate": 0.0,
+            "by_strategy": {},
+        })
+        # take the MAX between stored signal-level results and real trade results
+        # (avoids double counting while making sure at least the trade outcome shows)
+        p["wins"] = max(p.get("wins", 0), tr.get("trade_wins", 0))
+        p["losses"] = max(p.get("losses", 0), tr.get("trade_losses", 0))
+        p["breakevens"] = max(p.get("breakevens", 0), tr.get("trade_breakevens", 0))
+
+    # recompute win_rate from the merged wins/losses
+    for p in result_map.values():
+        decided = p.get("wins", 0) + p.get("losses", 0)
+        p["win_rate"] = round(p["wins"] / decided * 100, 1) if decided else 0.0
+
+    perf = list(result_map.values())
     perf.sort(key=lambda x: x.get("total_signals", 0), reverse=True)
     return {"performance": perf}
 
