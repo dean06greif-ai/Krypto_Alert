@@ -721,7 +721,14 @@ async def ai_review(body: Dict = None):
     # (niedrigere Rate-Limits als Flash, für Coach-Analysen aber mehr als genug).
     # Alternativen: gemini-2.5-flash (schneller, höhere Limits) oder
     # gemini-2.0-flash.
-    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    model_name = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+    # Der OpenAI-kompatible Gemini-Endpoint erwartet die reine Modell-ID ohne
+    # "models/"-Präfix und ohne umschließende Anführungszeichen/Leerzeichen.
+    model_name = model_name.strip('"').strip("'").strip()
+    if model_name.startswith("models/"):
+        model_name = model_name[len("models/"):]
+    if not model_name:
+        model_name = "gemini-2.5-flash"
     stats = await _aggregate_ai_stats(strategy_id)
 
     system_msg = (
@@ -1139,8 +1146,25 @@ async def get_balance():
             if isinstance(data, list) and data:
                 data = data[0]
             if isinstance(data, dict):
-                result["available"] = data.get("available") or data.get("availableBalance")
-                result["margin_balance"] = data.get("marginBalance") or data.get("equity")
+                def _num(v):
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return 0.0
+                available = _num(data.get("available") or data.get("availableBalance"))
+                frozen = _num(data.get("frozen"))
+                used_margin = _num(data.get("margin"))
+                upnl = _num(data.get("crossUnrealizedPNL")) + _num(data.get("isolationUnrealizedPNL"))
+                # Wallet balance = frei verfügbar + in Orders geblockt + in Positionen gebundene Margin
+                wallet_balance = available + frozen + used_margin
+                # Bitunix liefert kein marginBalance/equity-Feld → Equity selbst berechnen:
+                # Margin Balance (Equity) = Wallet Balance + unrealisierter PnL
+                mb = data.get("marginBalance") or data.get("equity")
+                margin_balance = _num(mb) if mb is not None else wallet_balance + upnl
+                result["available"] = round(available, 2)
+                result["margin_balance"] = round(margin_balance, 2)
+                result["wallet_balance"] = round(wallet_balance, 2)
+                result["unrealized_pnl"] = round(upnl, 2)
             result["bitunix_code"] = bal.get("code") if isinstance(bal, dict) else None
         except Exception as e:
             result["bitunix_error"] = str(e)[:120]
