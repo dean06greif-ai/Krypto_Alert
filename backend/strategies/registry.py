@@ -6,6 +6,7 @@ from strategies.scalping_strategy import ScalpingStrategy
 from strategies.rsi_only_strategy import RSIOnlyStrategy
 from strategies.bollinger_reversion_strategy import BollingerReversionStrategy
 from strategies.ema_pullback_scalping_strategy import EMAPullbackScalpingStrategy
+from strategies.ict_liquidity_sweep_strategy import ICTLiquiditySweepStrategy
 from strategies.custom_strategy import CustomStrategy
 from strategies.base_strategy import BaseStrategy
 
@@ -21,6 +22,7 @@ class StrategyRegistry:
         self.register(EMAPullbackScalpingStrategy())
         self.register(RSIOnlyStrategy())
         self.register(BollingerReversionStrategy())
+        self.register(ICTLiquiditySweepStrategy())
 
     def register(self, strategy: BaseStrategy):
         self._strategies[strategy.STRATEGY_ID] = strategy
