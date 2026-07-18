@@ -1,10 +1,110 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { TrendUp, TrendDown, Target, Clock, ChartBar, Lightning, CheckCircle, XCircle, Trash, Warning, Sparkle } from '@phosphor-icons/react';
+import { TrendUp, TrendDown, Target, Clock, ChartBar, Lightning, CheckCircle, XCircle, Trash, Warning, Sparkle, CaretDown } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import { authHeaders } from '../auth';
 import './PerformanceAnalytics.css';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
+
+const fmtTime = (iso) => {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleString('de-DE', {
+      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+      second: '2-digit', timeZone: 'Europe/Berlin',
+    });
+  } catch { return '—'; }
+};
+
+const fmtDur = (s) => {
+  if (s == null) return '—';
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+};
+
+const fmtPct = (p) => (p == null ? '' : `${p > 0 ? '+' : ''}${p}%`);
+
+// One price level row in the ladder (Entry / SL / TP1 / Full-TP / Exit)
+const LevelRow = ({ label, value, pct, cls, hit }) => {
+  if (value == null || value === 0) return null;
+  return (
+    <div className={`lvl-row ${cls || ''}`}>
+      <span className="lvl-label">{label}{hit ? ' ✓' : ''}</span>
+      <span className="lvl-value mono">{value}</span>
+      {pct != null && <span className="lvl-pct mono">{fmtPct(pct)}</span>}
+    </div>
+  );
+};
+
+const TradeDetailCard = ({ t, stratName, getCoinName }) => {
+  const [open, setOpen] = useState(false);
+  const c = t.computed || {};
+  const isLive = t.mode === 'live';
+  const closed = t.status === 'closed';
+  const resultMeta = t.result === 'win'
+    ? { label: 'GEWINN', cls: 'res-win', Icon: CheckCircle }
+    : t.result === 'loss'
+      ? { label: 'VERLUST', cls: 'res-loss', Icon: XCircle }
+      : t.result === 'breakeven'
+        ? { label: 'BREAK-EVEN', cls: 'res-be', Icon: Target }
+        : { label: 'OFFEN', cls: 'res-open', Icon: Lightning };
+  const R = resultMeta.Icon;
+  const pnl = t.realized_pnl || 0;
+
+  return (
+    <div className={`tdc ${open ? 'tdc-open' : ''}`} data-testid={`trade-card-${t.id}`}>
+      <button className="tdc-head" onClick={() => setOpen(o => !o)} data-testid={`trade-card-toggle-${t.id}`}>
+        <span className={`mode-tag ${isLive ? 'mode-live' : 'mode-paper'}`} data-testid={`trade-mode-${t.id}`}>
+          {isLive ? 'LIVE' : 'PAPER'}
+        </span>
+        <span className={`badge ${t.side === 'LONG' ? 'badge-long' : 'badge-short'}`}>{t.side}</span>
+        <span className="mono text-secondary tdc-coin">{getCoinName(t.symbol)}</span>
+        <span className="strat-chip" title={stratName(t)}>{stratName(t)}</span>
+        <span className={`tdc-result ${resultMeta.cls}`}><R size={13} weight="bold" />{resultMeta.label}</span>
+        <span className={`mono tdc-pnl ${pnl >= 0 ? 'text-long' : 'text-short'}`}>{pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}</span>
+        <CaretDown size={13} className={`tdc-caret ${open ? 'rot' : ''}`} />
+      </button>
+
+      {open && (
+        <div className="tdc-body" data-testid={`trade-card-body-${t.id}`}>
+          <div className="tdc-ladder">
+            <LevelRow label={`TP Full (${c.rr_tpf || '?'}R)`} value={t.tpf} pct={c.tpf_distance_pct} cls="lvl-tp" />
+            <LevelRow label={`TP1 (${c.rr_tp1 || '?'}R)`} value={t.tp1} pct={c.tp1_distance_pct} cls="lvl-tp1" hit={t.tp1_hit} />
+            <LevelRow label="Entry" value={t.entry} pct={0} cls="lvl-entry" />
+            {closed && <LevelRow label="Exit" value={t.exit_price} pct={c.exit_distance_pct} cls="lvl-exit" />}
+            <LevelRow label={`SL${c.sl_moved ? ' (aktuell)' : ''}`} value={t.sl} pct={c.sl_distance_pct} cls="lvl-sl" />
+            {c.sl_moved ? <LevelRow label="SL initial" value={t.initial_sl} pct={c.initial_sl_distance_pct} cls="lvl-sl-init" /> : null}
+          </div>
+
+          <div className="tdc-meta">
+            <div className="tdc-meta-item"><span>Eröffnet</span><b className="mono">{fmtTime(t.opened_at)}</b></div>
+            {closed && <div className="tdc-meta-item"><span>Geschlossen</span><b className="mono">{fmtTime(t.closed_at)}</b></div>}
+            <div className="tdc-meta-item"><span>Dauer</span><b className="mono">{fmtDur(c.duration_seconds)}</b></div>
+            <div className="tdc-meta-item"><span>R-Vielfaches</span><b className={`mono ${(c.r_multiple || 0) >= 0 ? 'text-long' : 'text-short'}`}>{c.r_multiple != null ? `${c.r_multiple}R` : '—'}</b></div>
+            <div className="tdc-meta-item"><span>PnL % Kapital</span><b className={`mono ${(c.pnl_pct_capital || 0) >= 0 ? 'text-long' : 'text-short'}`}>{c.pnl_pct_capital != null ? fmtPct(c.pnl_pct_capital) : '—'}</b></div>
+            <div className="tdc-meta-item"><span>Risk</span><b className="mono">{c.risk_usd ? `${c.risk_usd} $` : '—'}</b></div>
+            <div className="tdc-meta-item"><span>Hebel</span><b className="mono">{t.leverage ? `${t.leverage}x` : '—'}</b></div>
+            <div className="tdc-meta-item"><span>Kapital</span><b className="mono">{t.max_capital ? `${t.max_capital} $` : '—'}</b></div>
+            <div className="tdc-meta-item"><span>Menge</span><b className="mono">{t.qty ?? '—'}</b></div>
+            <div className="tdc-meta-item"><span>TP1 getroffen</span><b className="mono">{t.tp1_hit ? 'Ja' : 'Nein'}</b></div>
+          </div>
+
+          {(t.events || []).length > 0 && (
+            <div className="tdc-timeline" data-testid={`trade-timeline-${t.id}`}>
+              <div className="tdc-tl-title">VERLAUF</div>
+              {t.events.map((ev, i) => (
+                <div key={i} className="tdc-tl-item"><span className="tdc-tl-dot" />{ev}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const CLEAR_RANGES = [
   { key: 'hour', label: 'Letzte Stunde' },
@@ -29,9 +129,6 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
 
   const getCoinName = (s) => s?.replace('USDT', '') || '';
   const stratName = (t) => t?.strategy_name || strategies.find(s => s.id === t?.strategy_id)?.name || t?.strategy_id || '—';
-  const modeInfo = (m) => (m === 'live')
-    ? { label: 'LIVE', cls: 'mode-live' }
-    : { label: 'PAPER', cls: 'mode-paper' };
 
   // Resolve the auto-trade mode of the SELECTED strategy for the SELECTED coin
   // (per-strategy-per-coin config wins, falls back to strategy-level override).
@@ -345,37 +442,19 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
           </div>
 
           <div className="analytics-section">
-            <div className="section-title">OFFENE TRADES</div>
+            <div className="section-title">OFFENE TRADES <span className="sec-count">{openTrades.length}</span></div>
             {openTrades.length === 0 && <div className="no-data">Keine offenen Trades</div>}
-            {openTrades.map(t => {
-              const m = modeInfo(t.mode);
-              return (
-                <div key={t.id} className="trade-row trade-row-lg" data-testid={`trade-row-${t.id}`}>
-                  <span className={`mode-tag ${m.cls}`} data-testid={`trade-mode-${t.id}`}>{m.label}</span>
-                  <span className={`badge ${t.side === 'LONG' ? 'badge-long' : 'badge-short'}`}>{t.side}</span>
-                  <span className="mono text-secondary">{getCoinName(t.symbol)}</span>
-                  <span className="strat-chip" data-testid={`trade-strategy-${t.id}`}>{stratName(t)}</span>
-                  <span className="mono text-muted" style={{ fontSize: '10px', marginLeft: 'auto' }}>@{t.entry}{t.tp1_hit ? ' TP1✓' : ''}</span>
-                </div>
-              );
-            })}
+            {openTrades.map(t => (
+              <TradeDetailCard key={t.id} t={t} stratName={stratName} getCoinName={getCoinName} />
+            ))}
           </div>
 
           <div className="analytics-section">
-            <div className="section-title">GESCHLOSSENE TRADES</div>
+            <div className="section-title">GESCHLOSSENE TRADES <span className="sec-count">{closedTrades.length}</span></div>
             {closedTrades.length === 0 && <div className="no-data">Keine</div>}
-            {closedTrades.slice(0, 12).map(t => {
-              const m = modeInfo(t.mode);
-              return (
-                <div key={t.id} className="trade-row trade-row-lg">
-                  <span className={`mode-tag ${m.cls}`}>{m.label}</span>
-                  {t.result === 'win' ? <CheckCircle size={15} className="text-long" /> : t.result === 'loss' ? <XCircle size={15} className="text-short" /> : <Target size={15} className="text-warning" />}
-                  <span className="mono text-secondary">{getCoinName(t.symbol)}</span>
-                  <span className="strat-chip">{stratName(t)}</span>
-                  <span className={`mono ${(t.realized_pnl || 0) >= 0 ? 'text-long' : 'text-short'}`} style={{ fontSize: '11px', marginLeft: 'auto' }}>{(t.realized_pnl || 0).toFixed(2)}</span>
-                </div>
-              );
-            })}
+            {closedTrades.slice(0, 30).map(t => (
+              <TradeDetailCard key={t.id} t={t} stratName={stratName} getCoinName={getCoinName} />
+            ))}
           </div>
         </>
       )}

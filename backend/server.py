@@ -103,6 +103,24 @@ async def lifespan(app: FastAPI):
         await app.mongodb.settings.insert_one({"_id": "autotrade_config", **cfg})
         autotrader.set_config(cfg)
 
+    # ---- Load strategy_coin_configs from dedicated collection ----
+    # Without this, the per-strategy-per-coin paper/live mode lives only in the
+    # DB and the in-memory autotrader never sees it -> it falls back to the
+    # global/strategy mode and can fire REAL live orders even though the UI
+    # shows the pair as "paper". Loading them here fixes that.
+    try:
+        scc_docs = await app.mongodb.strategy_coin_configs.find().to_list(2000)
+        scc_map = {}
+        for d in scc_docs:
+            key = d.get("_id")
+            if key:
+                scc_map[key] = d.get("config", {})
+        if scc_map:
+            autotrader.config.setdefault("strategy_coin_configs", {}).update(scc_map)
+            logger.info(f"Loaded {len(scc_map)} strategy_coin_configs from DB")
+    except Exception as e:
+        logger.warning(f"Loading strategy_coin_configs failed: {e}")
+
     # load admin control toggles (stop trades / stop signals)
     ctrl = await app.mongodb.settings.find_one({"_id": "control_state"})
     if ctrl:
@@ -251,6 +269,11 @@ async def process_signal(signal: Dict, candles: List[Dict]):
     if coin_strat_cfg is None:
         _doc = await app.mongodb.strategy_coin_configs.find_one({"_id": _coin_strat_key})
         coin_strat_cfg = _doc.get("config", {}) if _doc else {}
+        # Keep the in-memory cache in sync so on_signal()/effective_mode()
+        # see the SAME paper/live mode on the next call. Prevents live orders
+        # slipping through because the DB config wasn't cached yet.
+        if coin_strat_cfg:
+            autotrader.config.setdefault("strategy_coin_configs", {})[_coin_strat_key] = coin_strat_cfg
 
     # Wenn AUS → komplett überspringen, nichts speichern
     if coin_strat_cfg.get("mode", "off") == "off":
@@ -287,6 +310,68 @@ def _clean(d: Dict) -> Dict:
     d = dict(d)
     d.pop("_id", None)
     return d
+
+
+def _enrich_trade(t: Dict) -> Dict:
+    """Add computed analytics fields to a trade without changing stored schema.
+    Gives the UI and the AI exact numbers: durations, distances (%), R-multiple.
+    """
+    t = _clean(t)
+    entry = float(t.get("entry") or 0)
+    side = t.get("side", "LONG")
+    sl = float(t.get("sl") or 0)
+    init_sl = float(t.get("initial_sl") or sl or 0)
+    tp1 = float(t.get("tp1") or 0)
+    tpf = float(t.get("tpf") or 0)
+    qty = float(t.get("qty") or 0)
+    risk = float(t.get("risk") or 0)
+    exit_price = t.get("exit_price")
+
+    def pct_from_entry(p):
+        if not entry or not p:
+            return None
+        return round((p - entry) / entry * 100, 3)
+
+    # timings
+    dur = None
+    o, c = t.get("opened_at"), t.get("closed_at")
+    try:
+        if o:
+            o_dt = datetime.fromisoformat(o.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(c.replace("Z", "+00:00")) if c \
+                else datetime.now(timezone.utc)
+            dur = int((end_dt - o_dt).total_seconds())
+    except Exception:
+        dur = None
+
+    # R-multiple: realized PnL relative to the initial 1R risk in USDT
+    risk_usd = round(risk * qty, 4) if (risk and qty) else 0.0
+    r_multiple = None
+    if risk_usd:
+        r_multiple = round(float(t.get("realized_pnl") or 0) / risk_usd, 2)
+
+    # PnL in % on the used capital (margin)
+    capital = float(t.get("max_capital") or 0)
+    pnl_pct_capital = None
+    if capital:
+        pnl_pct_capital = round(float(t.get("realized_pnl") or 0) / capital * 100, 2)
+
+    t["computed"] = {
+        "duration_seconds": dur,
+        "risk_usd": risk_usd,
+        "r_multiple": r_multiple,
+        "pnl_pct_capital": pnl_pct_capital,
+        "sl_distance_pct": pct_from_entry(sl),
+        "initial_sl_distance_pct": pct_from_entry(init_sl),
+        "tp1_distance_pct": pct_from_entry(tp1),
+        "tpf_distance_pct": pct_from_entry(tpf),
+        "exit_distance_pct": pct_from_entry(float(exit_price)) if exit_price else None,
+        "rr_tp1": t.get("tp1_crv"),
+        "rr_tpf": t.get("tp_full_crv"),
+        "sl_moved": round(sl - init_sl, 6) if (sl and init_sl) else 0,
+        "side": side,
+    }
+    return t
 
 
 async def update_performance(signal: Dict, opened=False, result=None):
@@ -705,15 +790,80 @@ async def _aggregate_ai_stats(strategy_id: str = None) -> Dict:
     # Regel-Definitionen der Strategien
     strategies_meta = strategy_registry.list_all()
 
+    # ---- Detaillierte Einzeltrades für die KI (exakte Werte & Uhrzeiten) ----
+    # Gibt der KI (und dir) pro Trade: Uhrzeit, Entry, SL, TP1, Full-TP, Exit,
+    # Ergebnis, PnL, R-Vielfaches, Dauer und Modus (paper/live).
+    def _berlin(iso):
+        if not iso:
+            return None
+        try:
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            return dt.astimezone(BERLIN).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return iso
+
+    trades_detail = []
+    for t in trades[:60]:
+        e = _enrich_trade(t)
+        comp = e.get("computed", {})
+        trades_detail.append({
+            "symbol": e.get("symbol"),
+            "strategie": e.get("strategy_name") or e.get("strategy_id"),
+            "seite": e.get("side"),
+            "modus": e.get("mode"),
+            "ergebnis": e.get("result"),
+            "eroeffnet": _berlin(e.get("opened_at")),
+            "geschlossen": _berlin(e.get("closed_at")),
+            "dauer_sekunden": comp.get("duration_seconds"),
+            "entry": e.get("entry"),
+            "initial_sl": e.get("initial_sl"),
+            "sl_final": e.get("sl"),
+            "tp1": e.get("tp1"),
+            "tp_full": e.get("tpf"),
+            "exit": e.get("exit_price"),
+            "tp1_getroffen": e.get("tp1_hit"),
+            "breakeven": e.get("breakeven_moved"),
+            "pnl_usdt": e.get("realized_pnl"),
+            "r_vielfaches": comp.get("r_multiple"),
+            "pnl_prozent_kapital": comp.get("pnl_pct_capital"),
+            "sl_abstand_prozent": comp.get("initial_sl_distance_pct"),
+            "tp_full_abstand_prozent": comp.get("tpf_distance_pct"),
+            "hebel": e.get("leverage"),
+            "kapital_usdt": e.get("max_capital"),
+            "verlauf": e.get("events", []),
+        })
+
+    # Paper vs. Live getrennt
+    def _split(mode_val):
+        sub = [t for t in trades if t.get("mode") == mode_val]
+        w = sum(1 for t in sub if t.get("result") == "win")
+        l = sum(1 for t in sub if t.get("result") == "loss")
+        d = w + l
+        return {
+            "anzahl": len(sub), "wins": w, "losses": l,
+            "win_rate_prozent": round(w / d * 100, 1) if d else 0.0,
+            "pnl_gesamt_usdt": round(sum((t.get("realized_pnl") or 0) for t in sub), 2),
+        }
+
+    tp1_hits = sum(1 for t in trades if t.get("tp1_hit"))
+    durations = [d.get("duration_seconds") for d in (
+        [_enrich_trade(t).get("computed", {}) for t in trades]) if d.get("duration_seconds")]
+    avg_dur = round(sum(durations) / len(durations)) if durations else 0
+
     return {
         "gefiltert_auf_strategie": strategy_id,
         "signale_gesamt": {"anzahl": total, "wins": wins, "losses": losses,
                            "win_rate_prozent": win_rate, "avg_crv": avg_crv},
         "trades_geschlossen": {"anzahl": len(trades), "wins": trade_wins, "losses": trade_losses,
                                "win_rate_prozent": trade_win_rate, "pnl_gesamt_usdt": total_pnl,
-                               "max_drawdown_usdt": round(max_dd, 2)},
+                               "max_drawdown_usdt": round(max_dd, 2),
+                               "tp1_treffer": tp1_hits,
+                               "durchschnittsdauer_sekunden": avg_dur},
+        "trades_paper": _split("paper"),
+        "trades_live": _split("live"),
         "je_strategie": sorted(strat_stats, key=lambda x: -x["total_signals"]),
         "haeufigste_verlust_setups": top_losing,
+        "einzeltrades_detail": trades_detail,
         "strategien_definitionen": strategies_meta,
     }
 
@@ -764,9 +914,13 @@ async def ai_review(body: Dict = None):
         "1) **Kurz-Fazit** (2–3 Sätze zur Gesamtlage).\n"
         "2) **Problematische Regeln / Setups** – nenne konkret welche Regeln oder "
         "Regelkombinationen unterdurchschnittlich performen und WARUM (Zahlen zitieren).\n"
-        "3) **Konkrete Änderungsvorschläge** – parameterbezogen oder logikbezogen, "
+        "3) **Einzeltrade-Analyse** – nutze `einzeltrades_detail` (exakte Uhrzeiten, "
+        "Entry, SL, TP1, Full-TP, Exit, R-Vielfaches, Dauer, paper/live). Finde Muster: "
+        "Zu welchen Uhrzeiten/Setups laufen Trades in den SL? Werden TPs zu früh/zu spät "
+        "gesetzt? Ist das SL-zu-TP-Verhältnis realistisch? Vergleiche paper vs. live.\n"
+        "4) **Konkrete Änderungsvorschläge** – parameterbezogen oder logikbezogen, "
         "so präzise wie möglich (z.B. RSI-Schwelle anpassen, TP/SL-Ratio ändern, "
-        "Setup entfernen, Filter hinzufügen).\n"
+        "Setup entfernen, Filter hinzufügen, bestimmte Handelszeiten meiden).\n"
         "Antworte auf Deutsch."
     )
 
@@ -1120,12 +1274,22 @@ async def list_strategy_coin_autotrade(_=Depends(require_admin)):
     return {"configs": out}
 
 @app.get("/api/autotrade/trades")
-async def get_trades(status: str = None, limit: int = 50):
+async def get_trades(status: str = None, limit: int = 50, mode: str = None):
     q = {}
     if status:
         q["status"] = status
+    if mode in ("live", "paper"):
+        q["mode"] = mode
     trades = await app.mongodb.auto_trades.find(q).sort("opened_at", -1).limit(limit).to_list(limit)
-    return {"trades": [_clean(t) for t in trades]}
+    return {"trades": [_enrich_trade(t) for t in trades]}
+
+
+@app.get("/api/autotrade/trades/{trade_id}")
+async def get_trade_detail(trade_id: str):
+    t = await app.mongodb.auto_trades.find_one({"id": trade_id})
+    if not t:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    return {"trade": _enrich_trade(t)}
 
 
 @app.post("/api/autotrade/close/{trade_id}")

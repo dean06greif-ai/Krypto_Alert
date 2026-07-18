@@ -468,9 +468,18 @@ class AutoTradeManager:
         self.telegram = telegram
 
     def set_config(self, config: Dict):
-        self.config = {"mode": config.get("mode", "paper"),
-                       "coins": config.get("coins", {}),
-                       "strategy_overrides": config.get("strategy_overrides", {})}
+        self.config = {
+            "mode": config.get("mode", "paper"),
+            "coins": config.get("coins", {}),
+            "strategy_overrides": config.get("strategy_overrides", {}),
+            # Preserve per-strategy-per-coin configs across set_config calls.
+            # If the incoming config omits them, keep whatever we already had
+            # so a partial update never wipes the paper/live safety settings.
+            "strategy_coin_configs": config.get(
+                "strategy_coin_configs",
+                self.config.get("strategy_coin_configs", {}) if hasattr(self, "config") and self.config else {},
+            ),
+        }
 
     def coin_cfg(self, symbol: str) -> Dict:
         c = dict(DEFAULT_COIN_CFG)
@@ -496,16 +505,34 @@ class AutoTradeManager:
             if k in RESERVED or v is None:
                 continue
             cfg[k] = v
+        # Highest priority: per-strategy-per-coin trade parameters
+        # (e.g. individual stop-loss / max_capital for Scalping+BTC).
+        if strategy_id and symbol:
+            key = f"{strategy_id}_{symbol}"
+            scc = self.config.get("strategy_coin_configs", {}).get(key, {})
+            for k, v in scc.items():
+                if k in RESERVED or v is None:
+                    continue
+                cfg[k] = v
         return cfg
 
-    def effective_mode(self, strategy_id: Optional[str]) -> str:
-        """Return effective trading mode. Strategy override wins if set to
-        'live' or 'paper'. 'off' means the strategy is disabled and no trade
-        should be opened. Falls back to global config mode."""
+    def effective_mode(self, strategy_id: Optional[str], symbol: Optional[str] = None) -> str:
+        """Return effective trading mode.
+        Priority: strategy_coin_config > strategy_override > global mode.
+        'off' means the strategy is disabled and no trade should be opened."""
+        # 1) Highest priority: per-strategy-per-coin config
+        if strategy_id and symbol:
+            key = f"{strategy_id}_{symbol}"
+            scc = self.config.get("strategy_coin_configs", {}).get(key, {})
+            scm = scc.get("mode")
+            if scm in ("live", "paper", "off"):
+                return scm
+        # 2) Strategy-level override
         so = self.strategy_override(strategy_id)
         sm = so.get("mode")
         if sm in ("live", "paper", "off"):
             return sm
+        # 3) Fallback: global mode
         return self.config.get("mode", "paper")
 
     def is_enabled(self, symbol: str) -> bool:
@@ -582,9 +609,9 @@ class AutoTradeManager:
     async def on_signal(self, signal: Dict, candles: List[Dict]) -> Optional[Dict]:
         symbol = signal["symbol"]
         strategy_id = signal.get("strategy_id")
-        # Effective mode: strategy override wins over global mode.
+        # Effective mode: strategy_coin_config > strategy override > global.
         # 'off' means this strategy is disabled -> no trade.
-        eff_mode = self.effective_mode(strategy_id)
+        eff_mode = self.effective_mode(strategy_id, symbol)
         if eff_mode == "off":
             return None
         cfg = self.effective_cfg(symbol, strategy_id)
