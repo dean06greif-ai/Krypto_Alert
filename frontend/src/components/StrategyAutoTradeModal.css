@@ -1,8 +1,165 @@
-/* StrategyAutoTradeModal now uses the same .at-* classes from AutoTradeModal.css */
-/* Only minimal overrides for 3-button mode toggle (off/paper/live) */
+/* ==========================================================================
+   StrategyAutoTradeModal.css
+   Modal-Overlay + Panel für das Strategie-Auto-Trade-Popup.
+   Reused: viele .at-* Klassen aus AutoTradeModal.css.
+   ========================================================================== */
 
+/* ----- Overlay + Panel ---------------------------------------------------- */
+.sat-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.sat-modal {
+  background: #121212;
+  border: 1px solid #2A2D3A;
+  border-radius: 14px;
+  width: 100%;
+  max-width: 480px;
+  max-height: 90vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  font-family: 'Manrope', sans-serif;
+}
+
+/* ----- Header ------------------------------------------------------------- */
+.sat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #1E2028;
+  flex-shrink: 0;
+}
+
+.sat-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  color: #FFD700;
+  font-size: 14px;
+}
+
+.sat-title b {
+  color: #FFFFFF;
+  font-weight: 800;
+}
+
+.sat-close {
+  background: transparent;
+  border: none;
+  color: #A1A4B0;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 18px;
+  line-height: 1;
+  transition: color 0.15s, background 0.15s;
+}
+.sat-close:hover {
+  color: #FFFFFF;
+  background: #2A2D3A;
+}
+
+/* ----- Body (scrollable) -------------------------------------------------- */
+.sat-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+/* ----- Footer ------------------------------------------------------------- */
+.sat-footer {
+  display: flex;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid #1E2028;
+  background: #0F0F0F;
+  flex-shrink: 0;
+}
+
+.sat-cancel {
+  flex: 0 0 auto;
+  padding: 12px 20px;
+  background: transparent;
+  color: #A1A4B0;
+  border: 1px solid #2A2D3A;
+  border-radius: 10px;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.sat-cancel:hover {
+  background: #1A1C24;
+  color: #FFFFFF;
+  border-color: #3A3D4A;
+}
+
+.sat-save {
+  flex: 1 1 auto;
+  padding: 12px 20px;
+  background: #00FF66;
+  color: #001a08;
+  border: none;
+  border-radius: 10px;
+  font-weight: 800;
+  font-size: 13px;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.1s;
+}
+.sat-save:hover {
+  opacity: 0.92;
+  transform: translateY(-1px);
+}
+.sat-save:disabled {
+  opacity: 0.5;
+  cursor: default;
+  transform: none;
+}
+
+/* ----- Loading state ------------------------------------------------------ */
+.sat-loading {
+  padding: 40px 20px;
+  text-align: center;
+  color: #A1A4B0;
+  font-size: 13px;
+  letter-spacing: 0.5px;
+}
+
+/* ----- LIVE-Warnung (spezifisch für Strategy-Modal) ----------------------- */
+.at-warn-live {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #FF3366;
+  background: #FF336612;
+  border: 1px solid #FF336644;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  line-height: 1.4;
+}
+
+/* ==========================================================================
+   3-Weg Mode-Toggle (LIVE / PAPER / AUS)
+   ========================================================================== */
 .at-mode-toggle.sat-mode-3 {
   flex: 1;
+  width: 100%;
 }
 
 .at-mode-toggle.sat-mode-3 button {
@@ -30,7 +187,9 @@
   color: #FF3366;
 }
 
-/* Per-coin toggle grid inside the strategy modal */
+/* ==========================================================================
+   Per-Coin Toggle-Grid (falls in Strategy-Modal genutzt)
+   ========================================================================== */
 .sat-coin-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
@@ -71,4 +230,15 @@
 }
 .sat-coin-chip.off {
   opacity: 0.65;
+}
+
+/* ==========================================================================
+   Mobile
+   ========================================================================== */
+@media (max-width: 520px) {
+  .sat-backdrop { padding: 10px; }
+  .sat-modal { max-height: 95vh; }
+  .sat-header, .sat-body, .sat-footer { padding-left: 14px; padding-right: 14px; }
+  .sat-footer { flex-direction: column-reverse; }
+  .sat-cancel, .sat-save { width: 100%; }
 }
