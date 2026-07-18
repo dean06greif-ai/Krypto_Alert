@@ -244,10 +244,6 @@ async def process_signal(signal: Dict, candles: List[Dict]):
         return
     doc = await app.mongodb.strategy_coin_configs.find_one({"_id": f"{strategy_id}_{symbol}"})
 await app.mongodb.strategy_coin_configs.replace_one(
-Fix 2 — mode == 'off' Check zu früh (nach insert)
-Der Check passiert aktuell NACH insert_one — das Signal wird also trotzdem in die DB gespeichert. Er muss VOR die insert-Zeile.
-
-Finde den Block in process_signal:
 
 signal["id"] = str(uuid.uuid4())
 symbol = signal["symbol"]
@@ -1091,11 +1087,11 @@ async def set_strategy_coin_autotrade(
     _=Depends(require_admin)
 ):
     key = f"{strategy_id}_{symbol}"
-    await app.mongodb.strategy_coin_configs.find_one({"_id": f"{strategy_id}_{symbol}"})
-        {"_id": key},
-        {"_id": key, "config": body},
-        upsert=True
-    )
+await app.mongodb.strategy_coin_configs.replace_one(
+    {"_id": key},
+    {"_id": key, "config": body},
+    upsert=True
+)
     # Sync to in-memory autotrader config
     autotrader.config.setdefault("strategy_coin_configs", {})[key] = body
     logger.info(f"[AutoTrade] Per-coin config saved: strategy={strategy_id} coin={symbol} mode={body.get('mode')}")
