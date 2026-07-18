@@ -8,6 +8,8 @@ const StrategyTabs = ({
   selected, 
   signalsEnabled, 
   strategyOverrides,
+  strategyCoinConfigs = {},
+  selectedCoin,
   onSelect, 
   onToggleSignals, 
   onManage, 
@@ -18,8 +20,14 @@ const StrategyTabs = ({
     .map(id => strategies.find(s => s.id === id))
     .filter(Boolean);
 
-  // Get auto-trade status badge for a strategy
+  // Get auto-trade status badge for a strategy — reflects the mode of the
+  // CURRENTLY SELECTED COIN (per-strategy-per-coin config takes priority,
+  // falls back to strategy-level override for backwards compatibility).
   const getAutoTradeStatus = (strategyId) => {
+    const perCoin = strategyCoinConfigs?.[strategyId]?.[selectedCoin];
+    if (perCoin && perCoin.mode && perCoin.mode !== 'off') {
+      return perCoin.mode === 'live' ? 'L' : 'P';
+    }
     const override = strategyOverrides?.[strategyId];
     if (!override || !override.enabled || override.mode === 'off') {
       return null; // No badge when off

@@ -31,6 +31,7 @@ function App() {
   const [notifications, setNotifications] = useState({});
   const [autotradeCoins, setAutotradeCoins] = useState({});
   const [strategyOverrides, setStrategyOverrides] = useState({});
+  const [strategyCoinConfigs, setStrategyCoinConfigs] = useState({});
   const [sessionActive, setSessionActive] = useState(false);
   const [currentSession, setCurrentSession] = useState('');
   const [customSessions, setCustomSessions] = useState([]);
@@ -72,6 +73,14 @@ function App() {
       setAutotradeCoins((data.config && data.config.coins) || {});
       setStrategyOverrides(data.strategy_overrides || (data.config && data.config.strategy_overrides) || {});
     } catch (e) { console.error(e); }
+    // load per-strategy per-coin configs (admin-only)
+    try {
+      const res = await fetch(`${API_URL}/api/autotrade/strategy_coin_configs`, { headers: authHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setStrategyCoinConfigs(data.configs || {});
+      }
+    } catch (e) { /* silent — non-admin users won't have access */ }
   }, []);
 
   const loadSignals = useCallback(async () => {

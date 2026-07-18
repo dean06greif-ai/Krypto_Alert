@@ -1052,7 +1052,7 @@ async def get_strategy_coin_autotrade(
     symbol: str,
     _=Depends(require_admin)
 ):
-    doc = await db.strategy_coin_configs.find_one({"_id": f"{strategy_id}_{symbol}"})
+    doc = await app.mongodb.strategy_coin_configs.find_one({"_id": f"{strategy_id}_{symbol}"})
     saved = doc.get("config", {}) if doc else {}
     merged = {**DEFAULT_STRATEGY_COIN_CFG, **saved}
     return {"config": merged}
@@ -1074,6 +1074,24 @@ async def set_strategy_coin_autotrade(
     autotrader.config.setdefault("strategy_coin_configs", {})[key] = body
     logger.info(f"[AutoTrade] Per-coin config saved: strategy={strategy_id} coin={symbol} mode={body.get('mode')}")
     return {"ok": True}
+
+
+@app.get("/api/autotrade/strategy_coin_configs")
+async def list_strategy_coin_autotrade(_=Depends(require_admin)):
+    """Return ALL per-strategy per-coin auto-trade configs as a nested dict:
+        { strategy_id: { symbol: { mode, enabled, ... } } }
+    Used by the frontend to reflect the active mode on the strategy blitz icon.
+    """
+    docs = await app.mongodb.strategy_coin_configs.find().to_list(2000)
+    out: Dict[str, Dict[str, Dict]] = {}
+    for d in docs:
+        key = d.get("_id") or ""
+        if "_" not in key:
+            continue
+        # split on the LAST underscore so strategy ids with underscores still work
+        strategy_id, symbol = key.rsplit("_", 1)
+        out.setdefault(strategy_id, {})[symbol] = d.get("config", {})
+    return {"configs": out}
 
 @app.get("/api/autotrade/trades")
 async def get_trades(status: str = None, limit: int = 50):
