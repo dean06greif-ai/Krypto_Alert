@@ -242,43 +242,53 @@ async def process_signal(signal: Dict, candles: List[Dict]):
     # remain unaffected.
     if not toggle_enabled(signal.get("strategy_id"), signal.get("symbol")):
         return
-    signal["id"] = str(uuid.uuid4())
-    symbol = signal["symbol"]
-    strategy_id = signal.get("strategy_id")
-    notify = scanner.is_notify_enabled(symbol)
-    signal["notify"] = notify
-    await app.mongodb.signals.insert_one(dict(signal))
-    if signal.get("signal_class") != "PRE_SIGNAL":
-        open_signal_evals.append({
-            "id": signal["id"], "symbol": symbol, "type": signal["type"],
-            "sl": signal["stop_loss"], "tp1": signal["take_profit_1"],
-            "strategy_id": strategy_id,
-        })
-    
-    # Check strategy override for signal notifications (bell)
-    strategy_overrides = autotrader.config.get("strategy_overrides", {})
-    strat_override = strategy_overrides.get(strategy_id, {})
-    signals_enabled_for_strategy = strat_override.get("signals_enabled", True)
-    
-    if notify and signals_enabled_for_strategy:
-        # Enrich the signal with the per-coin TP1 close percent so the
-        # Telegram message reflects the actual configured partial (was
-        # hardcoded to 40% before).
-        try:
-            signal["tp1_close_percent"] = autotrader.coin_cfg(symbol).get(
-                "tp1_close_percent", 50)
-        except Exception:
-            signal["tp1_close_percent"] = 50
-        await telegram.send_signal(signal)
-    await update_performance(signal, opened=True)
-    try:
-        # Global admin kill-switch for auto-trades -> do not open new trades
-        if not control_state.get("trades_paused"):
-            await autotrader.on_signal(signal, candles)
-    except Exception as e:
-        logger.error(f"autotrade on_signal error: {e}")
-    await broadcast({"type": "signal", "data": _clean(signal)})
+    doc = await app.mongodb.strategy_coin_configs.find_one({"_id": f"{strategy_id}_{symbol}"})
+await app.mongodb.strategy_coin_configs.replace_one(
+Fix 2 — mode == 'off' Check zu früh (nach insert)
+Der Check passiert aktuell NACH insert_one — das Signal wird also trotzdem in die DB gespeichert. Er muss VOR die insert-Zeile.
 
+Finde den Block in process_signal:
+
+signal["id"] = str(uuid.uuid4())
+symbol = signal["symbol"]
+strategy_id = signal.get("strategy_id")
+notify = scanner.is_notify_enabled(symbol)
+signal["notify"] = notify
+await app.mongodb.signals.insert_one(dict(signal))
+...
+
+# Per-Coin-pro-Strategie Config (NEU)
+_coin_strat_key = f"{strategy_id}_{symbol}"
+coin_strat_cfg = autotrader.config.get("strategy_coin_configs", {}).get(_coin_strat_key)
+if coin_strat_cfg is None:
+    _doc = await app.mongodb.strategy_coin_configs.find_one({"_id": _coin_strat_key})
+    coin_strat_cfg = _doc.get("config", {}) if _doc else {}
+
+if coin_strat_cfg.get("mode", "off") == "off":
+    return
+signals_enabled_for_strategy = coin_strat_cfg.get("signals_enabled", True)
+Ersetze mit:
+
+strategy_id = signal.get("strategy_id")
+symbol = signal["symbol"]
+
+# Per-Coin-pro-Strategie Config (NEU) — VOR insert prüfen
+_coin_strat_key = f"{strategy_id}_{symbol}"
+coin_strat_cfg = autotrader.config.get("strategy_coin_configs", {}).get(_coin_strat_key)
+if coin_strat_cfg is None:
+    _doc = await app.mongodb.strategy_coin_configs.find_one({"_id": _coin_strat_key})
+    coin_strat_cfg = _doc.get("config", {}) if _doc else {}
+
+# Wenn AUS → komplett überspringen, nichts speichern
+if coin_strat_cfg.get("mode", "off") == "off":
+    return
+
+signals_enabled_for_strategy = coin_strat_cfg.get("signals_enabled", True)
+
+signal["id"] = str(uuid.uuid4())
+notify = scanner.is_notify_enabled(symbol)
+signal["notify"] = notify
+await app.mongodb.signals.insert_one(dict(signal))
 
 def _clean(d: Dict) -> Dict:
     d = dict(d)
@@ -737,8 +747,7 @@ async def ai_review(body: Dict = None):
     # (niedrigere Rate-Limits als Flash, für Coach-Analysen aber mehr als genug).
     # Alternativen: gemini-2.5-flash (schneller, höhere Limits) oder
     # gemini-2.0-flash.
-    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
-
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     stats = await _aggregate_ai_stats(strategy_id)
 
     system_msg = (
@@ -1042,6 +1051,55 @@ async def set_strategy_coin_toggle(strategy_id: str, symbol: str,
     return {"status": "success", "strategy_id": strategy_id,
             "symbol": symbol, "enabled": enabled}
 
+# ── PER-COIN-PER-STRATEGY CONFIG ─────────────────────────────────────────────
+
+DEFAULT_STRATEGY_COIN_CFG: dict = {
+    "enabled": False,
+    "mode": "off",
+    "signals_enabled": True,
+    "max_capital": 100.0,
+    "leverage": 10,
+    "order_type": "MARKET",
+    "sl_mode": "structure",
+    "sl_fixed_percent": 1.0,
+    "sl_ticks": 4,
+    "sl_lookback": 10,
+    "tp1_crv": 1.0,
+    "tp1_close_percent": 50,
+    "tp_full_crv": 2.0,
+    "breakeven_enabled": True,
+    "fee_percent": 0.06,
+    "trade_pre_signals": False,
+}
+
+@app.get("/api/autotrade/strategy/{strategy_id}/coin/{symbol}")
+async def get_strategy_coin_autotrade(
+    strategy_id: str,
+    symbol: str,
+    _=Depends(require_admin)
+):
+    doc = await db.strategy_coin_configs.find_one({"_id": f"{strategy_id}_{symbol}"})
+    saved = doc.get("config", {}) if doc else {}
+    merged = {**DEFAULT_STRATEGY_COIN_CFG, **saved}
+    return {"config": merged}
+
+@app.post("/api/autotrade/strategy/{strategy_id}/coin/{symbol}")
+async def set_strategy_coin_autotrade(
+    strategy_id: str,
+    symbol: str,
+    body: dict,
+    _=Depends(require_admin)
+):
+    key = f"{strategy_id}_{symbol}"
+    await app.mongodb.strategy_coin_configs.find_one({"_id": f"{strategy_id}_{symbol}"})
+        {"_id": key},
+        {"_id": key, "config": body},
+        upsert=True
+    )
+    # Sync to in-memory autotrader config
+    autotrader.config.setdefault("strategy_coin_configs", {})[key] = body
+    logger.info(f"[AutoTrade] Per-coin config saved: strategy={strategy_id} coin={symbol} mode={body.get('mode')}")
+    return {"ok": True}
 
 @app.get("/api/autotrade/trades")
 async def get_trades(status: str = None, limit: int = 50):
@@ -1081,7 +1139,8 @@ async def get_balance():
     }
 
     # ---- Live mode: fetch Bitunix balance ----
-    if mode == "live" and trade_client.configured():
+    if trade_client.configured():
+
         try:
             bal = await trade_client.get_balance()
             data = bal.get("data") if isinstance(bal, dict) else None

@@ -365,12 +365,13 @@ function App() {
           onChanged={loadStrategies}
         />
       )}
-      {strategyAutoTradeId && (
-        <StrategyAutoTradeModal
-          strategyId={strategyAutoTradeId}
-          strategyName={strategies.find(s => s.id === strategyAutoTradeId)?.name}
-          onClose={() => setStrategyAutoTradeId(null)}
-          onSaved={loadAutotrade}
+     {strategyAutoTradeId && (
+  <StrategyAutoTradeModal
+    strategyId={strategyAutoTradeId}
+    strategyName={strategies.find(s => s.id === strategyAutoTradeId)?.name}
+    symbol={selectedCoin}
+    onClose={() => setStrategyAutoTradeId(null)}
+    onSaved={loadAutotrade}
         />
       )}
       {showLogin && (
