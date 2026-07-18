@@ -106,8 +106,8 @@
 }
 
 .bw-mode.paper {
-  color: #00FF66;
-  background: rgba(0, 255, 102, 0.12);
+  color: #00A8FF;
+  background: rgba(0, 168, 255, 0.12);
 }
 
 .bw-mode.live {
@@ -115,6 +115,53 @@
   background: rgba(255, 77, 77, 0.14);
 }
 
+/* ---- Stacked Layout (Live USDT + Kapital / Paper PnL) ---- */
+.bw-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.15;
+  gap: 1px;
+}
+
+.bw-usdt-label {
+  font-size: 8px;
+  color: #5C6070;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 700;
+}
+
+.bw-primary-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: #FFFFFF;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.bw-primary-value.pos { color: #00FF66; }
+.bw-primary-value.neg { color: #FF4D4D; }
+
+.bw-sub-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: #7A7E8F;
+  font-weight: 600;
+}
+
+.bw-sub-label {
+  font-size: 8px;
+  color: #5C6070;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+}
+
+/* ---- Legacy item classes (kept for unconfigured warning) ---- */
 .bw-item {
   display: flex;
   flex-direction: column;
@@ -150,21 +197,13 @@
   align-items: center;
 }
 
-/* Divider between Total Balance and Freies Kapital */
-.bw-divider {
-  width: 1px;
-  height: 24px;
-  background: #2A2D3A;
-  flex-shrink: 0;
-}
-
 /* ---- Paper Overlay Badge ---- */
 .paper-overlay {
   display: flex;
   align-items: center;
   gap: 8px;
   background: #0A0A0A;
-  border: 1px solid rgba(0, 255, 102, 0.3);
+  border: 1px solid rgba(0, 168, 255, 0.3);
   border-radius: 10px;
   padding: 6px 12px;
   height: 40px;
@@ -173,10 +212,10 @@
 
 @keyframes paperGlow {
   0%, 100% {
-    border-color: rgba(0, 255, 102, 0.3);
+    border-color: rgba(0, 168, 255, 0.3);
   }
   50% {
-    border-color: rgba(0, 255, 102, 0.6);
+    border-color: rgba(0, 168, 255, 0.6);
   }
 }
 
@@ -189,8 +228,8 @@
   letter-spacing: 0.06em;
   padding: 2px 6px;
   border-radius: 4px;
-  color: #00FF66;
-  background: rgba(0, 255, 102, 0.12);
+  color: #00A8FF;
+  background: rgba(0, 168, 255, 0.12);
 }
 
 .paper-overlay-pnl {
@@ -200,21 +239,6 @@
 
 .paper-overlay-pnl .bw-value {
   font-size: 12px;
-}
-
-.paper-overlay-open {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  line-height: 1.1;
-}
-
-.paper-overlay-open .bw-label {
-  font-size: 8px;
-}
-
-.paper-overlay-open .bw-value {
-  font-size: 11px;
 }
 
 @media (max-width: 968px) {

@@ -28,7 +28,7 @@ const BalanceWidget = () => {
 
   // Paper overlay data
   const paperPnl = bal.paper_pnl ?? null;
-  const hasPaperActivity = bal.paper_open_trades > 0 || (paperPnl !== null && paperPnl !== 0);
+  const hasPaperActivity = (paperPnl !== null && paperPnl !== 0);
   const paperPnlPos = (paperPnl || 0) >= 0;
 
   return (
@@ -40,37 +40,28 @@ const BalanceWidget = () => {
         </div>
         {isLive ? (
           bal.bitunix_configured ? (
-            <>
-              <div className="bw-item" data-testid="bw-total">
-                <span className="bw-label">Total Balance</span>
-                <span className="bw-value mono">
-                  {bal.margin_balance != null ? Number(bal.margin_balance).toFixed(2) : (bal.bitunix_error ? 'API-Fehler' : '—')}
-                </span>
-              </div>
-              <div className="bw-divider" />
-              <div className="bw-item" data-testid="bw-free">
-                <span className="bw-label">Freies Kapital</span>
-                <span className="bw-value mono">
-                  {bal.available != null ? Number(bal.available).toFixed(2) : '—'}
-                </span>
-              </div>
-            </>
+            <div className="bw-stack" data-testid="bw-live-stack">
+              <span className="bw-usdt-label">USDT</span>
+              <span className="bw-primary-value mono" data-testid="bw-total">
+                {bal.margin_balance != null ? Number(bal.margin_balance).toFixed(2) : (bal.bitunix_error ? 'API-Fehler' : '—')}
+              </span>
+              <span className="bw-sub-line" data-testid="bw-free">
+                <span className="bw-sub-label">Kapital</span>
+                <span className="mono">{bal.available != null ? Number(bal.available).toFixed(2) : '—'}</span>
+              </span>
+            </div>
           ) : (
             <div className="bw-item bw-warn" data-testid="bw-unconfigured">Bitunix nicht konfiguriert</div>
           )
         ) : (
-          <div className="bw-item" data-testid="bw-pnl">
-            <span className="bw-label">PnL</span>
-            <span className={`bw-value mono ${pnlPos ? 'pos' : 'neg'}`}>
-              {pnlPos ? <TrendUp size={12} weight="bold" /> : <TrendDown size={12} weight="bold" />}
+          <div className="bw-stack" data-testid="bw-paper-stack">
+            <span className="bw-usdt-label">PnL</span>
+            <span className={`bw-primary-value mono ${pnlPos ? 'pos' : 'neg'}`}>
+              {pnlPos ? <TrendUp size={13} weight="bold" /> : <TrendDown size={13} weight="bold" />}
               {pnl.toFixed(2)}
             </span>
           </div>
         )}
-        <div className="bw-item" data-testid="bw-open-trades">
-          <span className="bw-label">Offen</span>
-          <span className="bw-value mono">{bal.open_trades ?? 0}</span>
-        </div>
       </div>
 
       {/* Paper Overlay - erscheint neben Live wenn Paper-Trades aktiv */}
@@ -86,12 +77,6 @@ const BalanceWidget = () => {
               {(paperPnl || 0).toFixed(2)}
             </span>
           </div>
-          {bal.paper_open_trades > 0 && (
-            <div className="paper-overlay-open">
-              <span className="bw-label">Offen</span>
-              <span className="bw-value mono">{bal.paper_open_trades}</span>
-            </div>
-          )}
         </div>
       )}
     </div>
