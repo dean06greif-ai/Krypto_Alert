@@ -280,6 +280,8 @@ function App() {
         customSessions={customSessions}
         activeStrategy={strategyMeta}
         berlinTime={berlinTime}
+        adminAuthed={adminAuthed}
+        onAdminClick={handleAdminClick}
         onSettingsClick={() => requireAdmin(() => setShowSettings(true))}
       />
 

@@ -198,7 +198,7 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin")
 
 
 def create_admin_token() -> str:
-    payload = {"sub": "admin", "exp": datetime.now(timezone.utc) + timedelta(days=30)}
+    payload = {"sub": "admin", "exp": datetime.now(timezone.utc) + timedelta(days=1)}
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 

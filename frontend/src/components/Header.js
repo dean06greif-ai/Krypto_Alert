@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Clock, Gear, ChartLineUp, Wallet, TrendUp, TrendDown } from '@phosphor-icons/react';
+import { Clock, Gear, ChartLineUp, Wallet, TrendUp, TrendDown, Lock, LockOpen } from '@phosphor-icons/react';
 import { authHeaders } from '../auth';
 import './Header.css';
 
@@ -83,7 +83,7 @@ const BalanceWidget = () => {
   );
 };
 
-const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions, activeStrategy }) => {
+const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions, activeStrategy, adminAuthed, onAdminClick }) => {
   const [currentTime, setCurrentTime] = useState(new Date());
 
   useEffect(() => {
@@ -145,6 +145,17 @@ const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions
       
       <div className="header-right">
         <BalanceWidget />
+        <button
+          className={`btn btn-admin ${adminAuthed ? 'is-admin' : ''}`}
+          onClick={onAdminClick}
+          title={adminAuthed ? 'Admin abmelden' : 'Admin-Login'}
+          aria-label={adminAuthed ? 'Admin abmelden' : 'Admin-Login'}
+          data-testid="admin-lock-button"
+        >
+          {adminAuthed
+            ? <LockOpen size={20} weight="bold" />
+            : <Lock size={20} weight="bold" />}
+        </button>
         <button className="btn" onClick={onSettingsClick} data-testid="settings-button">
           <Gear size={20} weight="bold" />
         </button>

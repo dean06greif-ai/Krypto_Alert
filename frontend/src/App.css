@@ -152,6 +152,32 @@ h1, h2, h3, h4, h5, h6 {
   border-color: #FF3366;
 }
 
+.btn-admin {
+  padding: 10px 12px;
+  color: #FFB020;
+  border-color: rgba(255, 176, 32, 0.35);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.2s, background 0.2s, color 0.2s, box-shadow 0.2s;
+}
+
+.btn-admin:hover {
+  background: rgba(255, 176, 32, 0.08);
+  border-color: #FFB020;
+}
+
+.btn-admin.is-admin {
+  color: #00FF66;
+  border-color: rgba(0, 255, 102, 0.45);
+  box-shadow: 0 0 0 1px rgba(0, 255, 102, 0.15) inset;
+}
+
+.btn-admin.is-admin:hover {
+  background: rgba(0, 255, 102, 0.08);
+  border-color: #00FF66;
+}
+
 /* Cards */
 .card {
   background: #121212;
