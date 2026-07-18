@@ -242,8 +242,6 @@ async def process_signal(signal: Dict, candles: List[Dict]):
     # remain unaffected.
     if not toggle_enabled(signal.get("strategy_id"), signal.get("symbol")):
         return
-    doc = await app.mongodb.strategy_coin_configs.find_one({"_id": f"{strategy_id}_{symbol}"})
-await app.mongodb.strategy_coin_configs.replace_one(
 
 signal["id"] = str(uuid.uuid4())
 symbol = signal["symbol"]
@@ -263,7 +261,6 @@ if coin_strat_cfg is None:
 if coin_strat_cfg.get("mode", "off") == "off":
     return
 signals_enabled_for_strategy = coin_strat_cfg.get("signals_enabled", True)
-Ersetze mit:
 
 strategy_id = signal.get("strategy_id")
 symbol = signal["symbol"]
