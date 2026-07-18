@@ -1092,6 +1092,7 @@ async def set_strategy_coin_autotrade(
         {"_id": key, "config": body},
         upsert=True
     )
+    # Sync to in-memory autotrader config
     autotrader.config.setdefault("strategy_coin_configs", {})[key] = body
     logger.info(f"[AutoTrade] Per-coin config saved: strategy={strategy_id} coin={symbol} mode={body.get('mode')}")
     return {"ok": True}
