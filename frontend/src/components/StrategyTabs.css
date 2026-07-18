@@ -1,23 +1,23 @@
 .strategy-tabs-bar {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   background: #0E0E0E;
   border-bottom: 1px solid #2A2D3A;
-  padding: 0 8px;
+  padding: 6px 8px;
   min-height: 48px;
   gap: 8px;
 }
 .strategy-tabs-scroll {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
-  overflow-x: auto;
+  overflow: visible;
   flex: 1;
-  padding: 6px 0;
-  scrollbar-width: thin;
+  min-width: 0;
+  padding: 0;
 }
-.strategy-tabs-scroll::-webkit-scrollbar { height: 4px; }
 .strategy-tab {
   display: flex;
   align-items: center;
@@ -97,7 +97,7 @@
   color: #fff;
 }
 
-.strategy-tabs-actions { display: flex; gap: 6px; }
+.strategy-tabs-actions { display: flex; gap: 6px; flex-shrink: 0; position: sticky; top: 6px; }
 .strategy-tab-action {
   display: flex; align-items: center; justify-content: center;
   width: 34px; height: 34px; border: 1px solid #2A2D3A; border-radius: 8px;

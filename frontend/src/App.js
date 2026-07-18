@@ -314,6 +314,8 @@ function App() {
             selected={selectedStrategy}
             signalsEnabled={signalsEnabled}
             strategyOverrides={strategyOverrides}
+            strategyCoinConfigs={strategyCoinConfigs}
+            selectedCoin={selectedCoin}
             onSelect={setSelectedStrategy}
             onToggleSignals={(id) => requireAdmin(() => toggleSignals(id))}
             onManage={() => setShowBuilder(true)}
@@ -340,6 +342,8 @@ function App() {
               signals={signals}
               selectedCoin={selectedCoin}
               selectedStrategy={selectedStrategy}
+              strategyOverrides={strategyOverrides}
+              strategyCoinConfigs={strategyCoinConfigs}
               isAdmin={adminAuthed}
               onNeedAdmin={() => requireAdmin(() => {})}
               onCleared={() => { loadSignals(); loadPerformance(); }}

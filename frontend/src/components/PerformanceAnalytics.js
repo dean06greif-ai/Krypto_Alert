@@ -14,7 +14,7 @@ const CLEAR_RANGES = [
   { key: 'all', label: 'Gesamter Zeitraum (alles)' },
 ];
 
-const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], signals, selectedCoin, selectedStrategy, isAdmin, onNeedAdmin, onCleared }) => {
+const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], signals, selectedCoin, selectedStrategy, strategyOverrides = {}, strategyCoinConfigs = {}, isAdmin, onNeedAdmin, onCleared }) => {
   const [view, setView] = useState('overview');
   const [timeAnalytics, setTimeAnalytics] = useState(null);
   const [trades, setTrades] = useState([]);
@@ -32,6 +32,26 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
   const modeInfo = (m) => (m === 'live')
     ? { label: 'LIVE', cls: 'mode-live' }
     : { label: 'PAPER', cls: 'mode-paper' };
+
+  // Resolve the auto-trade mode of the SELECTED strategy for the SELECTED coin
+  // (per-strategy-per-coin config wins, falls back to strategy-level override).
+  const resolveStrategyMode = (strategyId, coin) => {
+    if (!strategyId) return 'off';
+    const perCoin = strategyCoinConfigs?.[strategyId]?.[coin];
+    if (perCoin && perCoin.mode) return perCoin.mode; // 'live' | 'paper' | 'off'
+    const override = strategyOverrides?.[strategyId];
+    if (!override || !override.enabled || override.mode === 'off') return 'off';
+    return override.mode || 'off';
+  };
+
+  const activeStrategyName = strategies.find(s => s.id === selectedStrategy)?.name || '—';
+  const activeMode = resolveStrategyMode(selectedStrategy, selectedCoin);
+  const bannerMeta = {
+    live:  { cls: 'mode-live',  label: 'ECHTGELD · LIVE',     pill: 'LIVE',  head: 'AKTIV' },
+    paper: { cls: 'mode-paper', label: 'SIMULATION · PAPER',  pill: 'PAPER', head: 'AKTIV' },
+    off:   { cls: 'mode-off',   label: 'DEAKTIVIERT · AUS',   pill: 'AUS',   head: 'INAKTIV' },
+  };
+  const banner = bannerMeta[activeMode] || bannerMeta.off;
 
   const stratSignals = signals.filter(s => !selectedStrategy || s.strategy_id === selectedStrategy);
   const totalSignals = stratSignals.length;
@@ -256,13 +276,13 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
 
       {view === 'trades' && (
         <>
-          <div className={`mode-banner ${(balance?.mode === 'live') ? 'mode-live' : 'mode-paper'}`} data-testid="active-mode-banner">
+          <div className={`mode-banner ${banner.cls}`} data-testid="active-mode-banner">
             <div className="mode-banner-dot" />
             <div className="mode-banner-text">
-              <span className="mode-banner-label">AKTIVER MODUS</span>
-              <span className="mode-banner-value">{(balance?.mode === 'live') ? 'ECHTGELD · LIVE' : 'PAPER-TRADING'}</span>
+              <span className="mode-banner-label">{banner.head} · {activeStrategyName} · {getCoinName(selectedCoin)}</span>
+              <span className="mode-banner-value">{banner.label}</span>
             </div>
-            <span className={`mode-pill ${(balance?.mode === 'live') ? 'mode-live' : 'mode-paper'}`}>{(balance?.mode === 'live') ? 'LIVE' : 'PAPER'}</span>
+            <span className={`mode-pill ${banner.cls}`}>{banner.pill}</span>
           </div>
 
           <div className="analytics-section">

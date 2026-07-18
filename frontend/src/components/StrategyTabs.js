@@ -63,7 +63,7 @@ const StrategyTabs = ({
               <span className="strategy-tab-name">{strat.name}</span>
               {strat.is_custom && <span className="strategy-tab-custom">C</span>}
               
-              {/* Lightning Icon - Auto-Trade Status */}
+              {/* Lightning Icon - Auto-Trade Status: gelb=LIVE, blau=PAPER, leer=AUS */}
               <button
                 className={`strategy-tab-trade ${atStatus ? 'active' : ''} ${atStatus === 'L' ? 'live' : ''}`}
                 onClick={(e) => { e.stopPropagation(); onOpenStrategyAutoTrade && onOpenStrategyAutoTrade(strat.id); }}
@@ -71,11 +71,11 @@ const StrategyTabs = ({
                 data-testid={`strategy-trade-toggle-${strat.id}`}
               >
                 <Lightning
-  size={13}
-  weight={atStatus ? 'fill' : 'regular'}
-  color={atStatus === 'L' ? '#f59e0b' : undefined}
-/>
-{atStatus === 'P' && <span className="strategy-trade-badge">P</span>}
+                  size={13}
+                  weight={atStatus ? 'fill' : 'regular'}
+                  color={atStatus === 'L' ? '#FFD60A' : atStatus === 'P' ? '#00A8FF' : '#5C6070'}
+                />
+                {atStatus === 'P' && <span className="strategy-trade-badge">P</span>}
               </button>
 
               {/* Bell Icon - Signal Notifications Toggle */}
