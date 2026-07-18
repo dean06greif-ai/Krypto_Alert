@@ -14,7 +14,7 @@ const CLEAR_RANGES = [
   { key: 'all', label: 'Gesamter Zeitraum (alles)' },
 ];
 
-const PerformanceAnalytics = ({ performance, strategies = [], signals, selectedCoin, selectedStrategy, isAdmin, onNeedAdmin, onCleared }) => {
+const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], signals, selectedCoin, selectedStrategy, isAdmin, onNeedAdmin, onCleared }) => {
   const [view, setView] = useState('overview');
   const [timeAnalytics, setTimeAnalytics] = useState(null);
   const [trades, setTrades] = useState([]);
@@ -51,7 +51,7 @@ const PerformanceAnalytics = ({ performance, strategies = [], signals, selectedC
     .sort((a, b) => (b.win_rate || 0) - (a.win_rate || 0)).slice(0, 5);
 
   const loadTrades = useCallback(() => {
-    fetch(`${API_URL}/api/autotrade/trades?limit=30`).then(r => r.json()).then(d => setTrades(d.trades || [])).catch(() => {});
+    fetch(`${API_URL}/api/autotrade/trades?limit=200`).then(r => r.json()).then(d => setTrades(d.trades || [])).catch(() => {});
     fetch(`${API_URL}/api/autotrade/balance`).then(r => r.json()).then(setBalance).catch(() => {});
   }, []);
 
@@ -69,19 +69,34 @@ const PerformanceAnalytics = ({ performance, strategies = [], signals, selectedC
   const paperCount = trades.filter(t => t.mode !== 'live').length;
   const liveCount = trades.filter(t => t.mode === 'live').length;
 
-  const byStrategy = {};
-  closedTrades.forEach(t => {
-    const key = t.strategy_id || 'unknown';
-    const e = byStrategy[key] || { id: key, name: stratName(t), wins: 0, losses: 0, total: 0, pnl: 0 };
-    e.total += 1;
-    if (t.result === 'win') e.wins += 1;
-    else if (t.result === 'loss') e.losses += 1;
-    e.pnl += (t.realized_pnl || 0);
-    byStrategy[key] = e;
-  });
-  const stratRows = Object.values(byStrategy)
-    .map(v => ({ ...v, wr: (v.wins + v.losses) ? Math.round(v.wins / (v.wins + v.losses) * 100) : 0 }))
-    .sort((a, b) => b.total - a.total);
+  // Coin-specific slices (for currently selected coin)
+  const coinClosedTrades = closedTrades.filter(t => t.symbol === selectedCoin);
+  const coinOpenTrades = openTrades.filter(t => t.symbol === selectedCoin);
+  const coinPnl = coinClosedTrades.reduce((a, t) => a + (t.realized_pnl || 0), 0);
+
+  // Performance per ACTIVE strategy for the SELECTED COIN
+  // Show every active strategy, even without trades yet.
+  const activeStrategies = strategies.filter(s => enabledIds.includes(s.id));
+  const activeStratList = activeStrategies.length ? activeStrategies : strategies;
+
+  const stratRows = activeStratList.map(strat => {
+    const rowTrades = closedTrades.filter(t => t.strategy_id === strat.id && t.symbol === selectedCoin);
+    const wins = rowTrades.filter(t => t.result === 'win').length;
+    const losses = rowTrades.filter(t => t.result === 'loss').length;
+    const decided = wins + losses;
+    const pnl = rowTrades.reduce((a, t) => a + (t.realized_pnl || 0), 0);
+    const openCount = openTrades.filter(t => t.strategy_id === strat.id && t.symbol === selectedCoin).length;
+    return {
+      id: strat.id,
+      name: strat.name || strat.id,
+      wins,
+      losses,
+      total: rowTrades.length,
+      openCount,
+      pnl,
+      wr: decided ? Math.round((wins / decided) * 100) : 0,
+    };
+  }).sort((a, b) => (b.total + b.openCount) - (a.total + a.openCount));
 
   const openClear = () => {
     if (!isAdmin) { onNeedAdmin && onNeedAdmin(); return; }
@@ -252,9 +267,28 @@ const PerformanceAnalytics = ({ performance, strategies = [], signals, selectedC
 
           <div className="analytics-section">
             <div className="stats-grid">
-              <div className="stat-card"><div className="stat-content"><div className="stat-value mono" style={{ color: (balance?.realized_pnl || 0) >= 0 ? '#00FF66' : '#FF3366' }}>{(balance?.realized_pnl || 0).toFixed(2)}</div><div className="stat-label">PnL (USDT)</div></div></div>
+              <div className="stat-card" data-testid="pnl-total-card">
+                <div className="stat-content">
+                  <div className="stat-value mono" style={{ color: (balance?.realized_pnl || 0) >= 0 ? '#00FF66' : '#FF3366' }}>
+                    {(balance?.realized_pnl || 0).toFixed(2)}
+                  </div>
+                  <div className="stat-label">PnL Gesamt (USDT)</div>
+                </div>
+              </div>
               <div className="stat-card"><div className="stat-content"><div className="stat-value mono">{openTrades.length}</div><div className="stat-label">Offen</div></div></div>
               <div className="stat-card"><div className="stat-content"><div className="stat-value mono">{closedTrades.length}</div><div className="stat-label">Geschlossen</div></div></div>
+            </div>
+            <div className="stats-grid" style={{ marginTop: 8 }}>
+              <div className="stat-card stat-card-coin" data-testid="pnl-coin-card">
+                <div className="stat-content">
+                  <div className="stat-value mono" style={{ color: coinPnl >= 0 ? '#00FF66' : '#FF3366' }}>
+                    {coinPnl.toFixed(2)}
+                  </div>
+                  <div className="stat-label">PnL {getCoinName(selectedCoin)} (USDT)</div>
+                </div>
+              </div>
+              <div className="stat-card"><div className="stat-content"><div className="stat-value mono">{coinOpenTrades.length}</div><div className="stat-label">Offen · {getCoinName(selectedCoin)}</div></div></div>
+              <div className="stat-card"><div className="stat-content"><div className="stat-value mono">{coinClosedTrades.length}</div><div className="stat-label">Geschl. · {getCoinName(selectedCoin)}</div></div></div>
             </div>
           </div>
 
@@ -265,19 +299,29 @@ const PerformanceAnalytics = ({ performance, strategies = [], signals, selectedC
           </div>
 
           <div className="analytics-section">
-            <div className="section-title">PERFORMANCE JE STRATEGIE</div>
-            {stratRows.length === 0 && <div className="no-data">Noch keine geschlossenen Trades</div>}
-            {stratRows.map(s => (
-              <div key={s.id} className="strat-perf-row" data-testid={`strat-perf-${s.id}`}>
-                <div className="strat-perf-name">{s.name}</div>
-                <div className="strat-perf-stats">
-                  <span className="text-long mono">{s.wins}W</span>
-                  <span className="text-short mono">{s.losses}L</span>
-                  <span className="mono" style={{ color: s.wr >= 50 ? '#00FF66' : '#FF3366' }}>{s.wr}%</span>
-                  <span className={`mono ${s.pnl >= 0 ? 'text-long' : 'text-short'}`}>{s.pnl.toFixed(2)}</span>
+            <div className="section-title">
+              PERFORMANCE JE STRATEGIE · {getCoinName(selectedCoin)}
+            </div>
+            {stratRows.length === 0 && <div className="no-data">Keine aktiven Strategien</div>}
+            {stratRows.map(s => {
+              const empty = s.total === 0 && s.openCount === 0;
+              return (
+                <div key={s.id} className={`strat-perf-row ${empty ? 'strat-perf-empty' : ''}`} data-testid={`strat-perf-${s.id}`}>
+                  <div className="strat-perf-name" title={s.name}>{s.name}</div>
+                  <div className="strat-perf-stats">
+                    {s.openCount > 0 && <span className="mono text-warning" title="offene Trades">{s.openCount}○</span>}
+                    <span className="text-long mono">{s.wins}W</span>
+                    <span className="text-short mono">{s.losses}L</span>
+                    <span className="mono" style={{ color: (s.wins + s.losses) === 0 ? '#5C6070' : (s.wr >= 50 ? '#00FF66' : '#FF3366') }}>
+                      {(s.wins + s.losses) === 0 ? '—' : `${s.wr}%`}
+                    </span>
+                    <span className={`mono ${s.pnl === 0 ? 'text-muted' : (s.pnl >= 0 ? 'text-long' : 'text-short')}`}>
+                      {s.pnl.toFixed(2)}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="analytics-section">

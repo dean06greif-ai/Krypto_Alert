@@ -327,6 +327,7 @@ function App() {
             <PerformanceAnalytics
               performance={performance}
               strategies={strategies}
+              enabledIds={enabledIds}
               signals={signals}
               selectedCoin={selectedCoin}
               selectedStrategy={selectedStrategy}

@@ -285,9 +285,12 @@
 .trade-row { background: #1A1C23; border: 1px solid #2A2D3A; padding: 9px 11px; display: flex; gap: 9px; align-items: center; border-radius: 8px; }
 .trade-row-lg { flex-wrap: wrap; }
 
-.strat-perf-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: #1A1C23; border: 1px solid #2A2D3A; padding: 10px 12px; border-radius: 8px; }
+.strat-perf-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: #1A1C23; border: 1px solid #2A2D3A; padding: 10px 12px; border-radius: 8px; margin-bottom: 6px; }
+.strat-perf-row.strat-perf-empty { opacity: 0.55; background: #141620; }
 .strat-perf-name { font-size: 12px; font-weight: 700; color: #FFFFFF; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .strat-perf-stats { display: flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+
+.stat-card-coin { border-color: rgba(0, 168, 255, 0.35); background: rgba(0, 168, 255, 0.05); }
 
 /* --- KI-Analyse (GPT-4o) --- */
 .ai-review-section { border-top: 1px solid #2A2D3A; padding-top: 12px; margin-top: 4px; }
