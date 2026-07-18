@@ -243,45 +243,26 @@ async def process_signal(signal: Dict, candles: List[Dict]):
     if not toggle_enabled(signal.get("strategy_id"), signal.get("symbol")):
         return
 
-signal["id"] = str(uuid.uuid4())
-symbol = signal["symbol"]
-strategy_id = signal.get("strategy_id")
-notify = scanner.is_notify_enabled(symbol)
-signal["notify"] = notify
-await app.mongodb.signals.insert_one(dict(signal))
-...
+    strategy_id = signal.get("strategy_id")
+    symbol = signal["symbol"]
 
-# Per-Coin-pro-Strategie Config (NEU)
-_coin_strat_key = f"{strategy_id}_{symbol}"
-coin_strat_cfg = autotrader.config.get("strategy_coin_configs", {}).get(_coin_strat_key)
-if coin_strat_cfg is None:
-    _doc = await app.mongodb.strategy_coin_configs.find_one({"_id": _coin_strat_key})
-    coin_strat_cfg = _doc.get("config", {}) if _doc else {}
+    # Per-Coin-pro-Strategie Config (NEU) — VOR insert prüfen
+    _coin_strat_key = f"{strategy_id}_{symbol}"
+    coin_strat_cfg = autotrader.config.get("strategy_coin_configs", {}).get(_coin_strat_key)
+    if coin_strat_cfg is None:
+        _doc = await app.mongodb.strategy_coin_configs.find_one({"_id": _coin_strat_key})
+        coin_strat_cfg = _doc.get("config", {}) if _doc else {}
 
-if coin_strat_cfg.get("mode", "off") == "off":
-    return
-signals_enabled_for_strategy = coin_strat_cfg.get("signals_enabled", True)
+    # Wenn AUS → komplett überspringen, nichts speichern
+    if coin_strat_cfg.get("mode", "off") == "off":
+        return
 
-strategy_id = signal.get("strategy_id")
-symbol = signal["symbol"]
+    signals_enabled_for_strategy = coin_strat_cfg.get("signals_enabled", True)
 
-# Per-Coin-pro-Strategie Config (NEU) — VOR insert prüfen
-_coin_strat_key = f"{strategy_id}_{symbol}"
-coin_strat_cfg = autotrader.config.get("strategy_coin_configs", {}).get(_coin_strat_key)
-if coin_strat_cfg is None:
-    _doc = await app.mongodb.strategy_coin_configs.find_one({"_id": _coin_strat_key})
-    coin_strat_cfg = _doc.get("config", {}) if _doc else {}
-
-# Wenn AUS → komplett überspringen, nichts speichern
-if coin_strat_cfg.get("mode", "off") == "off":
-    return
-
-signals_enabled_for_strategy = coin_strat_cfg.get("signals_enabled", True)
-
-signal["id"] = str(uuid.uuid4())
-notify = scanner.is_notify_enabled(symbol)
-signal["notify"] = notify
-await app.mongodb.signals.insert_one(dict(signal))
+    signal["id"] = str(uuid.uuid4())
+    notify = scanner.is_notify_enabled(symbol)
+    signal["notify"] = notify
+    await app.mongodb.signals.insert_one(dict(signal))
 
 def _clean(d: Dict) -> Dict:
     d = dict(d)
