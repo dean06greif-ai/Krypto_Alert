@@ -232,7 +232,6 @@ async def admin_verify(_: bool = Depends(require_admin)):
     return {"valid": True}
 
 
-# ---------------- signal processing ----------------
 async def process_signal(signal: Dict, candles: List[Dict]):
     # Global admin kill-switch for signals -> completely suppress emission
     if control_state.get("signals_paused"):
@@ -263,6 +262,26 @@ async def process_signal(signal: Dict, candles: List[Dict]):
     notify = scanner.is_notify_enabled(symbol)
     signal["notify"] = notify
     await app.mongodb.signals.insert_one(dict(signal))
+
+    # FIX 1: Telegram-Benachrichtigung senden (wenn aktiviert)
+    if notify and signals_enabled_for_strategy:
+        try:
+            # tp1_close_percent für die Telegram-Nachricht hinzufügen
+            coin_cfg = autotrader.coin_cfg(symbol)
+            signal["tp1_close_percent"] = coin_cfg.get("tp1_close_percent", 50)
+            await telegram.send_signal(signal)
+            logger.info(f"Telegram notification sent for {symbol} {signal['type']}")
+        except Exception as e:
+            logger.error(f"Failed to send Telegram notification: {e}")
+
+    # FIX 2: Auto-Trade ausführen (wenn Auto-Trading aktiviert ist)
+    try:
+        trade = await autotrader.on_signal(signal, candles)
+        if trade:
+            await update_performance(signal, opened=True)
+            logger.info(f"Auto-trade opened for {symbol}: {trade['id']}")
+    except Exception as e:
+        logger.error(f"Auto-trade execution failed for {symbol}: {e}")
 
 def _clean(d: Dict) -> Dict:
     d = dict(d)
