@@ -870,34 +870,48 @@ async def _aggregate_ai_stats(strategy_id: str = None) -> Dict:
 
 @app.post("/api/analytics/ai-review")
 async def ai_review(body: Dict = None):
-    """Sendet aggregierte Trading-Statistiken an GPT-4o und liefert eine deutsche
-    Coach-Auswertung zurück (welche Regeln nicht funktionieren + konkrete Vorschläge)."""
+    """Aggregierte Trading-Statistiken an ein KI-Modell senden und deutsche
+    Coach-Auswertung zurückgeben. Provider frei konfigurierbar via .env
+    (OpenAI-kompatibel). Standard: Groq (kostenlos, keine Kreditkarte)."""
     import json as _json
     body = body or {}
     strategy_id = body.get("strategy_id")
 
-    api_key = os.getenv("GEMINI_API_KEY")
+    # ---- KI-Provider-Konfiguration (OpenAI-kompatibel) ----
+    # In backend/.env setzen:  AI_API_KEY, AI_BASE_URL, AI_MODEL
+    #  GROQ (empfohlen, gratis):
+    #     AI_BASE_URL=https://api.groq.com/openai/v1
+    #     AI_MODEL=llama-3.3-70b-versatile
+    #  OpenRouter (gratis, 50/Tag):
+    #     AI_BASE_URL=https://openrouter.ai/api/v1
+    #     AI_MODEL=deepseek/deepseek-chat-v3-0324:free
+    #  Google Gemini:
+    #     AI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+    #     AI_MODEL=gemini-2.0-flash
+
+    # Abwärtskompatibel: alte GEMINI_*-Variablen werden weiter akzeptiert.
+    api_key = (
+        os.getenv("AI_API_KEY")
+        or os.getenv("GROQ_API_KEY")
+        or os.getenv("OPENROUTER_API_KEY")
+        or os.getenv("GEMINI_API_KEY")
+    )
     if not api_key:
         raise HTTPException(
             status_code=500,
-            detail="GEMINI_API_KEY nicht in backend/.env gesetzt. "
-                   "Hol dir einen kostenlosen Key unter https://aistudio.google.com/apikey, "
-                   "trage ihn dort ein und starte das Backend neu."
+            detail=("Kein KI-API-Key gesetzt. Trage in backend/.env AI_API_KEY ein. "
+                    "Kostenlosen Groq-Key holen: https://console.groq.com/keys, "
+                    "dann Backend neu starten."),
         )
 
-    # Modell konfigurierbar über .env. Default: gemini-2.5-pro – Googles
-    # Flaggschiff, beste Analyse-Qualität, ebenfalls im Free-Tier verfügbar
-    # (niedrigere Rate-Limits als Flash, für Coach-Analysen aber mehr als genug).
-    # Alternativen: gemini-2.5-flash (schneller, höhere Limits) oder
-    # gemini-2.0-flash.
-    model_name = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
-    # Der OpenAI-kompatible Gemini-Endpoint erwartet die reine Modell-ID ohne
-    # "models/"-Präfix und ohne umschließende Anführungszeichen/Leerzeichen.
-    model_name = model_name.strip('"').strip("'").strip()
+    base_url = (os.getenv("AI_BASE_URL") or "https://api.groq.com/openai/v1").strip()
+    model_name = (os.getenv("AI_MODEL") or os.getenv("GEMINI_MODEL")
+                  or "llama-3.3-70b-versatile").strip().strip('"').strip("'").strip()
     if model_name.startswith("models/"):
         model_name = model_name[len("models/"):]
     if not model_name:
-        model_name = "gemini-2.5-flash"
+        model_name = "llama-3.3-70b-versatile"
+
     stats = await _aggregate_ai_stats(strategy_id)
 
     system_msg = (
@@ -911,29 +925,22 @@ async def ai_review(body: Dict = None):
         "als JSON:\n\n```json\n"
         + _json.dumps(stats, ensure_ascii=False, indent=2, default=str)
         + "\n```\n\nAufgabe:\n"
-        "1) **Kurz-Fazit** (2–3 Sätze zur Gesamtlage).\n"
-        "2) **Problematische Regeln / Setups** – nenne konkret welche Regeln oder "
+        "1) **Kurz-Fazit** (2-3 Sätze zur Gesamtlage).\n"
+        "2) **Problematische Regeln / Setups** - nenne konkret welche Regeln oder "
         "Regelkombinationen unterdurchschnittlich performen und WARUM (Zahlen zitieren).\n"
-        "3) **Einzeltrade-Analyse** – nutze `einzeltrades_detail` (exakte Uhrzeiten, "
+        "3) **Einzeltrade-Analyse** - nutze `einzeltrades_detail` (exakte Uhrzeiten, "
         "Entry, SL, TP1, Full-TP, Exit, R-Vielfaches, Dauer, paper/live). Finde Muster: "
         "Zu welchen Uhrzeiten/Setups laufen Trades in den SL? Werden TPs zu früh/zu spät "
         "gesetzt? Ist das SL-zu-TP-Verhältnis realistisch? Vergleiche paper vs. live.\n"
-        "4) **Konkrete Änderungsvorschläge** – parameterbezogen oder logikbezogen, "
+        "4) **Konkrete Änderungsvorschläge** - parameterbezogen oder logikbezogen, "
         "so präzise wie möglich (z.B. RSI-Schwelle anpassen, TP/SL-Ratio ändern, "
         "Setup entfernen, Filter hinzufügen, bestimmte Handelszeiten meiden).\n"
         "Antworte auf Deutsch."
     )
 
     try:
-        # Google Gemini via OpenAI-kompatiblem Endpoint – nutzt die bereits
-        # installierte openai-Bibliothek, spart eine zusätzliche Abhängigkeit.
-        # Doku: https://ai.google.dev/gemini-api/docs/openai
         from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(
-            api_key=api_key,
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        )
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         completion = await client.chat.completions.create(
             model=model_name,
             temperature=0.4,
@@ -944,7 +951,7 @@ async def ai_review(body: Dict = None):
         )
         review = (completion.choices[0].message.content or "").strip()
         if not review:
-            raise RuntimeError("Leere Antwort vom Gemini-Modell erhalten.")
+            raise RuntimeError("Leere Antwort vom KI-Modell erhalten.")
     except HTTPException:
         raise
     except Exception as e:

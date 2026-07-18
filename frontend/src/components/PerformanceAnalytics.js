@@ -45,28 +45,29 @@ const TradeDetailCard = ({ t, stratName, getCoinName }) => {
   const isLive = t.mode === 'live';
   const closed = t.status === 'closed';
   const resultMeta = t.result === 'win'
-    ? { label: 'GEWINN', cls: 'res-win', Icon: CheckCircle }
-    : t.result === 'loss'
-      ? { label: 'VERLUST', cls: 'res-loss', Icon: XCircle }
-      : t.result === 'breakeven'
-        ? { label: 'BREAK-EVEN', cls: 'res-be', Icon: Target }
-        : { label: 'OFFEN', cls: 'res-open', Icon: Lightning };
-  const R = resultMeta.Icon;
+  ? { label: 'G', cls: 'res-win' }
+  : t.result === 'loss'
+    ? { label: 'V', cls: 'res-loss' }
+    : t.result === 'breakeven'
+      ? { label: 'BEP', cls: 'res-be' }
+      : { label: 'OFFEN', cls: 'res-open' };
   const pnl = t.realized_pnl || 0;
 
   return (
     <div className={`tdc ${open ? 'tdc-open' : ''}`} data-testid={`trade-card-${t.id}`}>
       <button className="tdc-head" onClick={() => setOpen(o => !o)} data-testid={`trade-card-toggle-${t.id}`}>
-        <span className={`mode-tag ${isLive ? 'mode-live' : 'mode-paper'}`} data-testid={`trade-mode-${t.id}`}>
-          {isLive ? 'LIVE' : 'PAPER'}
-        </span>
-        <span className={`badge ${t.side === 'LONG' ? 'badge-long' : 'badge-short'}`}>{t.side}</span>
-        <span className="mono text-secondary tdc-coin">{getCoinName(t.symbol)}</span>
-        <span className="strat-chip" title={stratName(t)}>{stratName(t)}</span>
-        <span className={`tdc-result ${resultMeta.cls}`}><R size={13} weight="bold" />{resultMeta.label}</span>
-        <span className={`mono tdc-pnl ${pnl >= 0 ? 'text-long' : 'text-short'}`}>{pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}</span>
-        <CaretDown size={13} className={`tdc-caret ${open ? 'rot' : ''}`} />
-      </button>
+  <span className="tdc-main">
+    <span className={`mode-tag ${isLive ? 'mode-live' : 'mode-paper'}`} data-testid={`trade-mode-${t.id}`}>
+      {isLive ? 'LIVE' : 'PAPER'}
+    </span>
+    <span className={`badge ${t.side === 'LONG' ? 'badge-long' : 'badge-short'}`}>{t.side}</span>
+    <span className="mono text-secondary tdc-coin">{getCoinName(t.symbol)}</span>
+    <span className={`tdc-result ${resultMeta.cls}`}>{resultMeta.label}</span>
+    <span className={`mono tdc-pnl ${pnl >= 0 ? 'text-long' : 'text-short'}`}>{pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}</span>
+    <CaretDown size={13} className={`tdc-caret ${open ? 'rot' : ''}`} />
+  </span>
+  <span className="tdc-strat-line" title={stratName(t)}>{stratName(t)}</span>
+</button>
 
       {open && (
         <div className="tdc-body" data-testid={`trade-card-body-${t.id}`}>
