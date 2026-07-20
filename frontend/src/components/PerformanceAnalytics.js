@@ -125,6 +125,7 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
   const [clearScope, setClearScope] = useState('all');
   const [clearing, setClearing] = useState(false);
   const [tradeFilter, setTradeFilter] = useState('all');
+  const [pnlFilter, setPnlFilter] = useState('all');
   const [aiLoading, setAiLoading] = useState(false);
   const [aiReview, setAiReview] = useState(null);
   const [aiError, setAiError] = useState(null);
@@ -191,7 +192,16 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
   // Coin-specific slices (for currently selected coin)
   const coinClosedTrades = closedTrades.filter(t => t.symbol === selectedCoin);
   const coinOpenTrades = openTrades.filter(t => t.symbol === selectedCoin);
-  const coinPnl = coinClosedTrades.reduce((a, t) => a + (t.realized_pnl || 0), 0);
+
+  // PnL-Filter (Alle | Live | Paper) – wirkt nur auf die beiden PnL-Karten
+  const pnlFilterFn = (t) => pnlFilter === 'all' || (pnlFilter === 'live' ? t.mode === 'live' : t.mode !== 'live');
+  const pnlClosedTrades = trades.filter(t => t.status === 'closed' && pnlFilterFn(t));
+  const pnlTotal = pnlFilter === 'all'
+    ? (balance?.realized_pnl || 0)
+    : pnlClosedTrades.reduce((a, t) => a + (t.realized_pnl || 0), 0);
+  const coinPnl = pnlClosedTrades
+    .filter(t => t.symbol === selectedCoin)
+    .reduce((a, t) => a + (t.realized_pnl || 0), 0);
 
   // Performance per ACTIVE strategy for the SELECTED COIN
   // Show every active strategy, even without trades yet.
@@ -404,12 +414,18 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
             <span className={`mode-pill ${banner.cls}`}>{banner.pill}</span>
           </div>
 
+          <div className="pnl-filter" data-testid="pnl-filter">
+            <button className={`pnl-filter-btn ${pnlFilter === 'all' ? 'active' : ''}`} onClick={() => setPnlFilter('all')} data-testid="pnl-filter-all">Alle</button>
+            <button className={`pnl-filter-btn live ${pnlFilter === 'live' ? 'active' : ''}`} onClick={() => setPnlFilter('live')} data-testid="pnl-filter-live">Live</button>
+            <button className={`pnl-filter-btn paper ${pnlFilter === 'paper' ? 'active' : ''}`} onClick={() => setPnlFilter('paper')} data-testid="pnl-filter-paper">Paper</button>
+          </div>
+
           <div className="analytics-section">
             <div className="stats-grid">
               <div className="stat-card" data-testid="pnl-total-card">
                 <div className="stat-content">
-                  <div className="stat-value mono" style={{ color: (balance?.realized_pnl || 0) >= 0 ? '#00FF66' : '#FF3366' }}>
-                    {(balance?.realized_pnl || 0).toFixed(2)}
+                  <div className="stat-value mono" style={{ color: pnlTotal >= 0 ? '#00FF66' : '#FF3366' }}>
+                    {pnlTotal.toFixed(2)}
                   </div>
                   <div className="stat-label">PnL Gesamt (USDT)</div>
                 </div>

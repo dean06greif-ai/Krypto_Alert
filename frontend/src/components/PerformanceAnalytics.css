@@ -279,6 +279,14 @@
 .mode-banner.mode-off .mode-banner-value { color: #A1A4B0; }
 .mode-pill.mode-off { background: #2A2D3A; color: #A1A4B0; }
 
+/* --- PnL-Filter (Alle | Live | Paper) über den PnL-Karten --- */
+.pnl-filter { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 12px; }
+.pnl-filter-btn { background: #1A1C23; border: 1px solid #2A2D3A; color: #A1A4B0; padding: 7px 6px; font-size: 11px; font-weight: 700; cursor: pointer; border-radius: 8px; display: flex; align-items: center; justify-content: center; gap: 6px; transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease; font-family: 'Manrope', sans-serif; }
+.pnl-filter-btn:hover { color: #fff; border-color: #3A3D4A; }
+.pnl-filter-btn.active { background: rgba(0,255,102,0.10); color: #00FF66; border-color: #00FF66; }
+.pnl-filter-btn.live.active { border-color: #FF3366; color: #FF3366; background: rgba(255,51,102,0.10); }
+.pnl-filter-btn.paper.active { border-color: #00A8FF; color: #00A8FF; background: rgba(0,168,255,0.10); }
+
 .trade-filter { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
 .trade-filter-btn { background: #1A1C23; border: 1px solid #2A2D3A; color: #A1A4B0; padding: 7px 6px; font-size: 11px; font-weight: 700; cursor: pointer; border-radius: 8px; display: flex; align-items: center; justify-content: center; gap: 6px; transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease; font-family: 'Manrope', sans-serif; }
 .trade-filter-btn:hover { color: #fff; border-color: #3A3D4A; }
