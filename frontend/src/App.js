@@ -11,6 +11,9 @@ import AlertModal from './components/AlertModal';
 import SettingsPanel from './components/SettingsPanel';
 import StrategyBuilder from './components/StrategyBuilder';
 import StrategyAutoTradeModal from './components/StrategyAutoTradeModal';
+import StrategyComparison from './components/StrategyComparison';
+import Backtester from './components/Backtester';
+import Optimizer from './components/Optimizer';
 import ErrorBoundary from './components/ErrorBoundary';
 import AdminLogin from './components/AdminLogin';
 import { Toaster, toast } from 'sonner';
@@ -42,6 +45,9 @@ function App() {
   const [showStrategySettings, setShowStrategySettings] = useState(false);
   const [showBuilder, setShowBuilder] = useState(false);
   const [strategyAutoTradeId, setStrategyAutoTradeId] = useState(null);
+  const [showComparison, setShowComparison] = useState(false);
+  const [showBacktester, setShowBacktester] = useState(false);
+  const [showOptimizer, setShowOptimizer] = useState(false);
   const [adminAuthed, setAdminAuthed] = useState(isAdminFn());
   const [showLogin, setShowLogin] = useState(false);
   const [controlState, setControlState] = useState({ trades_paused: false, signals_paused: false });
@@ -280,7 +286,7 @@ function App() {
   return (
     <ErrorBoundary onReset={() => window.location.reload()}>
     <div className="App">
-      <Toaster position="top-right" theme="dark" richColors />
+      <Toaster position="bottom-right" theme="dark" richColors />
       <audio ref={audioRef} src="/alert.mp3" preload="auto" />
 
       <Header
@@ -292,6 +298,9 @@ function App() {
         adminAuthed={adminAuthed}
         onAdminClick={handleAdminClick}
         onSettingsClick={() => requireAdmin(() => setShowSettings(true))}
+        onCompareClick={() => setShowComparison(true)}
+        onBacktestClick={() => setShowBacktester(true)}
+        onOptimizerClick={() => setShowOptimizer(true)}
       />
 
       <div className="app-layout">
@@ -395,6 +404,15 @@ function App() {
           onClose={() => setShowLogin(false)}
           onSuccess={() => setAdminAuthed(true)}
         />
+      )}
+      {showComparison && (
+        <StrategyComparison onClose={() => setShowComparison(false)} />
+      )}
+      {showBacktester && (
+        <Backtester onClose={() => setShowBacktester(false)} />
+      )}
+      {showOptimizer && (
+        <Optimizer onClose={() => setShowOptimizer(false)} />
       )}
     </div>
     </ErrorBoundary>

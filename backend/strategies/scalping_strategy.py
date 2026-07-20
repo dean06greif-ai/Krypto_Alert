@@ -13,6 +13,7 @@ buffer (so normal wicks / stop-hunts don't take you out), TP1 at 1R for a partia
 Provides live rule-state (long/short) for circle pre-fill + full signal.
 """
 from typing import Dict, List, Optional
+import numpy as np
 from strategies.base_strategy import BaseStrategy
 
 
@@ -171,3 +172,48 @@ class ScalpingStrategy(BaseStrategy):
         return {"entry": round(entry, 6), "stop_loss": round(sl, 6),
                 "take_profit_1": round(tp1, 6), "take_profit_full": round(tpf, 6),
                 "crv": round(self.indicators.calculate_crv(entry, sl, tpf), 2)}
+
+    # ----------------------- Vectorized Fast-Path -----------------------
+    @staticmethod
+    def vectorized_signals(fs, params: Dict) -> Optional[Dict]:
+        """Trend+RSI+HA-Trigger+Volumen komplett vektorisiert.
+        Pre-Signals werden NICHT emittiert (das übernimmt weiterhin der Live-Pfad).
+        """
+        ema_slow_p = int(params["ema_slow_period"])
+        ema_fast_p = int(params["ema_fast_period"])
+        rsi_p = int(params["rsi_period"])
+        rsi_l = float(params["rsi_long_threshold"])
+        rsi_s = float(params["rsi_short_threshold"])
+        vol_factor = float(params.get("volume_factor", 1.1))
+        vol_lookback = int(params.get("volume_lookback", 20))
+
+        d = {"ema_slow_period": ema_slow_p, "ema_fast_period": ema_fast_p,
+             "rsi_period": rsi_p, "volume_sma_period": vol_lookback}
+        ema_slow = fs.get("ema_slow", d)
+        ema_fast = fs.get("ema_fast", d)
+        rsi = fs.get("rsi", d)
+        rel_vol = fs.get("rel_volume", d)
+        close = fs.close
+
+        # Heikin-Ashi green: HA_close > HA_open (rekursiv). Wir approximieren via
+        # ha_color (im FastSeries-Cache) - deckt sich mit den Live-Ergebnissen.
+        ha = fs.get("ha_color", {})
+        ha_green = ha >= 1.0
+        ha_red = ha <= 0.0
+
+        with np.errstate(invalid="ignore"):
+            r1_long = close > ema_slow
+            r1_short = close < ema_slow
+            r2_long = rsi < rsi_l
+            r2_short = rsi > rsi_s
+            r3_long = ha_green & (close > ema_fast)
+            r3_short = ha_red & (close < ema_fast)
+            r4 = rel_vol >= vol_factor
+
+        valid = ~np.isnan(ema_slow) & ~np.isnan(ema_fast) & ~np.isnan(rsi)
+        long_ok = r1_long & r2_long & r3_long & r4 & valid
+        short_ok = r1_short & r2_short & r3_short & r4 & valid
+
+        warmup = max(ema_slow_p + 10, 60)
+        return {"long": long_ok, "short": short_ok,
+                "warmup": warmup, "rules_total": 4, "rsi": rsi}

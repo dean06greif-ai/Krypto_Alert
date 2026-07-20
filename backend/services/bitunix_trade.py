@@ -435,10 +435,20 @@ DEFAULT_COIN_CFG = {
     "tp1_close_percent": 50,
     "tp_full_crv": 2.0,
     "breakeven_enabled": True,
+    # Break-Even Modus: "tp1" | "crv" | "profit_pct" | "smart" | "off"
+    "be_mode": "tp1",
+    "be_trigger_crv": 1.0,           # bei be_mode=crv: BE ab X R Gewinn
+    "be_trigger_profit_pct": 30.0,   # bei be_mode=profit_pct: BE ab X% Gewinn auf Marge
+    "be_smart_lookback": 10,         # bei be_mode=smart: Swing-Lookback
+    "require_all_rules": False,      # nur traden wenn ALLE Regeln erfüllt sind
     "trail_after_tp1": True,      # ATR trailing stop after TP1 -> let winners run
     "trail_atr_mult": 1.5,
     "fee_percent": 0.06,
     "trade_pre_signals": False,
+    # --- Gewinnsicherung: SL in den Gewinn ziehen + Marge freisetzen ---
+    "profit_secure_enabled": False,
+    "profit_secure_trigger_pct": 30.0,   # ab X% Gewinn auf die Marge
+    "profit_lock_pct": 50.0,             # X% des aktuellen Gewinns absichern
     # --- Bitunix live-order safety (fix for codes 30016 / 30027) ---
     # Minimum absolute distance (percent of mark price) that TP/SL must keep
     # away from the current mark price when the order hits the exchange.
@@ -615,10 +625,27 @@ class AutoTradeManager:
         if eff_mode == "off":
             return None
         cfg = self.effective_cfg(symbol, strategy_id)
-        # Coin-level enable flag is still the master switch.
-        if not cfg["enabled"]:
+        # Enable-Logik: Wenn eine per-(Strategie,Coin)- oder Strategie-Config
+        # explizit auf live/paper steht, gilt DEREN enabled-Flag (Default True).
+        # Nur ohne solche Config bleibt der Coin-Schalter der Master-Switch.
+        # Fix: vorher blockierte der Coin-Level-Schalter Trades, obwohl die
+        # Strategie-Coin-Config auf live/paper gespeichert war.
+        scc = self.config.get("strategy_coin_configs", {}).get(
+            f"{strategy_id}_{symbol}", {}) if strategy_id else {}
+        so = self.strategy_override(strategy_id)
+        if scc.get("mode") in ("live", "paper"):
+            if scc.get("enabled") is False:
+                return None
+        elif so.get("mode") in ("live", "paper"):
+            if so.get("enabled") is False:
+                return None
+        elif not cfg["enabled"]:
             return None
         if signal.get("signal_class") == "PRE_SIGNAL" and not cfg["trade_pre_signals"]:
+            return None
+        # Nur traden, wenn ALLE Regeln erfüllt sind (Fix: 3/5-Regeln-Trades)
+        if cfg.get("require_all_rules") and signal.get("rules_total") \
+                and (signal.get("rules_met_count") or 0) < signal["rules_total"]:
             return None
         # only one open trade per symbol
         existing = await self.db.auto_trades.find_one({"symbol": symbol, "status": "open"})
@@ -738,6 +765,10 @@ class AutoTradeManager:
                            "bitunix_position_id": None,
                            "tp1_exchange_placed": False}
 
+        # Gebühren: Entry-Fee sofort verbuchen (Taker-Fee auf das Volumen),
+        # damit Paper-Trades die REALE Kostenbasis von Live-Trades abbilden.
+        entry_fee = round(entry * qty * float(cfg.get("fee_percent", 0.06)) / 100, 6)
+
         trade = {
             "id": f"{symbol}-{int(time.time()*1000)}",
             "symbol": symbol, "side": side, "mode": mode,
@@ -747,13 +778,21 @@ class AutoTradeManager:
             "tp1_crv": cfg["tp1_crv"], "tp_full_crv": cfg["tp_full_crv"],
             "tp1_close_percent": cfg["tp1_close_percent"],
             "breakeven_enabled": cfg["breakeven_enabled"], "fee_percent": cfg["fee_percent"],
+            "be_mode": (cfg.get("be_mode") or ("tp1" if cfg.get("breakeven_enabled", True) else "off")),
+            "be_trigger_crv": float(cfg.get("be_trigger_crv", 1.0) or 1.0),
+            "be_trigger_profit_pct": float(cfg.get("be_trigger_profit_pct", 30.0) or 30.0),
             "leverage": cfg["leverage"], "max_capital": cfg["max_capital"],
             "status": "open", "tp1_hit": False, "breakeven_moved": False,
-            "realized_pnl": 0.0, "strategy_id": signal.get("strategy_id"),
+            "realized_pnl": round(-entry_fee, 6), "fees_paid": entry_fee,
+            "profit_secure_enabled": bool(cfg.get("profit_secure_enabled", False)),
+            "profit_secure_trigger_pct": float(cfg.get("profit_secure_trigger_pct", 30.0)),
+            "profit_lock_pct": float(cfg.get("profit_lock_pct", 50.0)),
+            "profit_secured": False,
+            "strategy_id": signal.get("strategy_id"),
             "strategy_name": signal.get("strategy_name"),
             "opened_at": datetime.now(timezone.utc).isoformat(),
             "trade_date": signal.get("trade_date"),
-            "events": [f"OPEN {side} @ {entry}"],
+            "events": [f"OPEN {side} @ {entry} (Entry-Fee {entry_fee} USDT)"],
             **trade_extra,
         }
 
@@ -783,29 +822,48 @@ class AutoTradeManager:
         closed = False
         exit_price = None
         result = None
+        fee_pct = float(t.get("fee_percent", 0.06)) / 100
+        fees_paid = float(t.get("fees_paid", 0.0))
 
         def pnl(qty, exit_p):
             return (exit_p - t["entry"]) * qty if side == "LONG" else (t["entry"] - exit_p) * qty
+
+        def exit_fee(qty, exit_p):
+            return qty * exit_p * fee_pct
 
         hit_tp1 = (price >= t["tp1"]) if side == "LONG" else (price <= t["tp1"])
         hit_tpf = (price >= t["tpf"]) if side == "LONG" else (price <= t["tpf"])
         hit_sl = (price <= t["sl"]) if side == "LONG" else (price >= t["sl"])
 
+        # Break-Even Modus auflösen (Legacy: breakeven_enabled)
+        be_mode = t.get("be_mode")
+        if be_mode not in ("off", "tp1", "crv", "profit_pct", "smart"):
+            be_mode = "tp1" if t.get("breakeven_enabled") else "off"
+        if be_mode == "tp1" and t.get("breakeven_enabled") is False:
+            be_mode = "off"
+
+        def _be_price():
+            fee = t.get("fee_percent", 0.06) / 100
+            be = t["entry"] * (1 + 2 * fee) if side == "LONG" else t["entry"] * (1 - 2 * fee)
+            return round(be, 6)
+
         # TP1 partial + break-even
         if not t.get("tp1_hit") and hit_tp1 and not hit_tpf:
             close_qty = round(t["qty"] * t["tp1_close_percent"] / 100, 6)
-            realized += pnl(close_qty, t["tp1"])
+            fee = exit_fee(close_qty, t["tp1"])
+            realized += pnl(close_qty, t["tp1"]) - fee
+            fees_paid += fee
             qty_rem = round(qty_rem - close_qty, 6)
-            events.append(f"TP1 hit @ {t['tp1']} closed {t['tp1_close_percent']}%")
+            events.append(f"TP1 hit @ {t['tp1']} closed {t['tp1_close_percent']}% (Fee {round(fee, 6)})")
             updates["tp1_hit"] = True
             be_price = None
-            if t.get("breakeven_enabled"):
-                fee = t.get("fee_percent", 0.06) / 100
-                be = t["entry"] * (1 + 2 * fee) if side == "LONG" else t["entry"] * (1 - 2 * fee)
-                be_price = round(be, 6)
+            if be_mode in ("tp1", "smart") and not t.get("breakeven_moved"):
+                # smart nutzt live als Fallback ebenfalls Entry+Gebühren
+                # (Swing-Struktur wird im Backtester exakt simuliert)
+                be_price = _be_price()
                 updates["sl"] = be_price
                 updates["breakeven_moved"] = True
-                events.append(f"SL -> Break-Even @ {be_price}")
+                events.append(f"SL -> Break-Even @ {be_price} ({be_mode})")
             # Live sync: only flash-close if the exchange TP1 was NOT placed
             # (otherwise Bitunix already closed 50%, no need to close again).
             # Then push the break-even SL to the exchange so it survives even
@@ -845,22 +903,80 @@ class AutoTradeManager:
                 if trailed is not None and t.get("mode") == "live":
                     await self._live_move_sl(t, trailed, qty_rem)
 
+        # Break-Even bei frei wählbarem CRV oder Gewinn-% (vor TP1 möglich)
+        if not closed and qty_rem > 0 and be_mode in ("crv", "profit_pct") \
+                and not (t.get("breakeven_moved") or updates.get("breakeven_moved")):
+            risk = float(t.get("risk") or abs(t["entry"] - t.get("initial_sl", t["sl"])) or 0)
+            trigger = False
+            if be_mode == "crv" and risk > 0:
+                crv = float(t.get("be_trigger_crv", 1.0) or 1.0)
+                target = t["entry"] + risk * crv if side == "LONG" else t["entry"] - risk * crv
+                trigger = price >= target if side == "LONG" else price <= target
+            elif be_mode == "profit_pct":
+                margin = float(t.get("max_capital") or 0)
+                thr = float(t.get("be_trigger_profit_pct", 30.0) or 30.0)
+                trigger = margin > 0 and thr > 0 and pnl(qty_rem, price) / margin * 100 >= thr
+            if trigger:
+                be_p = _be_price()
+                cur = updates.get("sl", t["sl"])
+                if (side == "LONG" and be_p > cur) or (side == "SHORT" and be_p < cur):
+                    updates["sl"] = be_p
+                updates["breakeven_moved"] = True
+                events.append(f"SL -> Break-Even @ {be_p} ({be_mode})")
+                if t.get("mode") == "live":
+                    await self._live_move_sl(t, be_p, qty_rem)
+
+        # Gewinnsicherung: SL in den Gewinn ziehen sobald Trigger erreicht
+        if not closed and qty_rem > 0 and t.get("profit_secure_enabled") \
+                and not t.get("profit_secured"):
+            margin = float(t.get("max_capital") or 0)
+            trig = float(t.get("profit_secure_trigger_pct", 30.0) or 30.0)
+            lock = max(0.0, min(float(t.get("profit_lock_pct", 50.0) or 50.0), 95.0)) / 100
+            unreal = pnl(qty_rem, price)
+            if margin > 0 and trig > 0 and unreal / margin * 100 >= trig:
+                new_sl = round(t["entry"] + (price - t["entry"]) * lock, 6) if side == "LONG" \
+                    else round(t["entry"] - (t["entry"] - price) * lock, 6)
+                cur = updates.get("sl", t["sl"])
+                if (side == "LONG" and new_sl > cur) or (side == "SHORT" and new_sl < cur):
+                    updates["sl"] = new_sl
+                    events.append(f"GEWINNSICHERUNG: SL -> {new_sl} "
+                                  f"(+{round(unreal / margin * 100, 1)}% auf Marge, "
+                                  f"{int(lock * 100)}% gesichert)")
+                    if t.get("mode") == "live":
+                        await self._live_move_sl(t, new_sl, qty_rem)
+                updates["profit_secured"] = True
+
         # Full TP
         if hit_tpf and qty_rem > 0:
-            realized += pnl(qty_rem, t["tpf"])
-            events.append(f"TP FULL hit @ {t['tpf']}")
-            closed, exit_price, result, qty_rem = True, t["tpf"], "win", 0
+            fee = exit_fee(qty_rem, t["tpf"])
+            realized += pnl(qty_rem, t["tpf"]) - fee
+            fees_paid += fee
+            events.append(f"TP FULL hit @ {t['tpf']} (Fee {round(fee, 6)})")
+            closed, exit_price, qty_rem = True, t["tpf"], 0
 
         # Stop loss (re-read possibly moved SL)
         cur_sl = updates.get("sl", t["sl"])
         hit_sl = (price <= cur_sl) if side == "LONG" else (price >= cur_sl)
         if not closed and hit_sl and qty_rem > 0:
-            realized += pnl(qty_rem, cur_sl)
+            fee = exit_fee(qty_rem, cur_sl)
+            realized += pnl(qty_rem, cur_sl) - fee
+            fees_paid += fee
             is_be = t.get("breakeven_moved") or updates.get("breakeven_moved")
-            result = "breakeven" if is_be else ("win" if t.get("tp1_hit") or updates.get("tp1_hit") else "loss")
-            events.append(f"{'BREAK-EVEN' if is_be else 'STOP'} hit @ {cur_sl}")
+            events.append(f"{'BREAK-EVEN' if is_be else 'STOP'} hit @ {cur_sl} (Fee {round(fee, 6)})")
             closed, exit_price, qty_rem = True, cur_sl, 0
 
+        # Klassifizierung anhand netto realisiertem PnL (Gebühren bereits abgezogen):
+        # Alles > 0 = Win, alles < 0 = Loss, ~0 = Break-Even.
+        if closed:
+            eps = 1e-6
+            if realized > eps:
+                result = "win"
+            elif realized < -eps:
+                result = "loss"
+            else:
+                result = "breakeven"
+
+        updates["fees_paid"] = round(fees_paid, 6)
         updates["realized_pnl"] = round(realized, 6)
         updates["qty_remaining"] = qty_rem
         updates["events"] = events[-20:]
@@ -926,14 +1042,17 @@ class AutoTradeManager:
             return None
         side = t["side"]
         qty_rem = t.get("qty_remaining", t["qty"])
+        fee_pct = float(t.get("fee_percent", 0.06)) / 100
+        fee = qty_rem * price * fee_pct
         pnl = (price - t["entry"]) * qty_rem if side == "LONG" else (t["entry"] - price) * qty_rem
-        realized = round(t.get("realized_pnl", 0.0) + pnl, 6)
+        realized = round(t.get("realized_pnl", 0.0) + pnl - fee, 6)
         result = "win" if realized > 0 else ("breakeven" if realized == 0 else "loss")
         if t["mode"] == "live" and self.client.configured():
             await self._live_flash_close(t, qty_rem)
         await self.db.auto_trades.update_one({"id": trade_id}, {"$set": {
             "status": "closed", "exit_price": price, "result": result,
             "realized_pnl": realized, "qty_remaining": 0,
+            "fees_paid": round(float(t.get("fees_paid", 0.0)) + fee, 6),
             "closed_at": datetime.now(timezone.utc).isoformat(),
-            "events": (t.get("events", []) + [f"MANUAL CLOSE @ {price}"])[-20:]}})
+            "events": (t.get("events", []) + [f"MANUAL CLOSE @ {price} (Fee {round(fee, 6)})"])[-20:]}})
         return {"result": result, "realized_pnl": realized}

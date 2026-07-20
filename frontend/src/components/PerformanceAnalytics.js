@@ -122,6 +122,7 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
   const [balance, setBalance] = useState(null);
   const [showClear, setShowClear] = useState(false);
   const [clearRange, setClearRange] = useState('24h');
+  const [clearScope, setClearScope] = useState('all');
   const [clearing, setClearing] = useState(false);
   const [tradeFilter, setTradeFilter] = useState('all');
   const [aiLoading, setAiLoading] = useState(false);
@@ -218,21 +219,25 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
 
   const openClear = () => {
     if (!isAdmin) { onNeedAdmin && onNeedAdmin(); return; }
+    if (clearScope === 'coin_strategy' && !selectedStrategy) setClearScope('all');
     setShowClear(true);
   };
 
   const runClear = async () => {
     setClearing(true);
     try {
+      const payload = { range: clearRange, scope: clearScope };
+      if (clearScope !== 'all') payload.symbol = selectedCoin;
+      if (clearScope === 'coin_strategy') payload.strategy_id = selectedStrategy;
       const res = await fetch(`${API_URL}/api/analytics/clear`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ range: clearRange }),
+        body: JSON.stringify(payload),
       });
       if (res.ok) {
         const data = await res.json();
         const total = Object.values(data.deleted || {}).reduce((a, b) => a + b, 0);
-        toast.success(`Analyse-Daten gelöscht (${total} Einträge)`);
+        toast.success(`Analyse-Daten gelöscht (${total} Einträge · ${scopeLabel})`);
         setShowClear(false);
         onCleared && onCleared();
       } else if (res.status === 401) {
@@ -249,6 +254,22 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
   };
 
   const rangeLabel = CLEAR_RANGES.find(r => r.key === clearRange)?.label || '';
+
+  const clearScopeOptions = [
+    { key: 'all', label: 'Alle Coins & Strategien', disabled: false },
+    { key: 'coin', label: `Nur ${getCoinName(selectedCoin)}`, disabled: !selectedCoin },
+    {
+      key: 'coin_strategy',
+      label: `Nur "${activeStrategyName}" bei ${getCoinName(selectedCoin)}`,
+      disabled: !selectedStrategy || !selectedCoin,
+      hint: !selectedStrategy ? 'Keine Strategie ausgewählt' : null,
+    },
+  ];
+  const scopeLabel = clearScope === 'coin'
+    ? `nur ${getCoinName(selectedCoin)}`
+    : clearScope === 'coin_strategy'
+      ? `nur "${activeStrategyName}" bei ${getCoinName(selectedCoin)}`
+      : 'alle Coins & Strategien';
 
   const runAiReview = async () => {
     setAiLoading(true);
@@ -486,20 +507,41 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
               <Trash size={18} weight="bold" />
               <h4>Analyse-Daten löschen</h4>
             </div>
-            <p className="clear-modal-sub">Wähle den Zeitraum, der gelöscht werden soll (wie beim Browser-Verlauf).</p>
+            <p className="clear-modal-sub">Wähle, was gelöscht werden soll – und für welchen Zeitraum (wie beim Browser-Verlauf).</p>
+
+            <div className="clear-section-label">WAS LÖSCHEN?</div>
+            <div className="clear-ranges clear-scopes">
+              {clearScopeOptions.map(o => (
+                <label
+                  key={o.key}
+                  className={`clear-range ${clearScope === o.key ? 'active' : ''} ${o.key === 'all' ? 'danger' : ''} ${o.disabled ? 'disabled' : ''}`}
+                  title={o.disabled && o.hint ? o.hint : undefined}
+                  data-testid={`clear-scope-${o.key}`}
+                >
+                  <input type="radio" name="clear-scope" value={o.key} checked={clearScope === o.key} disabled={o.disabled} onChange={() => setClearScope(o.key)} />
+                  <span>{o.label}{o.disabled && o.hint ? <em className="clear-scope-hint"> · {o.hint}</em> : null}</span>
+                </label>
+              ))}
+            </div>
+
+            <div className="clear-section-label">ZEITRAUM</div>
             <div className="clear-ranges">
               {CLEAR_RANGES.map(r => (
-                <label key={r.key} className={`clear-range ${clearRange === r.key ? 'active' : ''} ${r.key === 'all' ? 'danger' : ''}`} data-testid={`clear-range-${r.key}`}>
+                <label key={r.key} className={`clear-range ${clearRange === r.key ? 'active' : ''} ${r.key === 'all' && clearScope === 'all' ? 'danger' : ''}`} data-testid={`clear-range-${r.key}`}>
                   <input type="radio" name="clear-range" value={r.key} checked={clearRange === r.key} onChange={() => setClearRange(r.key)} />
                   <span>{r.label}</span>
                 </label>
               ))}
             </div>
+
+            <div className="clear-summary" data-testid="clear-summary">
+              Es wird gelöscht: <b>{rangeLabel}</b> · <b>{scopeLabel}</b>
+            </div>
             <div className="clear-warn"><Warning size={14} weight="bold" /> Gelöschte Signale &amp; Statistiken können nicht wiederhergestellt werden.</div>
             <div className="clear-actions">
               <button className="clear-cancel" onClick={() => setShowClear(false)} disabled={clearing} data-testid="clear-cancel-btn">Abbrechen</button>
               <button className="clear-confirm" onClick={runClear} disabled={clearing} data-testid="clear-confirm-btn">
-                {clearing ? 'Lösche...' : `Löschen (${rangeLabel})`}
+                {clearing ? 'Lösche...' : `Löschen (${scopeLabel})`}
               </button>
             </div>
           </div>

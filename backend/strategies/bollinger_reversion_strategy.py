@@ -127,12 +127,13 @@ class BollingerReversionStrategy(BaseStrategy):
         c_vwap_s = price >= vwap
         c_sweep_l = sweep == "bullish"
         c_sweep_s = sweep == "bearish"
-        long_conf = sum([c_vwap_l, rel_ok, c_sweep_l])
-        short_conf = sum([c_vwap_s, rel_ok, c_sweep_s])
-        min_conf = int(params["min_confluence"])
+        long_conf = sum([c_vwap_l, c_sweep_l])
+        short_conf = sum([c_vwap_s, c_sweep_s])
+        # FIX: Min. Rel. Volumen ist jetzt ein HARTER Filter (vorher nur Confluence)
+        min_conf = min(int(params["min_confluence"]), 2)
 
-        signal_long = bb_long and rsi_long and rev_long and trend_ok_long and long_conf >= min_conf
-        signal_short = bb_short and rsi_short and rev_short and trend_ok_short and short_conf >= min_conf
+        signal_long = bb_long and rsi_long and rev_long and trend_ok_long and rel_ok and long_conf >= min_conf
+        signal_short = bb_short and rsi_short and rev_short and trend_ok_short and rel_ok and short_conf >= min_conf
         signal_type = "LONG" if signal_long else ("SHORT" if signal_short else None)
         bias = "LONG" if (bb_long and rsi_long) else ("SHORT" if (bb_short and rsi_short) else None)
 
@@ -150,8 +151,8 @@ class BollingerReversionStrategy(BaseStrategy):
              "description": "Keine Reversion gegen starke Impulse",
              "long": bool(trend_ok_long), "short": bool(trend_ok_short)},
             {"id": "fair_value", "label": "VWAP / Volumen",
-             "description": "Long unter Fair Value, Short darueber + Teilnahme",
-             "long": bool(long_conf >= min_conf), "short": bool(short_conf >= min_conf)},
+             "description": "Long unter Fair Value, Short darueber + Teilnahme (Volumen = Pflicht)",
+             "long": bool(rel_ok and long_conf >= min_conf), "short": bool(rel_ok and short_conf >= min_conf)},
         ]
         long_count = sum(1 for r in rules if r["long"])
         short_count = sum(1 for r in rules if r["short"])

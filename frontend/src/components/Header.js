@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Clock, Gear, ChartLineUp, Wallet, TrendUp, TrendDown, Lock, LockOpen } from '@phosphor-icons/react';
+import { Clock, Gear, ChartLineUp, Wallet, TrendUp, TrendDown, Lock, LockOpen, Trophy, ClockCounterClockwise, MagicWand } from '@phosphor-icons/react';
 import { authHeaders } from '../auth';
 import './Header.css';
 
@@ -83,7 +83,7 @@ const BalanceWidget = () => {
   );
 };
 
-const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions, activeStrategy, adminAuthed, onAdminClick }) => {
+const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions, activeStrategy, adminAuthed, onAdminClick, onCompareClick, onBacktestClick, onOptimizerClick }) => {
   const [currentTime, setCurrentTime] = useState(new Date());
 
   useEffect(() => {
@@ -145,6 +145,15 @@ const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions
       
       <div className="header-right">
         <BalanceWidget />
+        <button className="btn" onClick={onCompareClick} title="Strategie-Vergleich" data-testid="compare-strategies-button">
+          <Trophy size={20} weight="bold" />
+        </button>
+        <button className="btn" onClick={onBacktestClick} title="Backtester (historische Daten, alle Timeframes)" data-testid="backtester-button">
+          <ClockCounterClockwise size={20} weight="bold" />
+        </button>
+        <button className="btn" onClick={onOptimizerClick} title="Strategie-Optimizer (Parameter & Discovery)" data-testid="optimizer-button">
+          <MagicWand size={20} weight="bold" />
+        </button>
         <button
           className={`btn btn-admin ${adminAuthed ? 'is-admin' : ''}`}
           onClick={onAdminClick}

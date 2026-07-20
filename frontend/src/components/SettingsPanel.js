@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
+import SafeOverlay from './SafeOverlay';
 import { X, TelegramLogo, Lightning, ChartLineUp, Plus, Trash, Sliders, PauseCircle, PlayCircle, Power } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import { authHeaders, isAdmin } from '../auth';
+import TIMEFRAMES from '../constants/timeframes';
 import './SettingsPanel.css';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
@@ -18,10 +20,12 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
     active_strategy: 'scalping_4_rules',
     strategy_params: {},
     coin_params: {},
+    strategy_timeframes: {},
   });
   const [strategies, setStrategies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [paramCoin, setParamCoin] = useState(''); // '' = Global, else per-coin override
+  const [sessionScope, setSessionScope] = useState('global'); // 'global' or strategy_id
   const [busy, setBusy] = useState(false);
   const ALL_COINS = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","AVAXUSDT","DOTUSDT","POLUSDT","GOLD","SILVER","OIL"];
 
@@ -33,10 +37,12 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
       .then(([settingsData, strategiesData]) => {
         setSettings({
           custom_sessions: settingsData.custom_sessions || [],
+          strategy_sessions: settingsData.strategy_sessions || {},
           pre_signal_enabled: settingsData.pre_signal_enabled !== false,
           active_strategy: settingsData.active_strategy || 'scalping_4_rules',
           strategy_params: settingsData.strategy_params || {},
           coin_params: settingsData.coin_params || {},
+          strategy_timeframes: settingsData.strategy_timeframes || {},
         });
         setStrategies(strategiesData.strategies || []);
         setLoading(false);
@@ -63,10 +69,12 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
         setSettings(prev => ({
           ...prev,
           custom_sessions: data.settings.custom_sessions || [],
+          strategy_sessions: data.settings.strategy_sessions || {},
           pre_signal_enabled: data.settings.pre_signal_enabled !== false,
           active_strategy: data.settings.active_strategy || 'scalping_4_rules',
           strategy_params: data.settings.strategy_params || {},
           coin_params: data.settings.coin_params || {},
+          strategy_timeframes: data.settings.strategy_timeframes || {},
         }));
         toast.success('Gespeichert');
       } else {
@@ -104,6 +112,13 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
     } finally {
       setBusy(false);
     }
+  };
+
+  const updateStrategyTimeframe = (strategyId, tf) => {
+    const tfs = { ...(settings.strategy_timeframes || {}), [strategyId]: tf };
+    setSettings({ ...settings, strategy_timeframes: tfs });
+    saveSettings({ strategy_timeframes: tfs });
+    toast.success(`Timeframe ${tf} gespeichert – gilt für Signale, Paper & Live`);
   };
 
   const updateStrategyParam = (strategyId, paramKey, value) => {
@@ -157,51 +172,63 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
     saveSettings({ pre_signal_enabled: value });
   };
 
+  // Sessions handlers – arbeiten je nach Scope auf globalen oder
+  // strategie-eigenen Zeitfenstern (strategy_sessions[strategyId])
+  const isGlobalScope = sessionScope === 'global';
+  const scopedSessions = isGlobalScope
+    ? settings.custom_sessions
+    : (settings.strategy_sessions?.[sessionScope] || []);
+
+  const setScopedSessions = (list, save = true) => {
+    if (isGlobalScope) {
+      setSettings(prev => ({ ...prev, custom_sessions: list }));
+      if (save) saveSettings({ custom_sessions: list });
+    } else {
+      const ss = { ...(settings.strategy_sessions || {}) };
+      if (list.length) ss[sessionScope] = list;
+      else delete ss[sessionScope];
+      setSettings(prev => ({ ...prev, strategy_sessions: ss }));
+      if (save) saveSettings({ strategy_sessions: ss });
+    }
+  };
+
   const addSession = () => {
     const newSession = {
       start: "09:00", end: "12:00",
-      name: `Session ${settings.custom_sessions.length + 1}`,
+      name: `Session ${scopedSessions.length + 1}`,
       enabled: true
     };
-    const updated = [...settings.custom_sessions, newSession];
-    setSettings({ ...settings, custom_sessions: updated });
-    saveSettings({ custom_sessions: updated });
+    setScopedSessions([...scopedSessions, newSession]);
   };
 
   const removeSession = (index) => {
-    const updated = settings.custom_sessions.filter((_, i) => i !== index);
-    setSettings({ ...settings, custom_sessions: updated });
-    saveSettings({ custom_sessions: updated });
+    setScopedSessions(scopedSessions.filter((_, i) => i !== index));
   };
 
   const updateSession = (index, field, value) => {
-    const updated = [...settings.custom_sessions];
+    const updated = [...scopedSessions];
     updated[index] = { ...updated[index], [field]: value };
-    setSettings({ ...settings, custom_sessions: updated });
+    setScopedSessions(updated, false);
   };
 
-  const commitSessionUpdate = () => saveSettings({ custom_sessions: settings.custom_sessions });
+  const commitSessionUpdate = () => setScopedSessions([...scopedSessions]);
 
   const toggleSession = (index) => {
-    const updated = [...settings.custom_sessions];
+    const updated = [...scopedSessions];
     updated[index] = { ...updated[index], enabled: !updated[index].enabled };
-    setSettings({ ...settings, custom_sessions: updated });
-    saveSettings({ custom_sessions: updated });
+    setScopedSessions(updated);
   };
 
   const enable24_7 = () => {
-    setSettings({ ...settings, custom_sessions: [] });
-    saveSettings({ custom_sessions: [] });
-    toast.success('24/7 Modus aktiviert');
+    setScopedSessions([]);
+    toast.success(isGlobalScope ? '24/7 Modus aktiviert' : 'Strategie folgt jetzt dem globalen Zeitfenster');
   };
 
   const restoreDefaults = () => {
-    const defaults = [
+    setScopedSessions([
       { start: "09:00", end: "12:00", name: "London", enabled: true },
       { start: "15:30", end: "18:30", name: "US", enabled: true }
-    ];
-    setSettings({ ...settings, custom_sessions: defaults });
-    saveSettings({ custom_sessions: defaults });
+    ]);
   };
 
   const handleTestTelegram = async () => {
@@ -221,10 +248,10 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
   const activeStrategy = strategies.find(s => s.id === focusStrategy)
     || strategies.find(s => s.id === settings.active_strategy)
     || strategies[0];
-  const is24_7 = settings.custom_sessions.length === 0;
+  const is24_7 = scopedSessions.length === 0;
 
   return (
-    <div className="settings-overlay" onClick={onClose}>
+    <SafeOverlay className="settings-overlay" onClose={onClose}>
       <div className="settings-panel" onClick={(e) => e.stopPropagation()} data-testid="settings-panel">
         <div className="settings-header">
           <h2>EINSTELLUNGEN {saving && <span className="text-muted" style={{fontSize: '12px'}}>· Speichere...</span>}</h2>
@@ -301,6 +328,21 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
                         {ALL_COINS.map(c => <option key={c} value={c}>{c.replace('USDT', '')}</option>)}
                       </select>
                       {paramCoin && <span className="param-custom-badge">PRO COIN</span>}
+                    </div>
+                    <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <span className="text-muted" style={{ fontSize: 12 }}>Timeframe (Signale, Paper &amp; Live):</span>
+                      <select
+                        value={settings.strategy_timeframes?.[activeStrategy.id] || activeStrategy.timeframe || '1m'}
+                        onChange={(e) => updateStrategyTimeframe(activeStrategy.id, e.target.value)}
+                        data-testid="strategy-timeframe-select"
+                        style={{ background: '#0A0A0A', border: '1px solid #2A2D3A', borderRadius: 8, padding: '7px 10px', color: '#fff' }}
+                      >
+                        {TIMEFRAMES.map(t => <option key={t.v} value={t.v}>{t.l}</option>)}
+                      </select>
+                      {settings.strategy_timeframes?.[activeStrategy.id] &&
+                        settings.strategy_timeframes[activeStrategy.id] !== '1m' && (
+                          <span className="param-custom-badge">CUSTOM</span>
+                        )}
                     </div>
                   </div>
 
@@ -383,20 +425,39 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
           {activeTab === 'sessions' && (
             <>
               <div className="settings-section">
+                <div className="session-scope-row" style={{ marginBottom: 12 }}>
+                  <label style={{ display: 'block', fontSize: 12, marginBottom: 4 }}>
+                    Zeitfenster gelten für:
+                  </label>
+                  <select
+                    value={sessionScope}
+                    onChange={(e) => setSessionScope(e.target.value)}
+                    data-testid="session-scope-select"
+                    style={{ width: '100%', padding: '8px', background: 'rgba(0,0,0,0.3)', color: 'inherit', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6 }}
+                  >
+                    <option value="global">🌍 Global (alle Strategien ohne eigenes Fenster)</option>
+                    {strategies.map(s => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}{(settings.strategy_sessions?.[s.id]?.length) ? ' · eigenes Zeitfenster ✓' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 <div className="session-mode-info">
                   {is24_7 ? (
                     <div className="mode-badge mode-badge-active">
-                      ⚡ 24/7 MODUS AKTIV
+                      {isGlobalScope ? '⚡ 24/7 MODUS AKTIV' : '⚡ Folgt dem GLOBALEN Zeitfenster'}
                     </div>
                   ) : (
                     <div className="mode-badge">
-                      📅 {settings.custom_sessions.filter(s => s.enabled).length} Zeitfenster
+                      📅 {scopedSessions.filter(s => s.enabled).length} Zeitfenster
+                      {!isGlobalScope && ' (nur diese Strategie)'}
                     </div>
                   )}
                 </div>
 
                 <div className="sessions-list">
-                  {settings.custom_sessions.map((session, index) => (
+                  {scopedSessions.map((session, index) => (
                     <div key={index} className="session-item" data-testid={`session-${index}`}>
                       <label className="switch switch-small">
                         <input 
@@ -445,7 +506,7 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
                   {!is24_7 && (
                     <button className="btn btn-24-7" onClick={enable24_7} data-testid="enable-24-7-btn">
                       <Lightning size={16} weight="bold" />
-                      24/7 Modus
+                      {isGlobalScope ? '24/7 Modus' : 'Eigenes Fenster löschen (global nutzen)'}
                     </button>
                   )}
                   {is24_7 && (
@@ -457,6 +518,8 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
                 
                 <div className="info-hint">
                   💡 Alle Zeiten in deutscher Zeit (MEZ/CET). Ohne Zeitfenster → 24/7 Modus.
+                  Strategien mit eigenem Zeitfenster ignorieren das globale Fenster.
+                  Im Backtester lassen sich Zeitfenster pro Strategie ebenfalls testen (⚙-Panel).
                 </div>
               </div>
             </>
@@ -559,7 +622,7 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
           )}
         </div>
       </div>
-    </div>
+    </SafeOverlay>
   );
 };
 

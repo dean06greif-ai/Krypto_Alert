@@ -15,6 +15,8 @@ fixed %, and targets use a risk-multiple (R) so winners pay for losers.
 `min_confluence` keeps trade frequency high (default: 1 extra confirmation).
 """
 from typing import Dict, List, Optional
+import numpy as np
+import pandas as pd
 from strategies.base_strategy import BaseStrategy
 
 
@@ -116,15 +118,17 @@ class RSIOnlyStrategy(BaseStrategy):
         # confluence flags (current live state -> also used for UI circles)
         c_sweep_l = sweep == "bullish"
         c_sweep_s = sweep == "bearish"
-        c_vol_l = rel_ok and (close_pos >= 0.55 or price <= vwap)   # buyers stepping in / discount vs fair value
-        c_vol_s = rel_ok and (close_pos <= 0.45 or price >= vwap)   # sellers in control / premium vs fair value
+        c_vol_l = (close_pos >= 0.55 or price <= vwap)   # buyers stepping in / discount vs fair value
+        c_vol_s = (close_pos <= 0.45 or price >= vwap)   # sellers in control / premium vs fair value
 
         long_conf = sum([c_sweep_l, discount, c_vol_l])
         short_conf = sum([c_sweep_s, premium, c_vol_s])
         min_conf = int(params["min_confluence"])
 
-        signal_long = rsi_long and trend_ok_long and long_conf >= min_conf
-        signal_short = rsi_short and trend_ok_short and short_conf >= min_conf
+        # FIX: Min. Rel. Volumen ist jetzt ein HARTER Filter (vorher nur weiche
+        # Confluence -> Änderungen am Wert hatten kaum/keinen Effekt auf Trades)
+        signal_long = rsi_long and trend_ok_long and rel_ok and long_conf >= min_conf
+        signal_short = rsi_short and trend_ok_short and rel_ok and short_conf >= min_conf
         signal_type = "LONG" if signal_long else ("SHORT" if signal_short else None)
         bias = "LONG" if rsi_long else ("SHORT" if rsi_short else None)
 
@@ -139,8 +143,8 @@ class RSIOnlyStrategy(BaseStrategy):
              "description": "Stop-Hunt Reversal (Smart Money)",
              "long": bool(c_sweep_l), "short": bool(c_sweep_s)},
             {"id": "volume_power", "label": "Volumen & Kaufkraft",
-             "description": "Überdurchschnittl. Volumen + Käufer/Verkäufer-Druck",
-             "long": bool(c_vol_l), "short": bool(c_vol_s)},
+             "description": "Überdurchschnittl. Volumen (Pflicht-Filter) + Käufer/Verkäufer-Druck",
+             "long": bool(rel_ok and c_vol_l), "short": bool(rel_ok and c_vol_s)},
             {"id": "zone", "label": "Discount / Premium",
              "description": "Long im Discount, Short im Premium",
              "long": bool(discount), "short": bool(premium)},
@@ -189,3 +193,103 @@ class RSIOnlyStrategy(BaseStrategy):
         return {"entry": round(entry, 6), "stop_loss": round(sl, 6),
                 "take_profit_1": round(tp1, 6), "take_profit_full": round(tpf, 6),
                 "crv": round(self.indicators.calculate_crv(entry, sl, tpf), 2)}
+
+    # ----------------------- Vectorized Fast-Path -----------------------
+    @staticmethod
+    def vectorized_signals(fs, params: Dict) -> Optional[Dict]:
+        """RSI-Reversal komplett vektorisiert inkl. Liquidity-Sweep (O(N))."""
+        rsi_p = int(params["rsi_period"])
+        ema_slow_p = int(params["ema_slow_period"])
+        atr_p = int(params["atr_period"])
+        sl_lookback = int(params["sl_lookback"])
+        need = max(rsi_p, ema_slow_p, atr_p, sl_lookback) + 10
+
+        d = {"rsi_period": rsi_p, "ema_fast_period": int(params["ema_fast_period"]),
+             "ema_slow_period": ema_slow_p, "atr_period": atr_p,
+             "volume_sma_period": 20}
+        close = fs.close
+        high = fs.high
+        low = fs.low
+        n = fs.n
+        rsi = fs.get("rsi", d)
+        ema_f = fs.get("ema_fast", d)
+        ema_s = fs.get("ema_slow", d)
+        rel_vol = fs.get("rel_volume", d)
+        vwap = fs.get("vwap", d)
+
+        # EMA-Slope über 5 Kerzen (Momentum)
+        prev_f = np.concatenate([np.full(5, np.nan), ema_f[:-5]])
+        with np.errstate(invalid="ignore", divide="ignore"):
+            slope = np.where(prev_f != 0, (ema_f - prev_f) / prev_f, 0.0)
+
+        # Range-Position (20er Lookback)
+        s_high = pd.Series(high)
+        s_low = pd.Series(low)
+        rh = s_high.rolling(20, min_periods=1).max().to_numpy()
+        rl = s_low.rolling(20, min_periods=1).min().to_numpy()
+        rng_span = rh - rl
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rpos = np.where(rng_span > 0, (close - rl) / np.where(rng_span > 0, rng_span, 1), 0.5)
+
+        # Close-Position innerhalb der aktuellen Kerze
+        cand_rng = high - low
+        with np.errstate(invalid="ignore", divide="ignore"):
+            close_pos = np.where(cand_rng > 0, (close - low) / np.where(cand_rng > 0, cand_rng, 1), 0.5)
+
+        # Fraktale Swings (left=right=2) + Sweep O(N)
+        window_max = s_high.rolling(5, center=True, min_periods=5).max().to_numpy()
+        window_min = s_low.rolling(5, center=True, min_periods=5).min().to_numpy()
+        # bool: True nur wenn window_max nicht NaN und high == max (Vergleich mit NaN -> False)
+        fh = (high >= window_max)
+        fl = (low <= window_min)
+
+        sweep_bull = np.zeros(n, dtype=bool)
+        sweep_bear = np.zeros(n, dtype=bool)
+        fh_buf: List[float] = []
+        fl_buf: List[float] = []
+        for i in range(n):
+            # Sweep an i mit Fraktalen deren Zentrum j <= i-3 liegt (right=2, prior=[:-1])
+            if fh_buf:
+                rh_ref = max(fh_buf[-3:])
+                if high[i] > rh_ref and close[i] < rh_ref:
+                    sweep_bear[i] = True
+            if fl_buf:
+                rl_ref = min(fl_buf[-3:])
+                if low[i] < rl_ref and close[i] > rl_ref:
+                    sweep_bull[i] = True
+            # Fraktal an Index j = i-2 wird jetzt bekannt (2 Kerzen später)
+            j = i - 2
+            if j >= 2:
+                if fh[j]:
+                    fh_buf.append(high[j])
+                if fl[j]:
+                    fl_buf.append(low[j])
+
+        with np.errstate(invalid="ignore"):
+            trend_thr = float(params["trend_block_pct"]) / 100.0
+            strong_bull = (close > ema_s) & (ema_f > ema_s) & (slope > trend_thr)
+            strong_bear = (close < ema_s) & (ema_f < ema_s) & (slope < -trend_thr)
+            block = int(params["block_counter_trend"]) == 1
+
+            rsi_long = rsi < float(params["rsi_long_threshold"])
+            rsi_short = rsi > float(params["rsi_short_threshold"])
+            trend_ok_long = ~strong_bear if block else np.ones(n, dtype=bool)
+            trend_ok_short = ~strong_bull if block else np.ones(n, dtype=bool)
+            rel_ok = rel_vol >= float(params["rel_vol_min"])
+            discount = rpos <= float(params["discount_zone"])
+            premium = rpos >= float(params["premium_zone"])
+
+            c_vol_l = (close_pos >= 0.55) | (close <= vwap)
+            c_vol_s = (close_pos <= 0.45) | (close >= vwap)
+            long_conf = sweep_bull.astype(int) + discount.astype(int) + c_vol_l.astype(int)
+            short_conf = sweep_bear.astype(int) + premium.astype(int) + c_vol_s.astype(int)
+            min_conf = int(params["min_confluence"])
+
+            long_ok = rsi_long & trend_ok_long & rel_ok & (long_conf >= min_conf)
+            short_ok = rsi_short & trend_ok_short & rel_ok & (short_conf >= min_conf)
+
+        valid = ~np.isnan(rsi) & ~np.isnan(ema_f) & ~np.isnan(ema_s)
+        long_ok &= valid
+        short_ok &= valid
+        return {"long": long_ok, "short": short_ok,
+                "warmup": need, "rules_total": 5, "rsi": rsi}

@@ -2,14 +2,67 @@
 Custom, user-defined strategy engine.
 A definition (stored in MongoDB) describes indicators + long/short rules.
 Rules: {"indicator", "op", "value", "label"} where
-  indicator in: rsi, ema_fast, ema_slow, price, ha_color (1=green/0=red), ema_gap_pct
-  op in: <, >, <=, >=, cross_above, cross_below
   value: number OR indicator-name string
 """
 from typing import Dict, List, Optional
 from strategies.base_strategy import BaseStrategy
 
-INDICATORS = ["rsi", "ema_fast", "ema_slow", "price", "ha_color", "ema_gap_pct"]
+INDICATORS = [
+    "price", "rsi", "ema_fast", "ema_slow", "sma", "ema_gap_pct", "ha_color",
+    "macd", "macd_signal", "macd_hist",
+    "bb_upper", "bb_middle", "bb_lower", "bb_width_pct",
+    "atr", "atr_pct", "vwap",
+    "stoch_k", "stoch_d",
+    "volume", "volume_sma", "rel_volume",
+    "price_change_pct", "recent_high", "recent_low",
+]
+
+INDICATOR_META = {
+    "price": {"label": "Preis", "group": "Preis"},
+    "rsi": {"label": "RSI", "group": "Momentum"},
+    "ema_fast": {"label": "EMA Fast", "group": "Trend"},
+    "ema_slow": {"label": "EMA Slow", "group": "Trend"},
+    "sma": {"label": "SMA", "group": "Trend"},
+    "ema_gap_pct": {"label": "EMA Abstand %", "group": "Trend"},
+    "ha_color": {"label": "HA Farbe (1=grün, 0=rot)", "group": "Preis"},
+    "macd": {"label": "MACD Linie", "group": "Momentum"},
+    "macd_signal": {"label": "MACD Signal", "group": "Momentum"},
+    "macd_hist": {"label": "MACD Histogramm", "group": "Momentum"},
+    "bb_upper": {"label": "Bollinger Oben", "group": "Volatilität"},
+    "bb_middle": {"label": "Bollinger Mitte", "group": "Volatilität"},
+    "bb_lower": {"label": "Bollinger Unten", "group": "Volatilität"},
+    "bb_width_pct": {"label": "Bollinger Breite %", "group": "Volatilität"},
+    "atr": {"label": "ATR", "group": "Volatilität"},
+    "atr_pct": {"label": "ATR % vom Preis", "group": "Volatilität"},
+    "vwap": {"label": "VWAP", "group": "Volumen"},
+    "stoch_k": {"label": "Stochastik %K", "group": "Momentum"},
+    "stoch_d": {"label": "Stochastik %D", "group": "Momentum"},
+    "volume": {"label": "Volumen", "group": "Volumen"},
+    "volume_sma": {"label": "Volumen Ø", "group": "Volumen"},
+    "rel_volume": {"label": "Rel. Volumen (x Ø)", "group": "Volumen"},
+    "price_change_pct": {"label": "Preisänderung % (Lookback)", "group": "Preis"},
+    "recent_high": {"label": "Letztes Hoch (Lookback)", "group": "Struktur"},
+    "recent_low": {"label": "Letztes Tief (Lookback)", "group": "Struktur"},
+}
+
+PERIOD_FIELDS = [
+    {"key": "ema_fast_period", "label": "EMA Fast Periode", "default": 9},
+    {"key": "ema_slow_period", "label": "EMA Slow Periode", "default": 50},
+    {"key": "rsi_period", "label": "RSI Periode", "default": 14},
+    {"key": "sma_period", "label": "SMA Periode", "default": 20},
+    {"key": "macd_fast", "label": "MACD Fast", "default": 12},
+    {"key": "macd_slow", "label": "MACD Slow", "default": 26},
+    {"key": "macd_signal_period", "label": "MACD Signal", "default": 9},
+    {"key": "bb_period", "label": "Bollinger Periode", "default": 20},
+    {"key": "bb_std", "label": "Bollinger Std-Abw.", "default": 2.0},
+    {"key": "atr_period", "label": "ATR Periode", "default": 14},
+    {"key": "stoch_k_period", "label": "Stochastik %K", "default": 14},
+    {"key": "stoch_d_period", "label": "Stochastik %D", "default": 3},
+    {"key": "volume_sma_period", "label": "Volumen Ø Periode", "default": 20},
+    {"key": "change_lookback", "label": "Preisänderung Lookback", "default": 5},
+    {"key": "swing_lookback", "label": "Hoch/Tief Lookback", "default": 10},
+]
+
 OPERATORS = ["<", ">", "<=", ">=", "cross_above", "cross_below"]
 
 
@@ -25,24 +78,103 @@ class CustomStrategy(BaseStrategy):
         self.STRATEGY_NAME = definition.get("name", "Custom")
         self.STRATEGY_DESCRIPTION = definition.get("description", "Custom Strategie")
 
+    def _used_indicators(self):
+        used = set()
+        for r in (self.definition.get("long_rules", []) + self.definition.get("short_rules", [])):
+            used.add(r.get("indicator"))
+            v = r.get("value")
+            if isinstance(v, str) and v in INDICATORS:
+                used.add(v)
+        return used
+
     def _series(self, candles):
         d = self.definition.get("indicators", {})
-        efp = int(d.get("ema_fast_period", 9))
-        esp = int(d.get("ema_slow_period", 50))
-        rp = int(d.get("rsi_period", 14))
+
+        def p(key, default):
+            try:
+                return int(d.get(key, default) or default)
+            except (TypeError, ValueError):
+                return default
+
+        def pf(key, default):
+            try:
+                return float(d.get(key, default) or default)
+            except (TypeError, ValueError):
+                return default
+
+        used = self._used_indicators()
         closes = [c["close"] for c in candles]
-        ema_f = self.indicators.calculate_ema(closes, efp)
-        ema_s = self.indicators.calculate_ema(closes, esp)
-        rsi = self.indicators.calculate_rsi(closes, rp)
-        ha = self.indicators.calculate_heikin_ashi(candles)
+        ind = self.indicators
+
+        ema_f = ind.calculate_ema(closes, p("ema_fast_period", 9))
+        ema_s = ind.calculate_ema(closes, p("ema_slow_period", 50))
+        rsi = ind.calculate_rsi(closes, p("rsi_period", 14))
+        ha = ind.calculate_heikin_ashi(candles)
+
+        sma = ind.calculate_sma(closes, p("sma_period", 20)) if "sma" in used else None
+        macd = macd_sig = macd_hist = None
+        if used & {"macd", "macd_signal", "macd_hist"}:
+            macd, macd_sig, macd_hist = ind.calculate_macd(
+                closes, p("macd_fast", 12), p("macd_slow", 26), p("macd_signal_period", 9))
+        bb_u = bb_m = bb_l = None
+        if used & {"bb_upper", "bb_middle", "bb_lower", "bb_width_pct"}:
+            bb_u, bb_m, bb_l = ind.calculate_bollinger(closes, p("bb_period", 20), pf("bb_std", 2.0))
+        atr = ind.calculate_atr(candles, p("atr_period", 14)) if used & {"atr", "atr_pct"} else None
+        vwap = ind.calculate_vwap(candles) if "vwap" in used else None
+        st_k = st_d = None
+        if used & {"stoch_k", "stoch_d"}:
+            st_k, st_d = ind.calculate_stochastic(candles, p("stoch_k_period", 14), p("stoch_d_period", 3))
+        vsp = p("volume_sma_period", 20)
+        chg_lb = p("change_lookback", 5)
+        swing_lb = p("swing_lookback", 10)
 
         def snap(i):
+            n = len(candles)
+            idx = i if i >= 0 else n + i
             ef, es = ema_f[i], ema_s[i]
             gap = ((ef - es) / es * 100) if (ef and es) else None
-            return {"rsi": rsi[i], "ema_fast": ef, "ema_slow": es,
-                    "price": closes[i], "ha_color": 1 if ha[i]["is_green"] else 0,
-                    "ema_gap_pct": gap}
-        return snap(-1), snap(-2), esp, efp, rp
+            s = {"rsi": rsi[i], "ema_fast": ef, "ema_slow": es,
+                 "price": closes[i], "ha_color": 1 if ha[i]["is_green"] else 0,
+                 "ema_gap_pct": gap,
+                 "volume": candles[i].get("volume", 0)}
+            if sma is not None:
+                s["sma"] = sma[i]
+            if macd is not None:
+                s["macd"] = macd[i]
+                s["macd_signal"] = macd_sig[i]
+                s["macd_hist"] = macd_hist[i]
+            if bb_u is not None:
+                s["bb_upper"] = bb_u[i]
+                s["bb_middle"] = bb_m[i]
+                s["bb_lower"] = bb_l[i]
+                if bb_u[i] is not None and bb_l[i] is not None and bb_m[i]:
+                    s["bb_width_pct"] = (bb_u[i] - bb_l[i]) / bb_m[i] * 100
+                else:
+                    s["bb_width_pct"] = None
+            if atr is not None:
+                s["atr"] = atr[i]
+                s["atr_pct"] = (atr[i] / closes[i] * 100) if atr[i] else None
+            if vwap is not None:
+                s["vwap"] = vwap[i]
+            if st_k is not None:
+                s["stoch_k"] = st_k[i]
+                s["stoch_d"] = st_d[i]
+            if used & {"volume_sma", "rel_volume"}:
+                seg = candles[max(0, idx - vsp + 1):idx + 1]
+                vols = [c.get("volume", 0) or 0 for c in seg]
+                vavg = sum(vols) / len(vols) if vols else None
+                s["volume_sma"] = vavg
+                s["rel_volume"] = (s["volume"] / vavg) if vavg else None
+            if "price_change_pct" in used:
+                j = idx - chg_lb
+                s["price_change_pct"] = ((closes[idx] - closes[j]) / closes[j] * 100) if j >= 0 and closes[j] else None
+            if used & {"recent_high", "recent_low"}:
+                seg = candles[max(0, idx - swing_lb):idx]
+                s["recent_high"] = max((c["high"] for c in seg), default=None)
+                s["recent_low"] = min((c["low"] for c in seg), default=None)
+            return s
+
+        return snap(-1), snap(-2)
 
     def _resolve(self, snap, value):
         if isinstance(value, str) and value in INDICATORS:
@@ -80,7 +212,7 @@ class CustomStrategy(BaseStrategy):
         need = max(int(d.get("indicators", {}).get("ema_slow_period", 50)) + 10, 60)
         if len(candles) < need:
             return None
-        cur, prev, esp, efp, rp = self._series(candles)
+        cur, prev = self._series(candles)
         if cur["rsi"] is None or cur["ema_slow"] is None:
             return None
 
@@ -123,7 +255,10 @@ class CustomStrategy(BaseStrategy):
         }
 
     def _auto_label(self, r):
-        return f"{r.get('indicator')} {r.get('op')} {r.get('value')}"
+        meta = INDICATOR_META.get(r.get("indicator"), {})
+        v = r.get("value")
+        v_label = INDICATOR_META.get(v, {}).get("label", v) if isinstance(v, str) else v
+        return f"{meta.get('label', r.get('indicator'))} {r.get('op')} {v_label}"
 
     def _levels(self, candles, entry, side):
         d = self.definition

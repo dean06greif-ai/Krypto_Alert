@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { toast } from 'sonner';
 import { authHeaders, isAdmin } from '../auth';
+import SafeOverlay from './SafeOverlay';
 import './AutoTradeModal.css';
 import './StrategyAutoTradeModal.css';
 
@@ -21,28 +22,36 @@ const DEFAULT_CFG = {
   tp1_close_percent: 50,
   tp_full_crv: 2.0,
   breakeven_enabled: true,
+  be_mode: 'tp1',
+  be_trigger_crv: 1.0,
+  be_trigger_profit_pct: 30,
+  require_all_rules: false,
   fee_percent: 0.06,
   trade_pre_signals: false,
+  profit_secure_enabled: false,
+  profit_secure_trigger_pct: 30,
+  profit_lock_pct: 50,
 };
 
 export default function StrategyAutoTradeModal({ strategyId, strategyName, symbol, onClose, onSaved }) {
   const [cfg, setCfg] = useState(null);
   const [saving, setSaving] = useState(false);
 
+  const fetchCfg = async () => {
+    const res = await fetch(
+      `${API_URL}/api/autotrade/strategy/${strategyId}/coin/${symbol}`,
+      { headers: authHeaders() }
+    );
+    if (!res.ok) throw new Error('load failed');
+    const data = await res.json();
+    const loaded = { ...DEFAULT_CFG, ...(data.config || {}) };
+    if (!['live', 'paper', 'off'].includes(loaded.mode)) loaded.mode = 'off';
+    return loaded;
+  };
+
   const load = async () => {
     try {
-      const res = await fetch(
-        `${API_URL}/api/autotrade/strategy/${strategyId}/coin/${symbol}`,
-        { headers: authHeaders() }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        const loaded = { ...DEFAULT_CFG, ...(data.config || {}) };
-        if (!['live', 'paper', 'off'].includes(loaded.mode)) loaded.mode = 'off';
-        setCfg(loaded);
-      } else {
-        setCfg({ ...DEFAULT_CFG });
-      }
+      setCfg(await fetchCfg());
     } catch {
       setCfg({ ...DEFAULT_CFG });
     }
@@ -58,25 +67,38 @@ export default function StrategyAutoTradeModal({ strategyId, strategyName, symbo
   const setMode = (newMode) =>
     setCfg(prev => ({ ...prev, mode: newMode, enabled: newMode !== 'off' }));
 
+  const postCfg = async (body) => fetch(
+    `${API_URL}/api/autotrade/strategy/${strategyId}/coin/${symbol}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(body),
+    }
+  );
+
   const save = async () => {
     if (!isAdmin()) { toast.error('Admin-Login erforderlich'); return; }
     setSaving(true);
     try {
-      const res = await fetch(
-        `${API_URL}/api/autotrade/strategy/${strategyId}/coin/${symbol}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify(cfg),
+      let res = await postCfg(cfg);
+      if (res.status === 401) { toast.error('Nicht autorisiert – bitte als Admin anmelden'); return; }
+      if (!res.ok) { toast.error('Fehler beim Speichern'); return; }
+      // Verifizieren, dass der Modus wirklich persistiert wurde (Fix:
+      // Live/Paper-Umschaltung musste vorher teils 2x bestätigt werden).
+      let verified = null;
+      try { verified = await fetchCfg(); } catch { /* ignore */ }
+      if (verified && verified.mode !== cfg.mode) {
+        res = await postCfg(cfg);
+        try { verified = await fetchCfg(); } catch { /* ignore */ }
+        if (!verified || verified.mode !== cfg.mode) {
+          toast.error('Modus konnte nicht bestätigt werden – bitte erneut prüfen');
+          return;
         }
-      );
-      if (res.ok) {
-        toast.success(`Gespeichert für ${coinShort}`);
-        onSaved?.();
-        onClose?.();
-      } else {
-        toast.error('Fehler beim Speichern');
       }
+      const modeLabel = { live: 'LIVE', paper: 'PAPER', off: 'AUS' }[cfg.mode];
+      toast.success(`Gespeichert für ${coinShort} · Modus: ${modeLabel}`);
+      onSaved?.();
+      onClose?.();
     } catch {
       toast.error('Verbindungsfehler');
     } finally {
@@ -85,9 +107,9 @@ export default function StrategyAutoTradeModal({ strategyId, strategyName, symbo
   };
 
   if (!cfg) return (
-    <div className="at-overlay" onClick={onClose}>
+    <SafeOverlay className="at-overlay" onClose={onClose}>
       <div className="at-panel"><div className="sat-loading">Lädt...</div></div>
-    </div>
+    </SafeOverlay>
   );
 
   const coinShort = ['GOLD', 'SILVER', 'OIL'].includes(symbol)
@@ -105,10 +127,9 @@ export default function StrategyAutoTradeModal({ strategyId, strategyName, symbo
   const m = modeMeta[cfg.mode] || modeMeta.off;
 
   return (
-    <div className="at-overlay" onClick={onClose}>
+    <SafeOverlay className="at-overlay" onClose={onClose}>
       <div className="at-panel" onClick={e => e.stopPropagation()} data-testid="strategy-autotrade-modal">
 
-        {/* Header (same look as AutoTradeModal) */}
         <div className="at-header">
           <div className="at-title">
             <span style={{ fontSize: 18 }}>⚡</span>
@@ -120,7 +141,6 @@ export default function StrategyAutoTradeModal({ strategyId, strategyName, symbo
           <button className="at-close" onClick={onClose} data-testid="strategy-autotrade-close">✕</button>
         </div>
 
-        {/* Active-Mode Banner (immer sichtbar) */}
         <div className={`sat-active-mode ${m.cls}`} data-testid="sat-active-mode">
           <div className="sat-active-mode-dot" />
           <div className="sat-active-mode-text">
@@ -132,20 +152,22 @@ export default function StrategyAutoTradeModal({ strategyId, strategyName, symbo
           </div>
         </div>
 
-        {/* Mode Selection (LIVE / PAPER / AUS) */}
         <div className="at-mode-row">
           <div className="at-mode-toggle sat-mode-3" data-testid="sat-mode-toggle">
             <button
               className={cfg.mode === 'live' ? 'active live' : ''}
               onClick={() => setMode('live')}
+              data-testid="sat-mode-live"
             >LIVE</button>
             <button
               className={cfg.mode === 'paper' ? 'active' : ''}
               onClick={() => setMode('paper')}
+              data-testid="sat-mode-paper"
             >PAPER</button>
             <button
               className={cfg.mode === 'off' ? 'active off' : ''}
               onClick={() => setMode('off')}
+              data-testid="sat-mode-off"
             >AUS</button>
           </div>
         </div>
@@ -158,7 +180,6 @@ export default function StrategyAutoTradeModal({ strategyId, strategyName, symbo
 
         {cfg.mode !== 'off' && (
           <>
-            {/* Capital + Leverage */}
             <div className="at-section">
               <div className="at-field">
                 <label>Max. Kapital (USDT Margin)</label>
@@ -187,7 +208,6 @@ export default function StrategyAutoTradeModal({ strategyId, strategyName, symbo
               Positionsgröße: <b>{posSize} USDT</b> · Order: {cfg.order_type || 'MARKET'}
             </div>
 
-            {/* Stop Loss */}
             <div className="at-block">
               <div className="at-block-title">STOP LOSS</div>
               <div className="at-seg">
@@ -235,7 +255,6 @@ export default function StrategyAutoTradeModal({ strategyId, strategyName, symbo
               )}
             </div>
 
-            {/* Take Profit */}
             <div className="at-block">
               <div className="at-block-title">TAKE PROFIT (dynamisch)</div>
               <div className="at-section">
@@ -271,27 +290,55 @@ export default function StrategyAutoTradeModal({ strategyId, strategyName, symbo
                   data-testid="sat-tpfull-crv"
                 />
               </div>
-              <label className="at-check">
-                <input
-                  type="checkbox"
-                  checked={!!cfg.breakeven_enabled}
-                  onChange={e => update('breakeven_enabled', e.target.checked)}
-                  data-testid="sat-breakeven"
-                />
-                <span>Bei CRV 1 → Stop Loss auf Break-Even + Gebühren</span>
-              </label>
-              {cfg.breakeven_enabled && (
+              <div className="at-field">
+                <label>Break-Even Modus</label>
+                <select
+                  value={cfg.be_mode || (cfg.breakeven_enabled ? 'tp1' : 'off')}
+                  onChange={e => {
+                    const v = e.target.value;
+                    setCfg(prev => ({ ...prev, be_mode: v, breakeven_enabled: v !== 'off' }));
+                  }}
+                  data-testid="sat-be-mode"
+                >
+                  <option value="tp1">Bei TP1 → SL auf Break-Even + Gebühren</option>
+                  <option value="crv">Bei frei wählbarem CRV (z.B. 1R, 2R, 3R)</option>
+                  <option value="profit_pct">Bei festem Gewinn-% auf die Marge</option>
+                  <option value="smart">Smart (Backtest: Swing-Low/High, Live: wie TP1)</option>
+                  <option value="off">Break-Even deaktiviert</option>
+                </select>
+              </div>
+              {cfg.be_mode === 'crv' && (
                 <div className="at-field small">
-                  <label>Gebühren % (Round-Trip Offset)</label>
+                  <label>Break-Even ab CRV (R)</label>
                   <input
-                    type="number"
-                    step={0.01}
-                    value={cfg.fee_percent}
-                    onChange={e => update('fee_percent', parseFloat(e.target.value) || 0)}
-                    data-testid="sat-fee"
+                    type="number" step={0.1} min={0.1}
+                    value={cfg.be_trigger_crv}
+                    onChange={e => update('be_trigger_crv', parseFloat(e.target.value) || 1)}
+                    data-testid="sat-be-crv"
                   />
                 </div>
               )}
+              {cfg.be_mode === 'profit_pct' && (
+                <div className="at-field small">
+                  <label>Break-Even ab Gewinn % auf Marge</label>
+                  <input
+                    type="number" step={5} min={1}
+                    value={cfg.be_trigger_profit_pct}
+                    onChange={e => update('be_trigger_profit_pct', parseFloat(e.target.value) || 30)}
+                    data-testid="sat-be-pct"
+                  />
+                </div>
+              )}
+              <div className="at-field small">
+                <label>Gebühren % (pro Fill, wird bei Paper & Live berechnet)</label>
+                <input
+                  type="number"
+                  step={0.01}
+                  value={cfg.fee_percent}
+                  onChange={e => update('fee_percent', parseFloat(e.target.value) || 0)}
+                  data-testid="sat-fee"
+                />
+              </div>
               <label className="at-check">
                 <input
                   type="checkbox"
@@ -301,9 +348,64 @@ export default function StrategyAutoTradeModal({ strategyId, strategyName, symbo
                 />
                 <span>Auch Pre-Signale traden</span>
               </label>
+              <label className="at-check">
+                <input
+                  type="checkbox"
+                  checked={!!cfg.require_all_rules}
+                  onChange={e => update('require_all_rules', e.target.checked)}
+                  data-testid="sat-require-all"
+                />
+                <span>Nur traden wenn ALLE Regeln erfüllt sind (100% Regel-Treffer)</span>
+              </label>
             </div>
 
-            {/* Signals */}
+            {/* Gewinnsicherung */}
+            <div className="at-block">
+              <div className="at-block-title">GEWINNSICHERUNG</div>
+              <label className="at-check" style={{ marginTop: 0 }}>
+                <input
+                  type="checkbox"
+                  checked={!!cfg.profit_secure_enabled}
+                  onChange={e => update('profit_secure_enabled', e.target.checked)}
+                  data-testid="sat-profit-secure"
+                />
+                <span>Bei Gewinn: Stop-Loss in den Gewinn ziehen &amp; Marge freisetzen</span>
+              </label>
+              {cfg.profit_secure_enabled && (
+                <div className="at-section" style={{ marginTop: 10 }}>
+                  <div className="at-field">
+                    <label>Auslöser: Gewinn % auf Marge</label>
+                    <input
+                      type="number"
+                      step={5}
+                      min={1}
+                      value={cfg.profit_secure_trigger_pct}
+                      onChange={e => update('profit_secure_trigger_pct', parseFloat(e.target.value) || 0)}
+                      data-testid="sat-ps-trigger"
+                    />
+                  </div>
+                  <div className="at-field">
+                    <label>Gesicherter Gewinn-Anteil %</label>
+                    <input
+                      type="number"
+                      step={5}
+                      min={1}
+                      max={95}
+                      value={cfg.profit_lock_pct}
+                      onChange={e => update('profit_lock_pct', parseFloat(e.target.value) || 0)}
+                      data-testid="sat-ps-lock"
+                    />
+                  </div>
+                </div>
+              )}
+              {cfg.profit_secure_enabled && (
+                <div className="at-possize" style={{ marginBottom: 0 }}>
+                  Ab <b>+{cfg.profit_secure_trigger_pct}%</b> Gewinn auf die Marge wird der SL so gesetzt,
+                  dass <b>{cfg.profit_lock_pct}%</b> des Gewinns gesichert sind (Live: SL wird auf Bitunix nachgezogen).
+                </div>
+              )}
+            </div>
+
             <div className="at-block">
               <label className="at-check">
                 <input
@@ -318,7 +420,6 @@ export default function StrategyAutoTradeModal({ strategyId, strategyName, symbo
           </>
         )}
 
-        {/* Action Buttons */}
         <div className="sat-actions">
           <button className="sat-cancel-btn" onClick={onClose} data-testid="sat-cancel">
             Abbrechen
@@ -334,6 +435,6 @@ export default function StrategyAutoTradeModal({ strategyId, strategyName, symbo
           </button>
         </div>
       </div>
-    </div>
+    </SafeOverlay>
   );
 }

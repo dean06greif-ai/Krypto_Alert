@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Lightning, TrendUp, TrendDown, Warning } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import { authHeaders, isAdmin } from '../auth';
+import SafeOverlay from './SafeOverlay';
 import './AutoTradeModal.css';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
@@ -78,7 +79,7 @@ const AutoTradeModal = ({ symbol, onClose }) => {
   const openTrades = trades.filter(t => t.status === 'open');
 
   return (
-    <div className="at-overlay" onClick={onClose}>
+    <SafeOverlay className="at-overlay" onClose={onClose}>
       <div className="at-panel" onClick={e => e.stopPropagation()} data-testid="autotrade-modal">
         <div className="at-header">
           <div className="at-title">
@@ -170,6 +171,23 @@ const AutoTradeModal = ({ symbol, onClose }) => {
           </label>
         </div>
 
+        {/* Gewinnsicherung */}
+        <div className="at-block">
+          <div className="at-block-title">GEWINNSICHERUNG</div>
+          <label className="at-check" style={{ marginTop: 0 }}>
+            <input type="checkbox" checked={!!cfg.profit_secure_enabled} onChange={e => update('profit_secure_enabled', e.target.checked)} data-testid="at-profit-secure" />
+            <span>Bei Gewinn: Stop-Loss in den Gewinn ziehen &amp; Marge freisetzen</span>
+          </label>
+          {cfg.profit_secure_enabled && (
+            <div className="at-section" style={{ marginTop: 10 }}>
+              <div className="at-field"><label>Auslöser: Gewinn % auf Marge</label>
+                <input type="number" step={5} min={1} value={cfg.profit_secure_trigger_pct ?? 30} onChange={e => update('profit_secure_trigger_pct', parseFloat(e.target.value) || 0)} data-testid="at-ps-trigger" /></div>
+              <div className="at-field"><label>Gesicherter Gewinn-Anteil %</label>
+                <input type="number" step={5} min={1} max={95} value={cfg.profit_lock_pct ?? 50} onChange={e => update('profit_lock_pct', parseFloat(e.target.value) || 0)} data-testid="at-ps-lock" /></div>
+            </div>
+          )}
+        </div>
+
         <button className="at-save" onClick={save} disabled={saving} data-testid="autotrade-save">
           {saving ? 'Speichere...' : 'Einstellungen speichern'}
         </button>
@@ -192,7 +210,7 @@ const AutoTradeModal = ({ symbol, onClose }) => {
           </div>
         )}
       </div>
-    </div>
+    </SafeOverlay>
   );
 };
 

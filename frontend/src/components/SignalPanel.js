@@ -28,7 +28,7 @@ const SignalPanel = ({ symbol, ruleState, latestSignal, strategyMeta }) => {
           {bias && (
             <div className={`bias-pill ${bias === 'LONG' ? 'bias-long' : 'bias-short'}`} data-testid="bias-pill">
               {bias === 'LONG' ? <TrendUp size={13} weight="bold" /> : <TrendDown size={13} weight="bold" />}
-              {bias} {longCount || shortCount}/{total}
+              {bias} {bias === 'LONG' ? longCount : shortCount}/{total}
             </div>
           )}
           {strategyMeta && <span className="tf-badge"><Info size={12} weight="bold" /> {strategyMeta.timeframe}</span>}

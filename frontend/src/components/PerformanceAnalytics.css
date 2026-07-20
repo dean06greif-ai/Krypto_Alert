@@ -245,6 +245,13 @@
 .clear-range.active { border-color: #00A8FF; background: #00A8FF14; color: #fff; }
 .clear-range.danger.active { border-color: #FF3366; background: #FF336614; }
 .clear-range input { accent-color: #00A8FF; }
+.clear-section-label { font-size: 10px; letter-spacing: 1px; color: #5C6070; font-weight: 700; margin: 14px 0 7px; }
+.clear-scopes { margin-bottom: 2px; }
+.clear-range.disabled { opacity: 0.45; cursor: not-allowed; }
+.clear-range.disabled:hover { border-color: #2A2D3A; background: transparent; }
+.clear-scope-hint { font-style: normal; font-size: 11px; color: #5C6070; }
+.clear-summary { font-size: 12px; color: #C7CAD6; background: #171923; border: 1px solid #2A2D3A; border-radius: 9px; padding: 9px 12px; margin-top: 14px; line-height: 1.5; }
+.clear-summary b { color: #fff; }
 .clear-warn { display: flex; align-items: center; gap: 7px; font-size: 11px; color: #FFB020; margin: 14px 0; line-height: 1.4; }
 .clear-actions { display: flex; gap: 10px; justify-content: flex-end; }
 .clear-cancel { background: #2A2D3A; border: none; color: #C7CAD6; border-radius: 8px; padding: 9px 16px; cursor: pointer; font-size: 13px; }

@@ -232,3 +232,73 @@ class TechnicalIndicators:
             return 0
         
         return reward / risk
+
+    # ------------------------------------------------------------------
+    # Erweiterte Indikatoren für den Strategie-Builder
+    # ------------------------------------------------------------------
+    @staticmethod
+    def calculate_sma(prices: List[float], period: int) -> List[Optional[float]]:
+        n = len(prices)
+        if n < period:
+            return [None] * n
+        arr = np.array(prices, dtype=float)
+        out: List[Optional[float]] = [None] * (period - 1)
+        csum = np.cumsum(arr)
+        for i in range(period - 1, n):
+            s = csum[i] - (csum[i - period] if i >= period else 0)
+            out.append(float(s / period))
+        return out
+
+    @staticmethod
+    def calculate_macd(prices: List[float], fast: int = 12, slow: int = 26,
+                       signal: int = 9):
+        """Return (macd, signal, histogram) lists."""
+        ema_f = TechnicalIndicators.calculate_ema(prices, fast)
+        ema_s = TechnicalIndicators.calculate_ema(prices, slow)
+        macd = [f - s if (f is not None and s is not None) else None
+                for f, s in zip(ema_f, ema_s)]
+        valid = [(i, m) for i, m in enumerate(macd) if m is not None]
+        sig: List[Optional[float]] = [None] * len(prices)
+        if len(valid) >= signal:
+            vals = [m for _, m in valid]
+            sig_vals = TechnicalIndicators.calculate_ema(vals, signal)
+            for (i, _), sv in zip(valid, sig_vals):
+                sig[i] = sv
+        hist = [m - s if (m is not None and s is not None) else None
+                for m, s in zip(macd, sig)]
+        return macd, sig, hist
+
+    @staticmethod
+    def calculate_bollinger(prices: List[float], period: int = 20, std_mult: float = 2.0):
+        """Return (upper, middle, lower) lists."""
+        n = len(prices)
+        upper: List[Optional[float]] = [None] * n
+        middle: List[Optional[float]] = [None] * n
+        lower: List[Optional[float]] = [None] * n
+        if n < period:
+            return upper, middle, lower
+        arr = np.array(prices, dtype=float)
+        for i in range(period - 1, n):
+            seg = arr[i - period + 1:i + 1]
+            m = float(np.mean(seg))
+            sd = float(np.std(seg))
+            middle[i] = m
+            upper[i] = m + std_mult * sd
+            lower[i] = m - std_mult * sd
+        return upper, middle, lower
+
+    @staticmethod
+    def calculate_stochastic(candles: List[Dict], k_period: int = 14, d_period: int = 3):
+        """Return (%K, %D) lists."""
+        n = len(candles)
+        k: List[Optional[float]] = [None] * n
+        for i in range(k_period - 1, n):
+            seg = candles[i - k_period + 1:i + 1]
+            hi = max(c['high'] for c in seg)
+            lo = min(c['low'] for c in seg)
+            k[i] = 50.0 if hi == lo else (candles[i]['close'] - lo) / (hi - lo) * 100
+        d: List[Optional[float]] = [None] * n
+        for i in range(n):
+            if i >= d_period - 1 and all(k[j] is not None for j in range(i - d_period + 1, i + 1)):
+                d[i] = float(np.mean([k[j] for j in range(i - d_period + 1, i + 1)]))
+        return k, d

@@ -171,13 +171,29 @@ async def lifespan(app: FastAPI):
 
     logger.info("Probing market data sources...")
     await feed.probe("BTCUSDT")
-    for symbol in TOP_10_COINS:
-        try:
-            hist = await feed.fetch(symbol, 200)
-            scanner.bootstrap(symbol, hist[:-1] if len(hist) > 1 else hist)
-        except Exception as e:
-            logger.error(f"Bootstrap failed for {symbol}: {e}")
-        await asyncio.sleep(0.15)
+    # Bei höheren Timeframes mehr 1m-Historie laden, damit die Strategien
+    # direkt nach dem Start genug aggregierte Kerzen haben.
+    need = scanner.buffer_limit()
+    if need > 900:
+        from services import backtester as _bt
+        import aiohttp as _aiohttp
+        days_needed = min(14, need // 1440 + 1)
+        async with _aiohttp.ClientSession() as _session:
+            for symbol in TOP_10_COINS:
+                try:
+                    hist = await _bt.fetch_history(_session, symbol, days_needed)
+                    scanner.bootstrap(symbol, hist[:-1] if len(hist) > 1 else hist)
+                except Exception as e:
+                    logger.error(f"Extended bootstrap failed for {symbol}: {e}")
+                await asyncio.sleep(0.15)
+    else:
+        for symbol in TOP_10_COINS:
+            try:
+                hist = await feed.fetch(symbol, 200)
+                scanner.bootstrap(symbol, hist[:-1] if len(hist) > 1 else hist)
+            except Exception as e:
+                logger.error(f"Bootstrap failed for {symbol}: {e}")
+            await asyncio.sleep(0.15)
     for inst in OTHER_INSTRUMENTS:
         try:
             hist = await feed.fetch_commodity(inst["yahoo"], "5d")
@@ -625,8 +641,10 @@ async def health_check():
 
 @app.get("/api/debug/status")
 async def debug_status():
+    from services import candle_cache as _cc
     return {"data_feed": feed.status, "session_active": scanner.is_trading_session(),
             "enabled_strategies": scanner.enabled_strategies(),
+            "candle_cache": _cc.stats(),
             "coins": [scanner.debug_snapshot(s) for s in ALL_SYMBOLS]}
 
 
@@ -787,47 +805,135 @@ async def rebuild_performance():
 CLEAR_DELTAS = {"hour": timedelta(hours=1), "24h": timedelta(days=1),
                 "7d": timedelta(days=7), "4w": timedelta(weeks=4)}
 
+CLEAR_SCOPES = {"all", "coin", "coin_strategy"}
+
+
+async def reaggregate_daily_stats() -> Dict[str, int]:
+    """Re-aggregate analytics_daily & trade_stats from the remaining raw data.
+    Needed after coin/strategy-scoped deletes, because those aggregated day
+    collections carry no symbol/strategy fields and must not be dropped blindly."""
+    removed = {"analytics_daily": 0, "trade_stats": 0}
+
+    daily_docs = await app.mongodb.analytics_daily.find({}, {"date": 1}).to_list(10000)
+    for doc in daily_docs:
+        date = doc.get("date")
+        if not date:
+            continue
+        pipeline = [
+            {"$match": {"trade_date": date}},
+            {"$group": {"_id": {"strategy": "$strategy_id", "type": "$type"},
+                        "total": {"$sum": 1},
+                        "wins": {"$sum": {"$cond": [{"$eq": ["$result", "win"]}, 1, 0]}},
+                        "losses": {"$sum": {"$cond": [{"$eq": ["$result", "loss"]}, 1, 0]}},
+                        "avg_crv": {"$avg": "$crv"}}},
+        ]
+        rows = await app.mongodb.signals.aggregate(pipeline).to_list(500)
+        if not rows:
+            await app.mongodb.analytics_daily.delete_one({"date": date})
+            removed["analytics_daily"] += 1
+            continue
+        summary = {"date": date, "generated_at": datetime.now(timezone.utc).isoformat(),
+                   "by_strategy_type": [{"strategy": r["_id"]["strategy"], "type": r["_id"]["type"],
+                                         "total": r["total"], "wins": r["wins"], "losses": r["losses"],
+                                         "avg_crv": round(r.get("avg_crv") or 0, 2)} for r in rows],
+                   "total_signals": sum(r["total"] for r in rows)}
+        await app.mongodb.analytics_daily.update_one({"date": date}, {"$set": summary})
+
+    tstat_docs = await app.mongodb.trade_stats.find({}, {"date": 1}).to_list(10000)
+    for doc in tstat_docs:
+        date = doc.get("date")
+        if not date:
+            continue
+        tstats = await app.mongodb.auto_trades.aggregate([
+            {"$match": {"trade_date": date, "status": "closed"}},
+            {"$group": {"_id": None, "trades": {"$sum": 1},
+                        "pnl": {"$sum": "$realized_pnl"},
+                        "wins": {"$sum": {"$cond": [{"$eq": ["$result", "win"]}, 1, 0]}}}}],
+        ).to_list(1)
+        if not tstats or not tstats[0].get("trades"):
+            await app.mongodb.trade_stats.delete_one({"date": date})
+            removed["trade_stats"] += 1
+            continue
+        ts = tstats[0]
+        await app.mongodb.trade_stats.update_one({"date": date}, {"$set": {
+            "date": date, "trades": ts["trades"], "pnl": round(ts.get("pnl") or 0, 4),
+            "wins": ts["wins"]}})
+    return removed
+
 
 @app.post("/api/analytics/clear")
 async def clear_analytics(body: Dict, _: bool = Depends(require_admin)):
-    """Delete analysis data (signals, performance, daily analytics, trades) for a time range.
-    range: 'hour' | '24h' | '7d' | '4w' | 'all'."""
+    """Delete analysis data (signals, performance, daily analytics, trades).
+    range: 'hour' | '24h' | '7d' | '4w' | 'all'
+    scope: 'all' (alles) | 'coin' (nur symbol) | 'coin_strategy' (symbol + strategy_id)"""
     rng = (body.get("range") or "all").lower()
+    scope = (body.get("scope") or "all").lower()
+    symbol = body.get("symbol")
+    strategy_id = body.get("strategy_id")
+
+    if scope not in CLEAR_SCOPES:
+        raise HTTPException(status_code=400, detail="Ungültiger Scope")
+    if scope in ("coin", "coin_strategy") and not symbol:
+        raise HTTPException(status_code=400, detail="symbol erforderlich für Coin-Scope")
+    if scope == "coin_strategy" and not strategy_id:
+        raise HTTPException(status_code=400, detail="strategy_id erforderlich für Strategie-Scope")
+    if rng != "all" and rng not in CLEAR_DELTAS:
+        raise HTTPException(status_code=400, detail="Ungültiger Zeitraum")
+
+    scope_filter: Dict = {}
+    if scope == "coin":
+        scope_filter = {"symbol": symbol}
+    elif scope == "coin_strategy":
+        scope_filter = {"symbol": symbol, "strategy_id": strategy_id}
+
     deleted: Dict[str, int] = {}
 
-    if rng == "all":
+    # Fast path: full wipe over everything (previous behaviour)
+    if rng == "all" and scope == "all":
         for coll in ["signals", "performance", "analytics_daily", "trade_stats", "auto_trades"]:
             r = await app.mongodb[coll].delete_many({})
             deleted[coll] = r.deleted_count
         open_signal_evals.clear()
         for sym in list(scanner.rule_states.keys()):
             scanner.rule_states[sym] = {}
-        await broadcast({"type": "analytics_cleared", "range": rng})
-        return {"status": "success", "range": rng, "deleted": deleted}
+        await broadcast({"type": "analytics_cleared", "range": rng, "scope": scope})
+        return {"status": "success", "range": rng, "scope": scope, "deleted": deleted}
 
-    if rng not in CLEAR_DELTAS:
-        raise HTTPException(status_code=400, detail="Ungültiger Zeitraum")
+    if rng == "all":
+        sig_filter: Dict = dict(scope_filter)
+        trade_filter: Dict = dict(scope_filter)
+        cutoff = None
+    else:
+        cutoff = datetime.now(timezone.utc) - CLEAR_DELTAS[rng]
+        cutoff_iso = cutoff.isoformat()
+        sig_filter = {"timestamp": {"$gte": cutoff_iso}, **scope_filter}
+        trade_filter = {"opened_at": {"$gte": cutoff_iso}, **scope_filter}
 
-    now = datetime.now(timezone.utc)
-    cutoff = now - CLEAR_DELTAS[rng]
-    cutoff_iso = cutoff.isoformat()
-    cutoff_date = cutoff.astimezone(BERLIN).strftime("%Y-%m-%d")
-
-    r = await app.mongodb.signals.delete_many({"timestamp": {"$gte": cutoff_iso}})
+    r = await app.mongodb.signals.delete_many(sig_filter)
     deleted["signals"] = r.deleted_count
-    r = await app.mongodb.auto_trades.delete_many({"opened_at": {"$gte": cutoff_iso}})
+    r = await app.mongodb.auto_trades.delete_many(trade_filter)
     deleted["auto_trades"] = r.deleted_count
-    r = await app.mongodb.analytics_daily.delete_many({"date": {"$gte": cutoff_date}})
-    deleted["analytics_daily"] = r.deleted_count
-    r = await app.mongodb.trade_stats.delete_many({"date": {"$gte": cutoff_date}})
-    deleted["trade_stats"] = r.deleted_count
+
+    if scope == "all":
+        # time-scoped full delete: drop aggregated day docs directly (previous behaviour)
+        cutoff_date = cutoff.astimezone(BERLIN).strftime("%Y-%m-%d")
+        r = await app.mongodb.analytics_daily.delete_many({"date": {"$gte": cutoff_date}})
+        deleted["analytics_daily"] = r.deleted_count
+        r = await app.mongodb.trade_stats.delete_many({"date": {"$gte": cutoff_date}})
+        deleted["trade_stats"] = r.deleted_count
+    else:
+        # coin/strategy scope: day aggregates have no coin/strategy fields
+        # -> re-aggregate from remaining signals/auto_trades instead of deleting blindly
+        removed = await reaggregate_daily_stats()
+        deleted["analytics_daily"] = removed["analytics_daily"]
+        deleted["trade_stats"] = removed["trade_stats"]
 
     await rebuild_performance()
     # drop in-memory evals whose signal was removed
     remaining_ids = {s["id"] for s in await app.mongodb.signals.find({}, {"id": 1}).to_list(200000)}
     open_signal_evals[:] = [ev for ev in open_signal_evals if ev["id"] in remaining_ids]
-    await broadcast({"type": "analytics_cleared", "range": rng})
-    return {"status": "success", "range": rng, "deleted": deleted}
+    await broadcast({"type": "analytics_cleared", "range": rng, "scope": scope})
+    return {"status": "success", "range": rng, "scope": scope, "deleted": deleted}
 
 
 # ---------------- KI-Analyse (GPT-4o via Emergent Universal Key) ----------------
@@ -1191,8 +1297,443 @@ async def restore_default_strategies(_: bool = Depends(require_admin)):
 
 @app.get("/api/strategies/builder-options")
 async def builder_options():
-    from strategies.custom_strategy import INDICATORS, OPERATORS
-    return {"indicators": INDICATORS, "operators": OPERATORS}
+    from strategies.custom_strategy import INDICATORS, OPERATORS, INDICATOR_META, PERIOD_FIELDS
+    return {"indicators": INDICATORS, "operators": OPERATORS,
+            "indicator_meta": INDICATOR_META, "period_fields": PERIOD_FIELDS}
+
+
+# ---------------- Strategie-Vergleich ----------------
+@app.get("/api/analytics/strategy-comparison")
+async def strategy_comparison(mode: str = "all", days: int = 0):
+    """Vergleicht alle Strategien anhand ihrer geschlossenen Trades:
+    Trades, Win-Rate, PnL, Profit-Faktor, Max Drawdown, Ø Dauer, je Coin."""
+    q: Dict = {"status": "closed"}
+    if mode in ("paper", "live"):
+        q["mode"] = mode
+    if days and days > 0:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        q["opened_at"] = {"$gte": cutoff}
+    trades = await app.mongodb.auto_trades.find(q).sort("opened_at", 1).to_list(10000)
+    open_counts: Dict[str, int] = {}
+    async for t in app.mongodb.auto_trades.find({"status": "open"}):
+        sid = t.get("strategy_id") or "unknown"
+        open_counts[sid] = open_counts.get(sid, 0) + 1
+
+    def _dur_min(t):
+        try:
+            o = datetime.fromisoformat(t["opened_at"].replace("Z", "+00:00"))
+            c = datetime.fromisoformat(t["closed_at"].replace("Z", "+00:00"))
+            return (c - o).total_seconds() / 60
+        except Exception:
+            return None
+
+    by_strat: Dict[str, Dict] = {}
+    for t in trades:
+        sid = t.get("strategy_id") or "unknown"
+        e = by_strat.setdefault(sid, {
+            "strategy_id": sid,
+            "strategy_name": t.get("strategy_name") or sid,
+            "trades": 0, "wins": 0, "losses": 0, "breakevens": 0,
+            "pnl": 0.0, "fees": 0.0, "gross_win": 0.0, "gross_loss": 0.0,
+            "long_trades": 0, "short_trades": 0,
+            "paper_trades": 0, "live_trades": 0,
+            "_durs": [], "_equity": 0.0, "_peak": 0.0, "max_drawdown": 0.0,
+            "best_trade": 0.0, "worst_trade": 0.0,
+            "by_symbol": {},
+        })
+        pnl = float(t.get("realized_pnl") or 0)
+        res = t.get("result")
+        e["trades"] += 1
+        if res == "win":
+            e["wins"] += 1
+        elif res == "loss":
+            e["losses"] += 1
+        elif res == "breakeven":
+            e["breakevens"] += 1
+        e["pnl"] = round(e["pnl"] + pnl, 4)
+        e["fees"] = round(e["fees"] + float(t.get("fees_paid") or 0), 4)
+        if pnl > 0:
+            e["gross_win"] += pnl
+        else:
+            e["gross_loss"] += abs(pnl)
+        e["best_trade"] = round(max(e["best_trade"], pnl), 4)
+        e["worst_trade"] = round(min(e["worst_trade"], pnl), 4)
+        if t.get("side") == "LONG":
+            e["long_trades"] += 1
+        else:
+            e["short_trades"] += 1
+        if t.get("mode") == "live":
+            e["live_trades"] += 1
+        else:
+            e["paper_trades"] += 1
+        d = _dur_min(t)
+        if d is not None:
+            e["_durs"].append(d)
+        e["_equity"] += pnl
+        e["_peak"] = max(e["_peak"], e["_equity"])
+        e["max_drawdown"] = round(max(e["max_drawdown"], e["_peak"] - e["_equity"]), 4)
+        sym = t.get("symbol") or "?"
+        s = e["by_symbol"].setdefault(sym, {"symbol": sym, "trades": 0, "wins": 0,
+                                            "losses": 0, "pnl": 0.0})
+        s["trades"] += 1
+        if res == "win":
+            s["wins"] += 1
+        elif res == "loss":
+            s["losses"] += 1
+        s["pnl"] = round(s["pnl"] + pnl, 4)
+
+    out = []
+    for sid, e in by_strat.items():
+        decided = e["wins"] + e["losses"]
+        e["win_rate"] = round(e["wins"] / decided * 100, 1) if decided else 0.0
+        e["avg_pnl"] = round(e["pnl"] / e["trades"], 4) if e["trades"] else 0.0
+        gl = e.pop("gross_loss")
+        gw = e.pop("gross_win")
+        e["profit_factor"] = round(gw / gl, 2) if gl > 0 else (round(gw, 2) if gw else 0.0)
+        durs = e.pop("_durs")
+        e["avg_duration_min"] = round(sum(durs) / len(durs), 1) if durs else 0.0
+        e.pop("_equity", None)
+        e.pop("_peak", None)
+        e["open_trades"] = open_counts.get(sid, 0)
+        for s in e["by_symbol"].values():
+            sd = s["wins"] + s["losses"]
+            s["win_rate"] = round(s["wins"] / sd * 100, 1) if sd else 0.0
+        e["by_symbol"] = sorted(e["by_symbol"].values(), key=lambda x: -x["pnl"])
+        strat = strategy_registry.get(sid)
+        if strat:
+            e["strategy_name"] = getattr(strat, "STRATEGY_NAME", e["strategy_name"])
+        out.append(e)
+    out.sort(key=lambda x: -x["pnl"])
+    return {"mode": mode, "days": days, "comparison": out,
+            "total_trades": len(trades)}
+
+
+# ---------------- Backtester ----------------
+from services import backtester as bt
+
+
+@app.post("/api/backtest/run")
+async def start_backtest(body: Dict, _: bool = Depends(require_admin)):
+    strategy_ids = body.get("strategy_ids") or []
+    symbols = body.get("symbols") or []
+    days = min(max(int(body.get("days") or 3), 1), 365)
+    if not strategy_ids or not symbols:
+        raise HTTPException(status_code=400, detail="strategy_ids und symbols erforderlich")
+    valid_ids = {m["id"] for m in strategy_registry.list_all()}
+    strategy_ids = [s for s in strategy_ids if s in valid_ids]
+    symbols = [s for s in symbols if s in TOP_10_COINS]
+    if not strategy_ids or not symbols:
+        raise HTTPException(status_code=400, detail="Keine gültigen Strategien/Coins")
+    running = [j for j in bt.JOBS.values() if j["status"] == "running"]
+    if running:
+        raise HTTPException(status_code=409, detail="Es läuft bereits ein Backtest")
+    cfg = dict(DEFAULT_COIN_CFG)
+    for k in ("max_capital", "leverage", "fee_percent", "tp1_crv", "tp_full_crv",
+              "tp1_close_percent", "sl_mode", "sl_fixed_percent", "sl_lookback",
+              "breakeven_enabled", "trail_after_tp1", "profit_secure_enabled",
+              "profit_secure_trigger_pct", "profit_lock_pct",
+              "be_mode", "be_trigger_crv", "be_trigger_profit_pct",
+              "be_smart_lookback", "require_all_rules", "sessions"):
+        if body.get(k) is not None:
+            cfg[k] = body[k]
+    strategy_configs = body.get("strategy_configs") or {}
+    if not isinstance(strategy_configs, dict):
+        strategy_configs = {}
+    default_tf = body.get("timeframe")
+    params = {"strategy_ids": strategy_ids, "symbols": symbols, "days": days,
+              "max_capital": cfg["max_capital"], "leverage": cfg["leverage"],
+              "fee_percent": cfg["fee_percent"], "timeframe": default_tf,
+              "strategy_configs": strategy_configs}
+    job_id = bt.create_job(params)
+    asyncio.create_task(bt.run_backtest(job_id, strategy_ids, symbols, days, cfg,
+                                        strategy_registry, scanner.settings,
+                                        app.mongodb, strategy_configs, default_tf))
+    return {"status": "started", "job_id": job_id}
+
+
+def _job_public(job: Dict) -> Dict:
+    """Job ohne Export-Rohdaten (sonst riesige Antworten) + ETA."""
+    j = {k: v for k, v in job.items() if k not in ("export_candles", "export_trades")}
+    try:
+        created = datetime.fromisoformat(job["created_at"])
+        elapsed = (datetime.now(timezone.utc) - created).total_seconds()
+        j["elapsed_seconds"] = int(elapsed)
+        p = job.get("progress") or 0
+        if job.get("status") == "running" and p >= 2:
+            j["eta_seconds"] = int(elapsed / p * (100 - p))
+    except Exception:
+        pass
+    return j
+
+
+@app.get("/api/backtest/status/{job_id}")
+async def backtest_status(job_id: str):
+    job = bt.JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job nicht gefunden")
+    return _job_public(job)
+
+
+@app.post("/api/backtest/cancel/{job_id}")
+async def backtest_cancel(job_id: str, _: bool = Depends(require_admin)):
+    job = bt.JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job nicht gefunden")
+    job["cancel"] = True
+    if job.get("status") == "running":
+        job["phase"] = "Wird abgebrochen..."
+    return {"status": "cancelling", "job_id": job_id}
+
+
+@app.get("/api/backtest/active")
+async def backtest_active():
+    """Läuft gerade ein Backtest? (für Fortschritt nach erneutem Öffnen des Popups)"""
+    running = [j for j in bt.JOBS.values() if j["status"] == "running"]
+    if running:
+        return {"active": _job_public(running[-1])}
+    done = sorted([j for j in bt.JOBS.values() if j["status"] in ("done", "error", "cancelled")],
+                  key=lambda x: x["created_at"])
+    return {"active": None, "last": _job_public(done[-1]) if done else None}
+
+
+@app.get("/api/backtest/results")
+async def backtest_results(limit: int = 5):
+    rows = await app.mongodb.backtests.find().sort("created_at", -1).limit(limit).to_list(limit)
+    return {"results": [_clean(r) for r in rows]}
+
+
+# ---- Backtest-spezifische Strategie-Einstellungen (getrennt von Live/Paper) ----
+@app.get("/api/backtest/strategy-configs")
+async def get_backtest_strategy_configs():
+    doc = await app.mongodb.settings.find_one({"_id": "backtest_strategy_configs"})
+    return {"configs": (doc or {}).get("configs", {})}
+
+
+@app.post("/api/backtest/strategy-configs")
+async def set_backtest_strategy_configs(body: Dict, _: bool = Depends(require_admin)):
+    configs = body.get("configs")
+    if not isinstance(configs, dict):
+        raise HTTPException(status_code=400, detail="configs (dict) erforderlich")
+    await app.mongodb.settings.update_one({"_id": "backtest_strategy_configs"},
+                                          {"$set": {"configs": configs}}, upsert=True)
+    return {"status": "success", "configs": configs}
+
+
+# ---- CSV-Export der Backtest-Rohdaten (Trades + Kerzen) ----
+def _rows_to_csv(rows: List[Dict], fieldnames: List[str]) -> str:
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    w.writeheader()
+    for r in rows:
+        w.writerow(r)
+    return buf.getvalue()
+
+
+@app.get("/api/backtest/export/{job_id}")
+async def backtest_export(job_id: str, kind: str = "trades"):
+    from fastapi.responses import Response
+    job = bt.JOBS.get(job_id)
+    if kind == "candles":
+        data = (job or {}).get("export_candles")
+        if not data:
+            raise HTTPException(status_code=404,
+                                detail="Kerzendaten sind nur für den zuletzt gelaufenen Backtest verfügbar")
+        rows = []
+        for key, candles in data.items():
+            sym, tf = key.split("|")
+            for c in candles:
+                rows.append({"symbol": sym, "timeframe": tf, "timestamp": c["timestamp"],
+                             "time_utc": datetime.fromtimestamp(c["timestamp"] / 1000,
+                                                                tz=timezone.utc).isoformat(),
+                             "open": c["open"], "high": c["high"], "low": c["low"],
+                             "close": c["close"], "volume": c.get("volume", 0)})
+        csv_str = _rows_to_csv(rows, ["symbol", "timeframe", "timestamp", "time_utc",
+                                      "open", "high", "low", "close", "volume"])
+    else:
+        rows = (job or {}).get("export_trades")
+        if rows is None:
+            doc = await app.mongodb.backtest_trades.find_one({"job_id": job_id})
+            rows = (doc or {}).get("rows")
+        if rows is None:
+            raise HTTPException(status_code=404, detail="Keine Trade-Daten für diesen Backtest gefunden")
+        fields = ["strategy_id", "strategy_name", "symbol", "timeframe", "side",
+                  "opened", "closed", "duration_min", "entry", "exit", "sl_initial",
+                  "sl_final", "tp1", "tp_full", "risk", "result", "pnl", "fees", "qty",
+                  "tp1_done", "breakeven_moved", "crv_signal", "rules_met", "rules_total",
+                  "rsi_entry", "ema_fast_entry", "ema_slow_entry", "atr_entry",
+                  "entry_candle_open", "entry_candle_high", "entry_candle_low",
+                  "entry_candle_close", "entry_candle_volume"]
+        csv_str = _rows_to_csv(rows, fields)
+    return Response(content=csv_str, media_type="text/csv",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="backtest_{job_id}_{kind}.csv"'})
+
+
+# ---------------- Optimizer ----------------
+from services import optimizer as opt
+
+
+@app.post("/api/optimizer/run")
+async def start_optimizer(body: Dict, _: bool = Depends(require_admin)):
+    mode = body.get("mode", "params")
+    if mode not in ("params", "discovery", "combo"):
+        raise HTTPException(status_code=400, detail="mode muss params|discovery|combo sein")
+    symbols = [s for s in (body.get("symbols") or []) if s in TOP_10_COINS]
+    if not symbols:
+        raise HTTPException(status_code=400, detail="Mindestens 1 gültiger Coin erforderlich")
+    if mode == "params":
+        sid = body.get("strategy_id")
+        if not sid or not strategy_registry.get(sid):
+            raise HTTPException(status_code=400, detail="Gültige strategy_id erforderlich")
+    running = [j for j in opt.JOBS.values() if j["status"] == "running"]
+    if running:
+        raise HTTPException(status_code=409, detail="Es läuft bereits eine Optimierung")
+    body["symbols"] = symbols
+    if body.get("base_strategy_id"):
+        base = strategy_registry.get(body["base_strategy_id"])
+        if not base or not getattr(base, "IS_CUSTOM", False):
+            raise HTTPException(status_code=400,
+                                detail="Basis-Strategie muss eine Custom-Strategie sein")
+    params = {k: body.get(k) for k in ("mode", "strategy_id", "symbols", "days",
+                                       "timeframe", "objective", "iterations",
+                                       "min_trades", "max_rules", "indicators",
+                                       "algorithm", "base_strategy_id")}
+    job_id = opt.create_job(params)
+    asyncio.create_task(opt.run_optimizer(job_id, body, strategy_registry,
+                                          scanner.settings, DEFAULT_COIN_CFG,
+                                          app.mongodb))
+    return {"status": "started", "job_id": job_id}
+
+
+@app.get("/api/optimizer/status/{job_id}")
+async def optimizer_status(job_id: str):
+    job = opt.JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job nicht gefunden")
+    return _job_public(job)
+
+
+@app.post("/api/optimizer/cancel/{job_id}")
+async def optimizer_cancel(job_id: str, _: bool = Depends(require_admin)):
+    job = opt.JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job nicht gefunden")
+    job["cancel"] = True
+    if job.get("status") == "running":
+        job["phase"] = "Wird abgebrochen..."
+    return {"status": "cancelling", "job_id": job_id}
+
+
+@app.get("/api/optimizer/active")
+async def optimizer_active():
+    """Läuft gerade eine Optimierung? (Fortschritt bleibt nach Schließen sichtbar)"""
+    running = [j for j in opt.JOBS.values() if j["status"] == "running"]
+    if running:
+        return {"active": _job_public(running[-1])}
+    done = sorted([j for j in opt.JOBS.values() if j["status"] in ("done", "error", "cancelled")],
+                  key=lambda x: x["created_at"])
+    return {"active": None, "last": _job_public(done[-1]) if done else None}
+
+
+@app.get("/api/optimizer/results")
+async def optimizer_results(limit: int = 5):
+    rows = await app.mongodb.optimizer_runs.find().sort("created_at", -1).limit(limit).to_list(limit)
+    return {"results": [_clean(r) for r in rows]}
+
+
+@app.post("/api/optimizer/apply")
+async def optimizer_apply(body: Dict, _: bool = Depends(require_admin)):
+    """Optimierungs-Ergebnis übernehmen:
+    - type=params: beste Parameter in die Live/Paper Strategie-Einstellungen schreiben
+    - type=strategy: entdeckte Strategie als Custom-Strategie speichern"""
+    apply_type = body.get("type")
+    if apply_type == "params":
+        sid = body.get("strategy_id")
+        if not sid or not strategy_registry.get(sid):
+            raise HTTPException(status_code=400, detail="Gültige strategy_id erforderlich")
+        params = body.get("params") or {}
+        sp = dict(scanner.settings.get("strategy_params", {}))
+        sp[sid] = {**sp.get(sid, {}), **params}
+        scanner.update_settings({"strategy_params": sp})
+        await app.mongodb.settings.update_one({"_id": "scanner_settings"},
+                                              {"$set": scanner.settings}, upsert=True)
+        trade_params = body.get("trade_params") or {}
+        if trade_params:
+            overrides = dict(autotrader.config.get("strategy_overrides", {}))
+            current = overrides.get(sid, dict(DEFAULT_STRATEGY_OVERRIDE))
+            for k in ("tp1_crv", "tp_full_crv", "tp1_close_percent", "sl_lookback"):
+                if trade_params.get(k) is not None:
+                    current[k] = trade_params[k]
+            overrides[sid] = current
+            new_cfg = {"mode": autotrader.config.get("mode", "paper"),
+                       "coins": autotrader.config.get("coins", {}),
+                       "strategy_overrides": overrides}
+            autotrader.set_config(new_cfg)
+            await app.mongodb.settings.update_one(
+                {"_id": "autotrade_config"},
+                {"$set": {"mode": new_cfg["mode"], "coins": new_cfg["coins"],
+                          "strategy_overrides": overrides}}, upsert=True)
+        return {"status": "success", "strategy_id": sid, "params": sp[sid],
+                "trade_params": trade_params}
+    if apply_type == "backtest":
+        # Beste Parameter in die Backtest-Strategie-Einstellungen übernehmen,
+        # damit optimierte Strategien direkt im Backtester getestet werden können
+        sid = body.get("strategy_id")
+        if not sid or not strategy_registry.get(sid):
+            raise HTTPException(status_code=400, detail="Gültige strategy_id erforderlich")
+        doc = await app.mongodb.settings.find_one({"_id": "backtest_strategy_configs"})
+        configs = (doc or {}).get("configs", {})
+        c = dict(configs.get(sid, {}))
+        params = body.get("params") or {}
+        if params:
+            c["params"] = {**c.get("params", {}), **params}
+        trade_params = body.get("trade_params") or {}
+        for k in ("tp1_crv", "tp_full_crv", "tp1_close_percent", "sl_lookback"):
+            if trade_params.get(k) is not None:
+                c[k] = trade_params[k]
+        if body.get("timeframe"):
+            c["timeframe"] = body["timeframe"]
+        configs[sid] = c
+        await app.mongodb.settings.update_one({"_id": "backtest_strategy_configs"},
+                                              {"$set": {"configs": configs}}, upsert=True)
+        return {"status": "success", "strategy_id": sid, "config": c}
+    if apply_type == "strategy":
+        definition = body.get("definition")
+        if not isinstance(definition, dict) or not definition.get("long_rules"):
+            raise HTTPException(status_code=400, detail="Gültige definition erforderlich")
+        # bestehende Custom-Strategie aktualisieren statt neue anzulegen
+        update_id = body.get("update_strategy_id")
+        if update_id:
+            existing = strategy_registry.get(update_id)
+            if not existing or not getattr(existing, "IS_CUSTOM", False):
+                raise HTTPException(status_code=400,
+                                    detail="update_strategy_id muss eine Custom-Strategie sein")
+            sid = update_id
+            definition["name"] = body.get("name") or existing.definition.get("name") or "Optimizer Strategie"
+        else:
+            sid = f"custom_{uuid.uuid4().hex[:8]}"
+            definition["name"] = body.get("name") or definition.get("name") or "Optimizer Strategie"
+        definition["id"] = sid
+        definition.setdefault("description", "Vom Optimizer entdeckte Strategie")
+        definition.setdefault("timeframe", body.get("timeframe") or "1m")
+        await app.mongodb.custom_strategies.update_one({"id": sid}, {"$set": definition}, upsert=True)
+        strategy_registry.upsert_custom(definition)
+        enabled = scanner.settings.get("enabled_strategies", [])
+        if sid not in enabled:
+            enabled.append(sid)
+            scanner.update_settings({"enabled_strategies": enabled})
+        tf = body.get("timeframe")
+        if tf:
+            tfs = dict(scanner.settings.get("strategy_timeframes", {}))
+            tfs[sid] = tf
+            scanner.update_settings({"strategy_timeframes": tfs})
+        await app.mongodb.settings.update_one({"_id": "scanner_settings"},
+                                              {"$set": scanner.settings}, upsert=True)
+        return {"status": "success", "id": sid, "definition": definition,
+                "updated": bool(body.get("update_strategy_id"))}
+    raise HTTPException(status_code=400, detail="type muss params|strategy|backtest sein")
 
 
 # ---- autotrade ----
@@ -1256,8 +1797,16 @@ DEFAULT_STRATEGY_OVERRIDE = {
     "tp1_close_percent": 50,
     "tp_full_crv": 2.0,
     "breakeven_enabled": True,
+    "be_mode": "tp1",
+    "be_trigger_crv": 1.0,
+    "be_trigger_profit_pct": 30.0,
+    "be_smart_lookback": 10,
+    "require_all_rules": False,
     "fee_percent": 0.06,
     "trade_pre_signals": False,
+    "profit_secure_enabled": False,
+    "profit_secure_trigger_pct": 30.0,
+    "profit_lock_pct": 50.0,
 }
 
 
@@ -1337,15 +1886,22 @@ DEFAULT_STRATEGY_COIN_CFG: dict = {
     "tp1_close_percent": 50,
     "tp_full_crv": 2.0,
     "breakeven_enabled": True,
+    "be_mode": "tp1",
+    "be_trigger_crv": 1.0,
+    "be_trigger_profit_pct": 30.0,
+    "be_smart_lookback": 10,
+    "require_all_rules": False,
     "fee_percent": 0.06,
     "trade_pre_signals": False,
+    "profit_secure_enabled": False,
+    "profit_secure_trigger_pct": 30.0,
+    "profit_lock_pct": 50.0,
 }
 
 @app.get("/api/autotrade/strategy/{strategy_id}/coin/{symbol}")
 async def get_strategy_coin_autotrade(
     strategy_id: str,
     symbol: str,
-    _=Depends(require_admin)
 ):
     doc = await app.mongodb.strategy_coin_configs.find_one({"_id": f"{strategy_id}_{symbol}"})
     saved = doc.get("config", {}) if doc else {}

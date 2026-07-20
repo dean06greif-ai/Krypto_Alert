@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional
 import logging
 from services.technical_indicators import TechnicalIndicators
+from services.timeframes import TIMEFRAMES, aggregate_candles
 from strategies.registry import registry
 
 logger = logging.getLogger(__name__)
@@ -18,8 +19,10 @@ DEFAULT_SETTINGS = {
     "strategy_signals_enabled": {},                 # {strategy_id: bool} missing => on
     "strategy_params": {},                          # {strategy_id: {param: value}}
     "coin_params": {},                              # {strategy_id: {symbol: {param: value}}}
+    "strategy_timeframes": {},                      # {strategy_id: "5m" | "1h" | ...}
     "deleted_strategies": [],                       # permanently hidden/removed strategy ids
-    "custom_sessions": [],                          # empty => 24/7
+    "custom_sessions": [],                          # empty => 24/7 (global)
+    "strategy_sessions": {},                        # {strategy_id: [sessions]} überschreibt global
     "pre_signal_enabled": True,
     "notifications": {},                            # {symbol: bool}
 }
@@ -35,10 +38,23 @@ class StrategyScanner:
         self.settings = dict(DEFAULT_SETTINGS)
 
     # ---------- setup ----------
+    def strategy_timeframe(self, strategy_id: str) -> str:
+        tf = self.settings.get("strategy_timeframes", {}).get(strategy_id)
+        if not tf:
+            strat = registry.get(strategy_id)
+            tf = getattr(strat, "STRATEGY_TIMEFRAME", "1m") if strat else "1m"
+        return tf if tf in TIMEFRAMES else "1m"
+
+    def buffer_limit(self) -> int:
+        mx = 1
+        for sid in self.enabled_strategies():
+            mx = max(mx, TIMEFRAMES.get(self.strategy_timeframe(sid), 1))
+        return min(140 * mx, 20160)
+
     def bootstrap(self, symbol: str, candles: list):
         if not candles:
             return
-        self.candle_buffer[symbol] = candles[-120:]
+        self.candle_buffer[symbol] = candles[-self.buffer_limit():]
         self.forming[symbol] = dict(candles[-1])
 
     def update_settings(self, new_settings: Dict):
@@ -77,8 +93,16 @@ class StrategyScanner:
         except Exception:
             return (0, 0)
 
-    def is_trading_session(self) -> bool:
-        sessions = [s for s in self.settings.get("custom_sessions", []) if s.get("enabled", True)]
+    def sessions_for(self, strategy_id: str = None) -> list:
+        """Pro-Strategie Zeitfenster; fällt auf globale Sessions zurück."""
+        if strategy_id:
+            per = self.settings.get("strategy_sessions", {}).get(strategy_id)
+            if per:
+                return [s for s in per if s.get("enabled", True)]
+        return [s for s in self.settings.get("custom_sessions", []) if s.get("enabled", True)]
+
+    def is_trading_session(self, strategy_id: str = None) -> bool:
+        sessions = self.sessions_for(strategy_id)
         if not sessions:
             return True
         now = self.berlin_now()
@@ -105,8 +129,9 @@ class StrategyScanner:
         if buf and candle["timestamp"] <= buf[-1]["timestamp"]:
             return False
         buf.append(candle)
-        if len(buf) > 120:
-            self.candle_buffer[symbol] = buf[-120:]
+        limit = self.buffer_limit()
+        if len(buf) > limit:
+            self.candle_buffer[symbol] = buf[-limit:]
         return True
 
     # ---------- analysis ----------
@@ -118,8 +143,11 @@ class StrategyScanner:
         for sid in self.enabled_strategies():
             strategy = registry.get(sid)
             params = strategy.get_params(self.settings, symbol)
+            tf = self.strategy_timeframe(sid)
+            c_use = candles if TIMEFRAMES.get(tf, 1) <= 1 \
+                else aggregate_candles(candles, tf, drop_partial=True)
             try:
-                res = strategy.analyze(candles, symbol, params)
+                res = strategy.analyze(c_use, symbol, params)
             except Exception as e:
                 logger.error(f"analyze error {sid}/{symbol}: {e}")
                 res = None
@@ -128,6 +156,7 @@ class StrategyScanner:
             states[sid] = {
                 "strategy_id": sid,
                 "strategy_name": strategy.STRATEGY_NAME,
+                "timeframe": tf,
                 "rules": res.get("rules", []),
                 "bias": res.get("bias"),
                 "long_count": res.get("long_count", 0),
@@ -150,7 +179,7 @@ class StrategyScanner:
             return None
         if not self.is_signals_enabled(strategy.STRATEGY_ID):
             return None
-        if not self.is_trading_session():
+        if not self.is_trading_session(strategy.STRATEGY_ID):
             return None
         is_pre = res.get("is_pre_signal", False)
         if is_pre and not self.settings.get("pre_signal_enabled", True):

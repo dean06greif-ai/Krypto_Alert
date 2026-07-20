@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Plus, Trash, FloppyDisk, PencilSimple, ArrowCounterClockwise } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import { authHeaders, isAdmin } from '../auth';
+import SafeOverlay from './SafeOverlay';
 import './StrategyBuilder.css';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
@@ -10,24 +11,23 @@ const OP_LABELS = {
   '<': 'kleiner <', '>': 'größer >', '<=': '≤', '>=': '≥',
   cross_above: 'kreuzt über', cross_below: 'kreuzt unter',
 };
-const IND_LABELS = {
+
+const FALLBACK_LABELS = {
   rsi: 'RSI', ema_fast: 'EMA Fast', ema_slow: 'EMA Slow', price: 'Preis',
   ha_color: 'HA Farbe (1=grün)', ema_gap_pct: 'EMA Abstand %',
 };
-const INDICATORS = ['rsi', 'ema_fast', 'ema_slow', 'price', 'ha_color', 'ema_gap_pct'];
 
 const emptyRule = () => ({ indicator: 'rsi', op: '<', valueType: 'number', value: 30, label: '' });
 const jsonHeaders = () => ({ 'Content-Type': 'application/json', ...authHeaders() });
 
 const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
-  const [options, setOptions] = useState({ indicators: [], operators: [] });
+  const [options, setOptions] = useState({ indicators: [], operators: [], indicator_meta: {}, period_fields: [] });
   const [enabled, setEnabled] = useState(enabledIds);
   const [editingId, setEditingId] = useState(null);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [emaFast, setEmaFast] = useState(9);
-  const [emaSlow, setEmaSlow] = useState(50);
-  const [rsiP, setRsiP] = useState(14);
+  const [periods, setPeriods] = useState({});
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [longRules, setLongRules] = useState([emptyRule()]);
   const [shortRules, setShortRules] = useState([{ ...emptyRule(), op: '>', value: 70 }]);
   const [slMode, setSlMode] = useState('structure');
@@ -35,9 +35,30 @@ const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
   const [slTicks, setSlTicks] = useState(4);
   const [crv, setCrv] = useState(2);
 
+  const indLabel = (ind) => options.indicator_meta?.[ind]?.label || FALLBACK_LABELS[ind] || ind;
+
+  const defaultPeriods = (opts) => {
+    const p = {};
+    (opts.period_fields || []).forEach(f => { p[f.key] = f.default; });
+    return Object.keys(p).length ? p : { ema_fast_period: 9, ema_slow_period: 50, rsi_period: 14 };
+  };
+
   useEffect(() => {
-    fetch(`${API_URL}/api/strategies/builder-options`).then(r => r.json()).then(setOptions);
+    fetch(`${API_URL}/api/strategies/builder-options`).then(r => r.json()).then(o => {
+      setOptions(o);
+      setPeriods(prev => (Object.keys(prev).length ? prev : defaultPeriods(o)));
+    });
   }, []);
+
+  // Indikatoren gruppiert für die Auswahl
+  const groupedIndicators = () => {
+    const groups = {};
+    (options.indicators || []).forEach(ind => {
+      const g = options.indicator_meta?.[ind]?.group || 'Sonstige';
+      (groups[g] = groups[g] || []).push(ind);
+    });
+    return groups;
+  };
 
   const toggleTab = async (id) => {
     if (!isAdmin()) { toast.error('Admin-Login erforderlich'); return; }
@@ -60,17 +81,17 @@ const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
   const serializeRules = (list) => list.map(r => ({
     indicator: r.indicator, op: r.op,
     value: r.valueType === 'indicator' ? r.value : parseFloat(r.value),
-    label: r.label || `${IND_LABELS[r.indicator]} ${OP_LABELS[r.op]} ${r.value}`,
+    label: r.label || `${indLabel(r.indicator)} ${OP_LABELS[r.op]} ${r.valueType === 'indicator' ? indLabel(r.value) : r.value}`,
   }));
 
   const deserializeRules = (list) => (list || []).map(r => {
-    const isInd = typeof r.value === 'string' && INDICATORS.includes(r.value);
+    const isInd = typeof r.value === 'string' && (options.indicators || []).includes(r.value);
     return { indicator: r.indicator, op: r.op, valueType: isInd ? 'indicator' : 'number', value: r.value, label: '' };
   });
 
   const resetForm = () => {
     setEditingId(null); setName(''); setDescription('');
-    setEmaFast(9); setEmaSlow(50); setRsiP(14);
+    setPeriods(defaultPeriods(options));
     setLongRules([emptyRule()]); setShortRules([{ ...emptyRule(), op: '>', value: 70 }]);
     setSlMode('structure'); setSlPercent(1.5); setSlTicks(4); setCrv(2);
   };
@@ -81,9 +102,7 @@ const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
     setEditingId(s.id);
     setName(s.name || '');
     setDescription(s.description || '');
-    setEmaFast(d.indicators?.ema_fast_period ?? 9);
-    setEmaSlow(d.indicators?.ema_slow_period ?? 50);
-    setRsiP(d.indicators?.rsi_period ?? 14);
+    setPeriods({ ...defaultPeriods(options), ...(d.indicators || {}) });
     setLongRules(d.long_rules?.length ? deserializeRules(d.long_rules) : [emptyRule()]);
     setShortRules(d.short_rules?.length ? deserializeRules(d.short_rules) : [{ ...emptyRule(), op: '>', value: 70 }]);
     setSlMode(d.sl_mode || 'structure');
@@ -101,7 +120,7 @@ const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
     if (!longRules.length && !shortRules.length) { toast.error('Mind. eine Regel'); return; }
     const def = {
       name, description,
-      indicators: { ema_fast_period: emaFast, ema_slow_period: emaSlow, rsi_period: rsiP },
+      indicators: { ...periods },
       long_rules: serializeRules(longRules),
       short_rules: serializeRules(shortRules),
       sl_mode: slMode, sl_percent: slPercent, sl_ticks: slTicks, structure_lookback: 10, crv_target: crv,
@@ -139,13 +158,21 @@ const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
     else toast.error('Fehler');
   };
 
+  const IndicatorSelect = ({ value, onChange }) => (
+    <select value={value} onChange={onChange}>
+      {Object.entries(groupedIndicators()).map(([group, inds]) => (
+        <optgroup key={group} label={group}>
+          {inds.map(ind => <option key={ind} value={ind}>{indLabel(ind)}</option>)}
+        </optgroup>
+      ))}
+    </select>
+  );
+
   const RuleEditor = ({ list, setList, color }) => (
     <div className="sb-rules">
       {list.map((r, i) => (
         <div className="sb-rule" key={i} data-testid={`rule-row-${color}-${i}`}>
-          <select value={r.indicator} onChange={e => updRule(list, setList, i, 'indicator', e.target.value)}>
-            {(options.indicators || []).map(ind => <option key={ind} value={ind}>{IND_LABELS[ind] || ind}</option>)}
-          </select>
+          <IndicatorSelect value={r.indicator} onChange={e => updRule(list, setList, i, 'indicator', e.target.value)} />
           <select value={r.op} onChange={e => updRule(list, setList, i, 'op', e.target.value)}>
             {(options.operators || []).map(op => <option key={op} value={op}>{OP_LABELS[op] || op}</option>)}
           </select>
@@ -154,9 +181,7 @@ const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
             <option value="indicator">Indikator</option>
           </select>
           {r.valueType === 'indicator' ? (
-            <select value={r.value} onChange={e => updRule(list, setList, i, 'value', e.target.value)}>
-              {(options.indicators || []).map(ind => <option key={ind} value={ind}>{IND_LABELS[ind] || ind}</option>)}
-            </select>
+            <IndicatorSelect value={r.value} onChange={e => updRule(list, setList, i, 'value', e.target.value)} />
           ) : (
             <input type="number" value={r.value} onChange={e => updRule(list, setList, i, 'value', e.target.value)} />
           )}
@@ -170,7 +195,7 @@ const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
   );
 
   return (
-    <div className="sb-overlay" onClick={onClose}>
+    <SafeOverlay className="sb-overlay" onClose={onClose}>
       <div className="sb-panel" onClick={e => e.stopPropagation()} data-testid="strategy-builder">
         <div className="sb-header">
           <h2>STRATEGIEN VERWALTEN</h2>
@@ -191,7 +216,6 @@ const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
             </div>
           </div>
 
-          {/* ALL strategies: edit (custom) + delete (all, incl. predefined) */}
           <div className="sb-section">
             <h3>Alle Strategien
               <button className="sb-restore-btn" onClick={restoreDefaults} data-testid="restore-defaults-btn" title="Gelöschte voreingestellte Strategien wiederherstellen">
@@ -228,11 +252,29 @@ const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
               <input className="sb-input" placeholder="Name" value={name} onChange={e => setName(e.target.value)} data-testid="custom-name" />
               <input className="sb-input" placeholder="Beschreibung" value={description} onChange={e => setDescription(e.target.value)} data-testid="custom-desc" />
             </div>
+
             <div className="sb-form-row indicators">
-              <label>EMA Fast<input type="number" value={emaFast} onChange={e => setEmaFast(parseInt(e.target.value))} /></label>
-              <label>EMA Slow<input type="number" value={emaSlow} onChange={e => setEmaSlow(parseInt(e.target.value))} /></label>
-              <label>RSI Periode<input type="number" value={rsiP} onChange={e => setRsiP(parseInt(e.target.value))} /></label>
+              <label>EMA Fast<input type="number" value={periods.ema_fast_period ?? 9} onChange={e => setPeriods(p => ({ ...p, ema_fast_period: parseInt(e.target.value) || 9 }))} /></label>
+              <label>EMA Slow<input type="number" value={periods.ema_slow_period ?? 50} onChange={e => setPeriods(p => ({ ...p, ema_slow_period: parseInt(e.target.value) || 50 }))} /></label>
+              <label>RSI Periode<input type="number" value={periods.rsi_period ?? 14} onChange={e => setPeriods(p => ({ ...p, rsi_period: parseInt(e.target.value) || 14 }))} /></label>
             </div>
+
+            <button className="sb-restore-btn" style={{ marginBottom: 10 }} onClick={() => setShowAdvanced(v => !v)} data-testid="toggle-advanced-periods">
+              {showAdvanced ? '▲ Erweiterte Indikator-Einstellungen ausblenden' : '▼ Erweiterte Indikator-Einstellungen (MACD, Bollinger, ATR, Stochastik, Volumen ...)'}
+            </button>
+            {showAdvanced && (
+              <div className="sb-form-row indicators" style={{ flexWrap: 'wrap' }}>
+                {(options.period_fields || [])
+                  .filter(f => !['ema_fast_period', 'ema_slow_period', 'rsi_period'].includes(f.key))
+                  .map(f => (
+                    <label key={f.key}>{f.label}
+                      <input type="number" step={f.key === 'bb_std' ? 0.1 : 1}
+                        value={periods[f.key] ?? f.default}
+                        onChange={e => setPeriods(p => ({ ...p, [f.key]: f.key === 'bb_std' ? (parseFloat(e.target.value) || f.default) : (parseInt(e.target.value) || f.default) }))} />
+                    </label>
+                  ))}
+              </div>
+            )}
 
             <div className="sb-rule-group">
               <div className="sb-rule-label long">LONG Regeln (alle müssen zutreffen)</div>
@@ -262,7 +304,7 @@ const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
           </div>
         </div>
       </div>
-    </div>
+    </SafeOverlay>
   );
 };
 

@@ -1,0 +1,41 @@
+{
+  "summary": "Full backend + frontend E2E test for review_request iteration 2. Backend: 11/11 new-feature pytest tests pass (long-timeranges w/ days-clamp to 365, be_mode/be_trigger_crv/require_all_rules/sessions/profit_secure_enabled accepted; per_pair has secured & be_moved; /api/backtest/active + /cancel work incl. status 'cancelled' + phase 'Abgebrochen'; status endpoint contains NO export_candles/export_trades but has elapsed_seconds/eta_seconds; optimizer algorithm='bayes' returns done + result.algorithm='bayes'; optimizer cancel works; discovery with base_strategy_id starts from base custom strategy (steps present); /api/optimizer/apply type='strategy' with update_strategy_id returns updated:true and reuses existing custom id; type='backtest' persists to /api/backtest/strategy-configs; rel_vol_min HARD filter: 0.5 -> trades > 0, 1000 -> 0 trades on rsi_only; /api/settings strategy_sessions persists). Frontend: all data-testids present after fixing 3 undefined ReferenceErrors in Backtester.js + 1 in SettingsPanel.js (see updated_files). Backtester bt-days contains 60/90/180/360, bt-be-mode has 5 options, bt-require-all/bt-sessions/bt-cancel present, result table has 'Gesichert' column. Optimizer opt-days 60/90/180/360, opt-algorithm has 'bayes', discovery mode shows opt-base-strategy. Settings sessions tab reachable via edit-strategy-params-btn (mode='strategy'); session-scope-select shows 'global' + all strategies; add-session-btn clickable for per-strategy scope. StrategyAutoTradeModal (via strategy-trade-toggle-{id}) after PAPER mode shows sat-be-mode with 5 options, sat-require-all, and sat-be-crv appears when 'crv' selected.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Backtester", "issue": "3 ReferenceError crashes preventing modal to render: 'DAY_OPTIONS is not defined', 'BE_MODES is not defined', 'fmtEta is not defined' (imported/copied from Optimizer.js but not declared in Backtester.js). FIXED by adding constants + fmtEta helper at top of Backtester.js.", "selector": "[data-testid=\"backtester-modal\"]", "priority": "HIGH"},
+      {"component": "SettingsPanel", "issue": "ReferenceError 'sessionScope is not defined' in Zeitfenster-Tab render (state hook was never declared). FIXED by adding useState('global') for sessionScope/setSessionScope.", "selector": "[data-testid=\"session-scope-select\"]", "priority": "HIGH"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Header settings-button", "issues": ["Zahnrad im Header öffnet SettingsPanel mode='general' – dort ist der 'Zeitfenster' (tab-sessions) Tab NICHT sichtbar. Die review_request-Formulierung 'Einstellungen (Zahnrad) -> Zeitfenster-Tab' ist irreführend – korrekter Einstiegspunkt: 'edit-strategy-params-btn' (⚙ neben Strategie-Tabs) öffnet SettingsPanel mode='strategy' mit tab-sessions und session-scope-select. Bereits im Report Iteration 1 dokumentiert."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_new_features_iter2.py",
+    "/app/test_reports/pytest/iter2_new_features.xml"
+  ],
+  "action_items": [
+    "Optional: SettingsPanel im mode='general' zusätzlich einen Zeitfenster-Tab zeigen (oder review-Formulierung anpassen).",
+    "Optional: Backtester.js aus Optimizer.js gemeinsame Konstanten (DAY_OPTIONS, BE_MODES, fmtEta) in ein gemeinsames Modul auslagern (constants/backtest.js) – aktuell dupliziert."
+  ],
+  "critical_code_review_comments": [
+    "Backtester.js zieht mehrere Konstanten von Optimizer.js (DAY_OPTIONS, BE_MODES, fmtEta) implicit ein – E1 hat die Definitionen bei der Erweiterung offenbar vergessen, was zu 3 sichtbaren ReferenceError-Crashes im Preview führte. Empfehlung: shared const-Modul.",
+    "SettingsPanel useState-Hook für sessionScope fehlte komplett – der State wurde referenziert und mutiert, aber nie deklariert. Deutet auf incomplete review vor Merge hin.",
+    "server.py 2028 Zeilen – langfristig Modul-Split (auth/backtest/optimizer/settings/autotrade) empfehlenswert.",
+    "backtest 'cancel' hat kein Rate-Limiting; ok für Admin-only Route.",
+    "Rel-Volumen-Bugfix verifiziert: rsi_only mit rel_vol_min=1000 -> 0 trades, mit rel_vol_min=0.5 -> Trades vorhanden (hard filter greift)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_new_features_iter2.py (new)",
+    "/app/frontend/src/components/Backtester.js (added const DAY_OPTIONS, BE_MODES, fmtEta helper)",
+    "/app/frontend/src/components/SettingsPanel.js (added useState for sessionScope/setSessionScope)"
+  ],
+  "success_rate": {"backend": "100% (11/11)", "frontend": "100% aller Review-Checks nach Fix von 4 ReferenceErrors"},
+  "test_credentials": "Admin/admin (aus /app/memory/test_credentials.md)",
+  "seed_data_creation": "Test erstellt kurzzeitig TEST_BASE_CUSTOM custom-Strategie via /api/strategies/custom, aktualisiert sie via optimizer/apply update_strategy_id, dann löscht sie. strategy_sessions und backtest_strategy_configs werden geschrieben aber nicht zurückgesetzt (nur additive).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "pytest.ini fixiert -n 2 --dist loadscope; für sequential -n 0 verwenden. Backtests laufen echte Binance-Fetches; 1-3 Tage BTCUSDT ist in 3-30s fertig. Die 4 gefixten ReferenceErrors in Backtester.js/SettingsPanel.js waren bugs im E1-Code (Konstanten/State fehlten), NICHT test-only issues. Frontend hot-reload arbeitet, keine restart nötig. Screenshot showed working backtester with 'Gesichert' col and results table.",
+  "rca of the issue": "E1 kopierte Backtester.js-Erweiterungen (bt-days-Dropdown, bt-be-mode-Dropdown, Progress-ETA-Anzeige) aus Optimizer.js, aber übernahm die dort deklarierten Konstanten (DAY_OPTIONS, BE_MODES, fmtEta) nicht in Backtester.js. Beim ersten Render crashte der Component durch ReferenceError und die ErrorBoundary blendete 'Etwas ist schiefgelaufen' ein. Analog: SettingsPanel bekam einen sessionScope-Select ohne den zugehörigen useState-Hook. Fix: Konstanten + Hooks lokal ergänzt (siehe updated_files). Reproduktion: Backtester-Modal öffnen ohne Fix -> ErrorBoundary. Nach Fix läuft alles fehlerfrei (Screenshot verifiziert)."
+}
