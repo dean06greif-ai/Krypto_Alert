@@ -24,16 +24,20 @@ const StrategyTabs = ({
   // CURRENTLY SELECTED COIN (per-strategy-per-coin config takes priority,
   // falls back to strategy-level override for backwards compatibility).
   const getAutoTradeStatus = (strategyId) => {
-    const perCoin = strategyCoinConfigs?.[strategyId]?.[selectedCoin];
-    if (perCoin && perCoin.mode && perCoin.mode !== 'off') {
-      return perCoin.mode === 'live' ? 'L' : 'P';
+  const perCoin = strategyCoinConfigs?.[strategyId]?.[selectedCoin];
+  if (perCoin && perCoin.mode) {
+    // Per-Coin-Config ist maßgeblich — auch ein explizites 'off'!
+    if (perCoin.mode === 'off' || perCoin.enabled === false) {
+      return null; // Blitz leer, kein Fallback auf Strategy-Override
     }
-    const override = strategyOverrides?.[strategyId];
-    if (!override || !override.enabled || override.mode === 'off') {
-      return null; // No badge when off
-    }
-    return override.mode === 'live' ? 'L' : 'P';
-  };
+    return perCoin.mode === 'live' ? 'L' : 'P';
+  }
+  const override = strategyOverrides?.[strategyId];
+  if (!override || !override.enabled || override.mode === 'off') {
+    return null;
+  }
+  return override.mode === 'live' ? 'L' : 'P';
+};
 
   // Check if signals are enabled for a strategy (Bell icon state)
   const isSignalsEnabled = (strategyId) => {
