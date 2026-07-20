@@ -15,7 +15,7 @@ BERLIN = ZoneInfo("Europe/Berlin")
 
 DEFAULT_SETTINGS = {
     "active_strategy": "scalping_4_rules",          # kept for backwards-compat
-    "enabled_strategies": ["scalping_4_rules"],     # tabs shown in dashboard
+    "enabled_strategies": ["scalping_4_rules", "pbd_model"],     # tabs shown in dashboard
     "strategy_signals_enabled": {},                 # {strategy_id: bool} missing => on
     "strategy_params": {},                          # {strategy_id: {param: value}}
     "coin_params": {},                              # {strategy_id: {symbol: {param: value}}}

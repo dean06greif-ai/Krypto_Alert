@@ -41,6 +41,36 @@ const SignalPanel = ({ symbol, ruleState, latestSignal, strategyMeta }) => {
         </div>
       )}
 
+      {ruleState?.indicators?.phase && (
+        <div className="pbd-phase-bar" data-testid="pbd-phase-bar">
+          {['P', 'B', 'D'].map((ph) => {
+            const order = { 'P': 1, 'B': 2, 'D': 3 };
+            const cur = order[ruleState.indicators.phase] || 0;
+            const active = order[ph] <= cur;
+            const isNow = ruleState.indicators.phase === ph;
+            const labels = { P: 'Purge', B: 'Break', D: 'Displacement' };
+            return (
+              <div
+                key={ph}
+                className={`pbd-phase-step ${active ? 'done' : ''} ${isNow ? 'now' : ''}`}
+                data-testid={`pbd-phase-${ph}`}
+              >
+                <span className="pbd-phase-dot">{ph}</span>
+                <span className="pbd-phase-label">{labels[ph]}</span>
+              </div>
+            );
+          })}
+          {typeof ruleState.indicators.confluence === 'number' && (
+            <div className="pbd-confluence" data-testid="pbd-confluence" title="Confluence-Score (A-Setup >= 55)">
+              <span className="pbd-conf-label">CONF</span>
+              <span className={`pbd-conf-value mono ${ruleState.indicators.confluence >= 55 ? 'good' : ''}`}>
+                {ruleState.indicators.confluence}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       {rules.length > 0 ? (
         <div className="rules-grid">
           {rules.map(rule => (
@@ -59,7 +89,11 @@ const SignalPanel = ({ symbol, ruleState, latestSignal, strategyMeta }) => {
 
       {ruleState?.indicators && (
         <div className="indicator-strip">
-          <span>RSI <b className="mono">{ruleState.indicators.rsi}</b></span>
+          {ruleState.indicators.phase ? (
+            <span>PHASE <b className="mono">{ruleState.indicators.phase}</b></span>
+          ) : (
+            <span>RSI <b className="mono">{ruleState.indicators.rsi}</b></span>
+          )}
           <span>PREIS <b className="mono">${ruleState.indicators.price}</b></span>
         </div>
       )}
