@@ -91,6 +91,12 @@ export default function Optimizer({ onClose }) {
     if (mode === 'params') loadOverrides(selStrategy);
   }, [selStrategy, mode, loadOverrides]);
 
+  const recTf = strategies.find(s => s.id === selStrategy)?.timeframe;
+
+  useEffect(() => {
+    if (mode === 'params' && recTf) setTimeframe(recTf);
+  }, [selStrategy, mode, recTf]);
+
   useEffect(() => {
     fetch(`${API_URL}/api/strategies`).then(r => r.json()).then(d => {
       const list = d.strategies || [];
@@ -268,6 +274,11 @@ export default function Optimizer({ onClose }) {
             </label>
           )}
           <label className="opt-field">Timeframe
+            {mode === 'params' && recTf && (
+              <span data-testid="opt-rec-tf" style={{ color: '#B388FF', fontSize: '0.8em', marginLeft: 6 }}>
+                (Empfohlen: {TIMEFRAMES.find(t => t.v === recTf)?.l || recTf})
+              </span>
+            )}
             <select value={timeframe} onChange={e => setTimeframe(e.target.value)} data-testid="opt-timeframe">
               {TIMEFRAMES.map(t => <option key={t.v} value={t.v}>{t.l}</option>)}
             </select>
