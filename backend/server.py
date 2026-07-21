@@ -225,14 +225,16 @@ async def lifespan(app: FastAPI):
         })
         rehydrated = 0
         async for s in cursor:
-            if not s.get("tp1") or not s.get("sl"):
+            tp1 = s.get("tp1") or s.get("take_profit_1")
+            sl = s.get("sl") or s.get("stop_loss")
+            if not tp1 or not sl:
                 continue
             open_signal_evals.append({
                 "id": s.get("id"),
                 "symbol": s.get("symbol"),
                 "type": s.get("type"),
-                "tp1": s.get("tp1"),
-                "sl": s.get("sl"),
+                "tp1": tp1,
+                "sl": sl,
                 "strategy_id": s.get("strategy_id", "unknown"),
             })
             rehydrated += 1
@@ -339,15 +341,18 @@ async def process_signal(signal: Dict, candles: List[Dict]):
     await app.mongodb.signals.insert_one(dict(signal))
 
     # BUGFIX (win-rate): track this signal in-memory so evaluate_open_signals()
-    # can later mark it as win/loss based on price hitting TP1 or SL. Without
-    # this the wins/losses counters (and thus win_rate) stayed 0 forever.
-    if signal.get("signal_class") != "PRE_SIGNAL" and signal.get("tp1") and signal.get("sl"):
+    # can later mark it as win/loss based on price hitting TP1 or SL.
+    # Scanner-Signale nutzen die Keys take_profit_1/stop_loss (nicht tp1/sl) –
+    # ohne den Fallback wurde NIE ein Signal ausgewertet -> Tages-Winrate blieb 0.
+    _tp1 = signal.get("tp1") or signal.get("take_profit_1")
+    _sl = signal.get("sl") or signal.get("stop_loss")
+    if signal.get("signal_class") != "PRE_SIGNAL" and _tp1 and _sl:
         open_signal_evals.append({
             "id": signal["id"],
             "symbol": symbol,
             "type": signal["type"],
-            "tp1": signal["tp1"],
-            "sl": signal["sl"],
+            "tp1": _tp1,
+            "sl": _sl,
             "strategy_id": signal.get("strategy_id", "unknown"),
         })
 

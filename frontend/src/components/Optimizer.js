@@ -60,7 +60,7 @@ export default function Optimizer({ onClose }) {
   const [selStrategy, setSelStrategy] = useState('');
   const [selCoins, setSelCoins] = useState([]);
   const [days, setDays] = useState(3);
-  const [timeframe, setTimeframe] = useState('5m');
+  const [timeframe, setTimeframe] = useState('1m');
   const [objective, setObjective] = useState('combo');
   const [iterations, setIterations] = useState(40);
   const [minTrades, setMinTrades] = useState(10);
