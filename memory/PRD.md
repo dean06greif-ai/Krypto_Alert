@@ -89,3 +89,8 @@ Getestet: testing_agent iteration_1.json – Backend 12/12, Frontend alle Flows 
 - P2: Warnhinweis im Kapital-Modal, wenn offenes Exposure > neues Limit
 - P2: Coin-Override-Marker auch in Strategie-Tabs/AutoTrade-Modal anzeigen; Button zum Entfernen einzelner Coin-Overrides
 - P2: server.py (2200+ Zeilen) in Router-Module aufteilen; Hydration-Warning `<span>` in `<option>` (Optimizer-Dropdown, vorbestehend)
+
+## Bugfixes (Juni 2026 – Runde 2)
+- Tages-Winrate ("HEUTE aktive Strategie") gefixt: process_signal + Startup-Rehydration lasen signal['tp1']/['sl'], Scanner liefert aber take_profit_1/stop_loss -> open_signal_evals blieb leer, nie win/loss gesetzt. Fix: Fallback auf beide Key-Varianten (server.py). E2E verifiziert (iteration_2.json, 100% PASS).
+- Optimizer Timeframe-Default von 5m auf 1m geändert (Optimizer.js).
+- Strategie-Review durchgeführt: Empfehlung an User – "Stochastic Reversal" redundant zu "Smart Money RSI Reversal" (gleiche Signalklasse Oszillator-Extrem-Reversal, Stochastik auf 1m nur schnellere/rauschigere Variante); Rest sinnvoll differenziert. Hinweis: Stochastic/VWAP-MR haben Beschreibung "empfohlen 5m-15m" aber Default-TF 1m.
