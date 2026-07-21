@@ -1,5 +1,6 @@
 """Stochastic Reversal: %K/%D-Cross im Extrem + Kerzen- und Volumen-Bestätigung."""
 from typing import Dict, List, Optional
+import numpy as np
 from strategies.base_strategy import BaseStrategy
 
 
@@ -9,7 +10,7 @@ class StochasticReversalStrategy(BaseStrategy):
     STRATEGY_DESCRIPTION = ("Stochastik %K kreuzt %D im überverkauften/überkauften Bereich, "
                             "Heikin-Ashi Bestätigung + Trend-Sperre gegen starke Impulse. "
                             "Empfohlen auf 5m-15m.")
-    STRATEGY_TIMEFRAME = "1m"
+    STRATEGY_TIMEFRAME = "5m"
 
     DEFAULT_PARAMS = {
         "stoch_k_period": {"value": 14, "min": 5, "max": 30, "step": 1,
@@ -124,3 +125,50 @@ class StochasticReversalStrategy(BaseStrategy):
             "long_count": long_count, "short_count": short_count, "rules_total": len(rules),
             "signal_type": signal_type, "is_pre_signal": False, "levels": levels,
         }
+
+    # ----------------------- Vectorized Fast-Path -----------------------
+    @staticmethod
+    def vectorized_signals(fs, params: Dict) -> Optional[Dict]:
+        """Stoch-Cross im Extrem + Trend-Sperre + HA + Volumen -- vektorisiert."""
+        kp = int(params["stoch_k_period"])
+        dp = int(params["stoch_d_period"])
+        ema_p = int(params["ema_trend_period"])
+        need = max(kp + dp, ema_p) + 10
+
+        d = {"stoch_k_period": kp, "stoch_d_period": dp, "volume_sma_period": 20}
+        close = fs.close
+        n = fs.n
+        k = fs.get("stoch_k", d)
+        dd = fs.get("stoch_d", d)
+        ema = fs.get("ema_slow", {"ema_slow_period": ema_p})
+        rel_vol = fs.get("rel_volume", d)
+        ha = fs.get("ha_color", d)
+
+        k_prev = np.concatenate([[np.nan], k[:-1]])
+        d_prev = np.concatenate([[np.nan], dd[:-1]])
+        ema_prev = np.concatenate([np.full(5, np.nan), ema[:-5]])
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            cross_up = (k_prev <= d_prev) & (k > dd)
+            cross_dn = (k_prev >= d_prev) & (k < dd)
+            prev_ok = ~np.isnan(k_prev) & ~np.isnan(d_prev)
+            cross_up &= prev_ok
+            cross_dn &= prev_ok
+            os_zone = np.minimum(k_prev, k) <= float(params["oversold"])
+            ob_zone = np.maximum(k_prev, k) >= float(params["overbought"])
+            slope = np.where((~np.isnan(ema_prev)) & (ema_prev != 0),
+                             (ema - ema_prev) / ema_prev, 0.0)
+            thr = float(params["trend_block_pct"]) / 100.0
+            strong_bull = (close > ema) & (slope > thr)
+            strong_bear = (close < ema) & (slope < -thr)
+            ha_green = ha >= 0.5
+            vol_ok = rel_vol >= float(params["rel_vol_min"])
+
+            long_ok = cross_up & os_zone & ~strong_bear & ha_green & vol_ok
+            short_ok = cross_dn & ob_zone & ~strong_bull & ~ha_green & vol_ok
+
+        valid = ~np.isnan(k) & ~np.isnan(dd) & prev_ok & ~np.isnan(ema)
+        long_ok &= valid
+        short_ok &= valid
+        return {"long": long_ok, "short": short_ok,
+                "warmup": need, "rules_total": 5, "rsi": None}
