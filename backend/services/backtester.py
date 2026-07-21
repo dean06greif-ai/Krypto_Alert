@@ -1,0 +1,603 @@
+"""
+Strategie-Backtester auf historischen 1-Minuten-Daten (Binance Public API).
+Simuliert die gleiche Trade-Logik wie der Live/Paper-AutoTrader:
+Struktur/Fixed-SL, TP1-Teilverkauf, Break-Even (konfigurierbar), ATR-Trailing,
+Gewinnsicherung, Zeitfenster und Gebühren.
+"""
+import asyncio
+import gc
+import logging
+import time
+import uuid
+from datetime import datetime, timezone
+from typing import Callable, Dict, List, Optional
+from zoneinfo import ZoneInfo
+
+import aiohttp
+
+from services.technical_indicators import TechnicalIndicators
+from services.timeframes import TIMEFRAMES, aggregate_candles
+
+logger = logging.getLogger(__name__)
+
+TRADE_CFG_KEYS = ("max_capital", "leverage", "fee_percent", "tp1_crv", "tp_full_crv",
+                  "tp1_close_percent", "sl_mode", "sl_fixed_percent", "sl_lookback",
+                  "sl_ticks", "breakeven_enabled", "trail_after_tp1", "trail_atr_mult",
+                  "profit_secure_enabled", "profit_secure_trigger_pct", "profit_lock_pct",
+                  "trade_pre_signals", "be_mode", "be_trigger_crv", "be_trigger_profit_pct",
+                  "be_smart_lookback", "require_all_rules", "sessions")
+
+JOBS: Dict[str, Dict] = {}
+
+BINANCE_URL = "https://data-api.binance.vision/api/v3/klines"
+WARMUP = 80
+WINDOW = 260
+BERLIN = ZoneInfo("Europe/Berlin")
+
+
+class JobCancelled(Exception):
+    pass
+
+
+async def fetch_history(session: aiohttp.ClientSession, symbol: str, days: int,
+                        job: Dict = None) -> List[Dict]:
+    """Lädt 1m-Kerzen (nutzt Hybrid-Cache; siehe services.candle_cache)."""
+    from services import candle_cache
+    return await candle_cache.get_candles(session, symbol, days, job=job)
+
+
+# ---------------- Zeitfenster ----------------
+def _parse_hhmm(s: str) -> Optional[int]:
+    try:
+        p = str(s).strip().split(":")
+        return int(p[0]) * 60 + (int(p[1]) if len(p) > 1 else 0)
+    except (ValueError, IndexError):
+        return None
+
+
+def parse_sessions(sessions) -> List[tuple]:
+    """Akzeptiert Liste [{start,end,enabled}] ODER String '09:00-12:00,15:00-22:00'."""
+    spans = []
+    if not sessions:
+        return spans
+    if isinstance(sessions, str):
+        items = [x for x in sessions.split(",") if "-" in x]
+        sessions = [{"start": x.split("-")[0], "end": x.split("-")[1]} for x in items]
+    for s in sessions:
+        if isinstance(s, dict):
+            if s.get("enabled") is False:
+                continue
+            a = _parse_hhmm(s.get("start", "00:00"))
+            b = _parse_hhmm(s.get("end", "23:59"))
+            if a is not None and b is not None and a != b:
+                spans.append((a, b))
+    return spans
+
+
+def make_session_checker(sessions) -> Optional[Callable[[int], bool]]:
+    """None => 24/7. Sonst Checker: Kerzen-Zeitstempel in Berlin-Zeit im Fenster?"""
+    spans = parse_sessions(sessions)
+    if not spans:
+        return None
+    offset_cache: Dict[int, int] = {}
+
+    def in_session(ts_ms: int) -> bool:
+        day = ts_ms // 86400000
+        off = offset_cache.get(day)
+        if off is None:
+            off = int(datetime.fromtimestamp(ts_ms / 1000, tz=BERLIN)
+                      .utcoffset().total_seconds() // 60)
+            offset_cache[day] = off
+        m = int((ts_ms // 60000 + off) % 1440)
+        for a, b in spans:
+            if a < b:
+                if a <= m < b:
+                    return True
+            else:  # über Mitternacht
+                if m >= a or m < b:
+                    return True
+        return False
+
+    return in_session
+
+
+def compute_levels(cfg: Dict, side: str, entry: float, candles: List[Dict]):
+    ti = TechnicalIndicators
+    atr = 0.0
+    atr_period = int(cfg.get("atr_period", 14))
+    if len(candles) > atr_period + 1:
+        atr_arr = ti.calculate_atr(candles, atr_period)
+        atr = atr_arr[-1] or 0.0
+    buffer = atr * float(cfg.get("atr_sl_multiplier", 1.2))
+    mode = cfg.get("sl_mode", "structure")
+    if mode == "atr" and atr > 0:
+        sl = entry - buffer if side == "LONG" else entry + buffer
+    elif mode == "structure" and candles:
+        lookback = int(cfg.get("sl_lookback", 10))
+        struct_buffer = buffer if buffer > 0 else int(cfg.get("sl_ticks", 4)) * entry * 0.0001
+        if side == "LONG":
+            sl = min(c["low"] for c in candles[-lookback:]) - struct_buffer
+        else:
+            sl = max(c["high"] for c in candles[-lookback:]) + struct_buffer
+    else:
+        pct = float(cfg.get("sl_fixed_percent", 1.0)) / 100
+        sl = entry * (1 - pct) if side == "LONG" else entry * (1 + pct)
+    risk = abs(entry - sl)
+    if risk <= 0:
+        risk = entry * 0.003
+        sl = entry - risk if side == "LONG" else entry + risk
+    min_risk_abs = entry * float(cfg.get("min_risk_percent", 0.25)) / 100
+    if risk < min_risk_abs:
+        risk = min_risk_abs
+        sl = entry - risk if side == "LONG" else entry + risk
+    if side == "LONG":
+        tp1 = entry + risk * float(cfg.get("tp1_crv", 1.0))
+        tpf = entry + risk * float(cfg.get("tp_full_crv", 2.0))
+    else:
+        tp1 = entry - risk * float(cfg.get("tp1_crv", 1.0))
+        tpf = entry - risk * float(cfg.get("tp_full_crv", 2.0))
+    return sl, tp1, tpf, risk, atr
+
+
+def resolve_be_mode(cfg: Dict) -> str:
+    mode = cfg.get("be_mode")
+    if mode in ("off", "tp1", "crv", "profit_pct", "smart"):
+        # Legacy-Schalter hat Vorrang, wenn explizit deaktiviert
+        if mode == "tp1" and cfg.get("breakeven_enabled") is False:
+            return "off"
+        return mode
+    return "tp1" if cfg.get("breakeven_enabled", True) else "off"
+
+
+def simulate_pair(strategy, candles: List[Dict], symbol: str, settings: Dict,
+                  cfg: Dict, progress_cb=None, collect_trades: bool = False,
+                  should_stop: Callable[[], bool] = None,
+                  signal_provider: Callable[[int], Optional[Dict]] = None) -> Dict:
+    """Sync CPU-bound simulation for one (strategy, symbol) pair."""
+    fee_pct = float(cfg.get("fee_percent", 0.06)) / 100
+    capital = float(cfg.get("max_capital", 100.0))
+    leverage = float(cfg.get("leverage", 10))
+    tp1_close = float(cfg.get("tp1_close_percent", 50)) / 100
+    be_mode = resolve_be_mode(cfg)
+    be_trigger_crv = float(cfg.get("be_trigger_crv", 1.0) or 1.0)
+    be_trigger_profit = float(cfg.get("be_trigger_profit_pct", 30.0) or 30.0)
+    be_smart_lookback = int(cfg.get("be_smart_lookback", 10) or 10)
+    trail_enabled = bool(cfg.get("trail_after_tp1", True))
+    trail_mult = float(cfg.get("trail_atr_mult", 1.5))
+    ps_enabled = bool(cfg.get("profit_secure_enabled", False))
+    ps_trigger = float(cfg.get("profit_secure_trigger_pct", 30.0))
+    ps_lock = max(0.0, min(float(cfg.get("profit_lock_pct", 50.0)), 95.0)) / 100
+    require_all = bool(cfg.get("require_all_rules", False))
+    session_check = make_session_checker(cfg.get("sessions"))
+
+    trades: List[Dict] = []
+    open_t: Optional[Dict] = None
+    n = len(candles)
+
+    def close_trade(t, price, result, ts):
+        fee = t["qty_rem"] * price * fee_pct
+        t["pnl"] += (price - t["entry"]) * t["qty_rem"] if t["side"] == "LONG" \
+            else (t["entry"] - price) * t["qty_rem"]
+        t["pnl"] -= fee
+        t["fees"] += fee
+        t["exit"] = price
+        t["result"] = result
+        t["closed_ts"] = ts
+        t["qty_rem"] = 0
+        trades.append(t)
+
+    def be_price(t):
+        return t["entry"] * (1 + 2 * fee_pct) if t["side"] == "LONG" \
+            else t["entry"] * (1 - 2 * fee_pct)
+
+    def move_be(t, new_sl):
+        if (t["side"] == "LONG" and new_sl > t["sl"]) or \
+           (t["side"] == "SHORT" and new_sl < t["sl"]):
+            t["sl"] = new_sl
+        t["be_moved"] = True
+
+    warmup = WARMUP if n >= WARMUP * 2 else max(20, n // 3)
+    for i in range(warmup, n):
+        c = candles[i]
+        if i % 400 == 0:
+            if progress_cb:
+                progress_cb(i, n)
+            if should_stop and should_stop():
+                raise JobCancelled()
+
+        # ---- manage open trade against this candle ----
+        if open_t is not None:
+            t = open_t
+            side = t["side"]
+            lo, hi, close_p = c["low"], c["high"], c["close"]
+
+            def hit(level, direction):
+                if direction == "up":
+                    return hi >= level
+                return lo <= level
+
+            sl_hit = hit(t["sl"], "down" if side == "LONG" else "up")
+            tpf_hit = hit(t["tpf"], "up" if side == "LONG" else "down")
+            tp1_hit = (not t["tp1_done"]) and hit(t["tp1"], "up" if side == "LONG" else "down")
+
+            # conservative: SL first when both touched in same candle
+            if sl_hit:
+                is_be = t["be_moved"]
+                res = "breakeven" if is_be else ("win" if t["tp1_done"] else "loss")
+                close_trade(t, t["sl"], res, c["timestamp"])
+                open_t = None
+            else:
+                if tp1_hit and not tpf_hit:
+                    cq = t["qty"] * tp1_close
+                    fee = cq * t["tp1"] * fee_pct
+                    t["pnl"] += ((t["tp1"] - t["entry"]) * cq if side == "LONG"
+                                 else (t["entry"] - t["tp1"]) * cq) - fee
+                    t["fees"] += fee
+                    t["qty_rem"] = t["qty"] - cq
+                    t["tp1_done"] = True
+                    if be_mode == "tp1":
+                        move_be(t, be_price(t))
+                    elif be_mode == "smart":
+                        seg = candles[max(0, i - be_smart_lookback):i]
+                        if seg:
+                            new_sl = min(x["low"] for x in seg) if side == "LONG" \
+                                else max(x["high"] for x in seg)
+                            move_be(t, new_sl)
+                if tpf_hit and open_t is not None:
+                    close_trade(t, t["tpf"], "win", c["timestamp"])
+                    open_t = None
+                elif open_t is not None:
+                    # Break-Even bei frei wählbarem CRV / Gewinn-%
+                    if not t["be_moved"] and be_mode in ("crv", "profit_pct"):
+                        trigger = False
+                        if be_mode == "crv":
+                            target = t["entry"] + t["risk"] * be_trigger_crv if side == "LONG" \
+                                else t["entry"] - t["risk"] * be_trigger_crv
+                            trigger = hi >= target if side == "LONG" else lo <= target
+                        else:
+                            unreal = (close_p - t["entry"]) * t["qty_rem"] if side == "LONG" \
+                                else (t["entry"] - close_p) * t["qty_rem"]
+                            trigger = capital > 0 and unreal / capital * 100 >= be_trigger_profit > 0
+                        if trigger:
+                            move_be(t, be_price(t))
+                    # Gewinnsicherung (auf Schlusskurs)
+                    if ps_enabled and not t["secured"] and capital > 0:
+                        unreal = (close_p - t["entry"]) * t["qty_rem"] if side == "LONG" \
+                            else (t["entry"] - close_p) * t["qty_rem"]
+                        if unreal / capital * 100 >= ps_trigger > 0:
+                            new_sl = t["entry"] + (close_p - t["entry"]) * ps_lock if side == "LONG" \
+                                else t["entry"] - (t["entry"] - close_p) * ps_lock
+                            if (side == "LONG" and new_sl > t["sl"]) or \
+                               (side == "SHORT" and new_sl < t["sl"]):
+                                t["sl"] = new_sl
+                            t["secured"] = True
+                    # ATR-Trailing nach TP1
+                    if trail_enabled and t["tp1_done"] and t["atr"] > 0:
+                        new_sl = close_p - t["atr"] * trail_mult if side == "LONG" \
+                            else close_p + t["atr"] * trail_mult
+                        if (side == "LONG" and new_sl > t["sl"]) or \
+                           (side == "SHORT" and new_sl < t["sl"]):
+                            t["sl"] = new_sl
+
+        # ---- check for new signal on this closed candle ----
+        if open_t is None:
+            if session_check and not session_check(c["timestamp"]):
+                continue
+            if signal_provider is not None:
+                sig = signal_provider(i)
+            else:
+                window = candles[max(0, i - WINDOW):i + 1]
+                try:
+                    sig = strategy.check_signal(window, symbol, settings)
+                except Exception:
+                    sig = None
+            if sig and sig.get("type") in ("LONG", "SHORT"):
+                if sig.get("signal_class") == "PRE_SIGNAL" and not cfg.get("trade_pre_signals"):
+                    continue
+                if require_all and sig.get("rules_total") \
+                        and (sig.get("rules_met_count") or 0) < sig["rules_total"]:
+                    continue
+                side = sig["type"]
+                entry = float(sig.get("entry_price") or c["close"])
+                if entry <= 0:
+                    continue
+                window = candles[max(0, i - WINDOW):i + 1]
+                sl, tp1, tpf, risk, atr = compute_levels(cfg, side, entry, window)
+                qty = capital * leverage / entry
+                entry_fee = entry * qty * fee_pct
+                open_t = {
+                    "side": side, "entry": entry, "sl": sl, "tp1": tp1, "tpf": tpf,
+                    "qty": qty, "qty_rem": qty, "atr": atr,
+                    "pnl": -entry_fee, "fees": entry_fee,
+                    "tp1_done": False, "be_moved": False, "secured": False,
+                    "opened_ts": c["timestamp"],
+                    "sl_init": sl, "risk": risk,
+                    "sig_rsi": sig.get("rsi"), "sig_ema_fast": sig.get("ema_fast"),
+                    "sig_ema_slow": sig.get("ema_slow"), "sig_crv": sig.get("crv"),
+                    "sig_rules_met": sig.get("rules_met_count"),
+                    "sig_rules_total": sig.get("rules_total"),
+                    "c_open": c["open"], "c_high": c["high"], "c_low": c["low"],
+                    "c_close": c["close"], "c_volume": c.get("volume", 0),
+                }
+
+    # ---- metrics ----
+    # Winrate basiert auf tatsächlichem PnL (nicht auf SL/TP-Label):
+    # Ein Trade der TP1 realisiert und danach am BE-Stop schließt, ist trotzdem profitabel.
+    eps = 1e-6
+    wins = sum(1 for t in trades if t["pnl"] > eps)
+    losses = sum(1 for t in trades if t["pnl"] < -eps)
+    breakevens = sum(1 for t in trades if -eps <= t["pnl"] <= eps)
+    decided = wins + losses
+    pnl_total = sum(t["pnl"] for t in trades)
+    fees_total = sum(t["fees"] for t in trades)
+    gross_win = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+    gross_loss = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
+    equity, peak, max_dd = 0.0, 0.0, 0.0
+    for t in trades:
+        equity += t["pnl"]
+        peak = max(peak, equity)
+        max_dd = max(max_dd, peak - equity)
+    durations = [(t["closed_ts"] - t["opened_ts"]) / 60000 for t in trades
+                 if t.get("closed_ts") and t.get("opened_ts")]
+
+    def _iso(ts):
+        return datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat() if ts else ""
+
+    all_trades = []
+    if collect_trades:
+        for t in trades:
+            all_trades.append({
+                "opened": _iso(t.get("opened_ts")), "closed": _iso(t.get("closed_ts")),
+                "side": t["side"], "entry": t["entry"], "exit": t.get("exit"),
+                "sl_initial": t.get("sl_init"), "sl_final": t.get("sl"),
+                "tp1": t["tp1"], "tp_full": t["tpf"], "risk": round(t.get("risk", 0), 8),
+                "result": t.get("result"), "pnl": round(t["pnl"], 4),
+                "fees": round(t["fees"], 4), "qty": round(t["qty"], 6),
+                "tp1_done": t["tp1_done"], "breakeven_moved": t["be_moved"],
+                "profit_secured": t["secured"],
+                "duration_min": round((t["closed_ts"] - t["opened_ts"]) / 60000, 1)
+                if t.get("closed_ts") else None,
+                "atr_entry": round(t.get("atr") or 0, 8),
+                "rsi_entry": t.get("sig_rsi"), "ema_fast_entry": t.get("sig_ema_fast"),
+                "ema_slow_entry": t.get("sig_ema_slow"), "crv_signal": t.get("sig_crv"),
+                "rules_met": t.get("sig_rules_met"), "rules_total": t.get("sig_rules_total"),
+                "entry_candle_open": t.get("c_open"), "entry_candle_high": t.get("c_high"),
+                "entry_candle_low": t.get("c_low"), "entry_candle_close": t.get("c_close"),
+                "entry_candle_volume": t.get("c_volume"),
+            })
+
+    return {
+        "all_trades": all_trades,
+        "trades": len(trades),
+        "wins": wins, "losses": losses, "breakevens": breakevens,
+        "secured": sum(1 for t in trades if t["secured"]),
+        "be_moved": sum(1 for t in trades if t["be_moved"]),
+        "win_rate": round(wins / decided * 100, 1) if decided else 0.0,
+        "pnl": round(pnl_total, 2),
+        "fees": round(fees_total, 2),
+        "avg_pnl": round(pnl_total / len(trades), 3) if trades else 0.0,
+        "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else (round(gross_win, 2) if gross_win else 0.0),
+        "max_drawdown": round(max_dd, 2),
+        "avg_duration_min": round(sum(durations) / len(durations), 1) if durations else 0.0,
+        "long_trades": sum(1 for t in trades if t["side"] == "LONG"),
+        "short_trades": sum(1 for t in trades if t["side"] == "SHORT"),
+        "last_trades": [
+            {"side": t["side"], "entry": round(t["entry"], 6), "exit": round(t.get("exit", 0), 6),
+             "result": t["result"], "pnl": round(t["pnl"], 3),
+             "opened": datetime.fromtimestamp(t["opened_ts"] / 1000, tz=timezone.utc).isoformat(),
+             } for t in trades[-15:]],
+    }
+
+
+def create_job(params: Dict) -> str:
+    job_id = uuid.uuid4().hex[:12]
+    # Kerzendaten nur für den aktuellsten Job im Speicher halten
+    for j in JOBS.values():
+        j.pop("export_candles", None)
+    JOBS[job_id] = {"id": job_id, "status": "running", "progress": 0,
+                    "phase": "Daten laden", "params": params, "cancel": False,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "result": None, "error": None}
+    if len(JOBS) > 10:
+        for k in list(JOBS.keys())[:-10]:
+            JOBS.pop(k, None)
+    return job_id
+
+
+def resolve_timeframe(strat, sid: str, scfg: Dict, settings: Dict, default_tf: str = None) -> str:
+    tf = (scfg.get("timeframe")
+          or default_tf
+          or settings.get("strategy_timeframes", {}).get(sid)
+          or getattr(strat, "STRATEGY_TIMEFRAME", "1m"))
+    return tf if tf in TIMEFRAMES else "1m"
+
+
+MAX_EXPORT_CANDLES = 400000
+MAX_EXPORT_TRADES = 100000
+
+
+async def run_backtest(job_id: str, strategy_ids: List[str], symbols: List[str],
+                       days: int, cfg: Dict, registry, settings: Dict, db=None,
+                       strategy_configs: Dict = None, default_timeframe: str = None):
+    job = JOBS[job_id]
+    strategy_configs = strategy_configs or {}
+
+    def cancelled():
+        return bool(job.get("cancel"))
+
+    try:
+        from services import fast_sim
+
+        total_units = max(len(symbols) * (1 + len(strategy_ids)), 1)
+        done_units = 0
+        per_pair = []
+        export_trades: List[Dict] = []
+        export_candles: Dict[str, List[Dict]] = {}
+        strat_tf: Dict[str, str] = {}
+
+        async with aiohttp.ClientSession() as session:
+            for sym in symbols:
+                if cancelled():
+                    raise JobCancelled()
+                job["phase"] = f"Lade Daten: {sym}"
+                history = await fetch_history(session, sym, days, job=job)
+                done_units += 1
+                job["progress"] = round(done_units / total_units * 100)
+                if len(history) <= 100:
+                    done_units += len(strategy_ids)
+                    job["progress"] = round(done_units / total_units * 100)
+                    continue
+
+                tf_cache: Dict[str, List[Dict]] = {}
+                fs_cache: Dict[str, "fast_sim.FastSeries"] = {}
+                for sid in strategy_ids:
+                    if cancelled():
+                        raise JobCancelled()
+                    strat = registry.get(sid)
+                    if not strat:
+                        done_units += 1
+                        continue
+                    scfg = strategy_configs.get(sid) or {}
+                    tf = resolve_timeframe(strat, sid, scfg, settings, default_timeframe)
+                    strat_tf[sid] = tf
+                    if tf not in tf_cache:
+                        tf_cache[tf] = aggregate_candles(history, tf)
+                    candles = tf_cache[tf]
+                    # Pro-Strategie Trade-Config (TP/SL, Zeitfenster etc.) über Basis-Config
+                    pair_cfg = dict(cfg)
+                    for ck in TRADE_CFG_KEYS:
+                        if scfg.get(ck) is not None:
+                            pair_cfg[ck] = scfg[ck]
+                    # Pro-Strategie Indikator-Parameter überschreiben
+                    eff_settings = settings
+                    if scfg.get("params"):
+                        sp = dict(settings.get("strategy_params", {}))
+                        sp[sid] = {**sp.get(sid, {}), **scfg["params"]}
+                        eff_settings = {**settings, "strategy_params": sp}
+                    # Schneller Pfad für Custom-Strategien
+                    provider = None
+                    if getattr(strat, "IS_CUSTOM", False):
+                        try:
+                            if tf not in fs_cache:
+                                fs_cache[tf] = fast_sim.FastSeries(candles)
+                            provider = fast_sim.build_signal_provider(strat.definition,
+                                                                      fs_cache[tf])
+                        except Exception as e:
+                            logger.warning(f"fast_sim fallback {sid}: {e}")
+                            provider = None
+                    else:
+                        # Fast-Path für Built-ins (opt-in via vectorized_signals);
+                        # kein Fehler -> automatischer Legacy-Fallback.
+                        try:
+                            if tf not in fs_cache:
+                                fs_cache[tf] = fast_sim.FastSeries(candles)
+                            provider = fast_sim.build_builtin_signal_provider(
+                                strat, fs_cache[tf], eff_settings, sym)
+                        except Exception as e:
+                            logger.warning(f"builtin fast_sim fallback {sid}: {e}")
+                            provider = None
+                    job["phase"] = f"Simuliere {getattr(strat, 'STRATEGY_NAME', sid)} auf {sym} ({tf})"
+                    base = round(done_units / total_units * 100)
+                    nxt = round((done_units + 1) / total_units * 100)
+
+                    def cb(i, m, _base=base, _next=nxt):
+                        job["progress"] = _base + round((i / m) * (_next - _base))
+
+                    res = await asyncio.to_thread(simulate_pair, strat, candles, sym,
+                                                  eff_settings, pair_cfg, cb, True,
+                                                  cancelled, provider)
+                    all_trades = res.pop("all_trades", [])
+                    if len(export_trades) < MAX_EXPORT_TRADES:
+                        for t in all_trades:
+                            export_trades.append({"strategy_id": sid,
+                                                  "strategy_name": getattr(strat, "STRATEGY_NAME", sid),
+                                                  "symbol": sym, "timeframe": tf, **t})
+                    per_pair.append({"strategy_id": sid,
+                                     "strategy_name": getattr(strat, "STRATEGY_NAME", sid),
+                                     "symbol": sym, "timeframe": tf,
+                                     "candles": len(candles), **res})
+                    done_units += 1
+                    job["progress"] = round(done_units / total_units * 100)
+
+                # Kerzen-Export (mit Limit, damit große Läufe nicht am RAM sterben)
+                stored = sum(len(v) for v in export_candles.values())
+                for tf, cds in tf_cache.items():
+                    if stored + len(cds) <= MAX_EXPORT_CANDLES:
+                        export_candles[f"{sym}|{tf}"] = cds
+                        stored += len(cds)
+                del history, tf_cache, fs_cache
+                gc.collect()
+
+        # aggregate per strategy
+        per_strategy: Dict[str, Dict] = {}
+        for r in per_pair:
+            agg = per_strategy.setdefault(r["strategy_id"], {
+                "strategy_id": r["strategy_id"], "strategy_name": r["strategy_name"],
+                "trades": 0, "wins": 0, "losses": 0, "breakevens": 0, "secured": 0,
+                "pnl": 0.0, "fees": 0.0, "max_drawdown": 0.0, "symbols": 0,
+                "_dur": [],
+            })
+            agg["trades"] += r["trades"]
+            agg["wins"] += r["wins"]
+            agg["losses"] += r["losses"]
+            agg["breakevens"] += r["breakevens"]
+            agg["secured"] += r.get("secured", 0)
+            agg["pnl"] = round(agg["pnl"] + r["pnl"], 2)
+            agg["fees"] = round(agg["fees"] + r["fees"], 2)
+            agg["max_drawdown"] = round(agg["max_drawdown"] + r["max_drawdown"], 2)
+            agg["symbols"] += 1
+            if r["trades"]:
+                agg["_dur"].append(r["avg_duration_min"])
+        for agg in per_strategy.values():
+            d = agg["wins"] + agg["losses"]
+            agg["win_rate"] = round(agg["wins"] / d * 100, 1) if d else 0.0
+            agg["avg_pnl"] = round(agg["pnl"] / agg["trades"], 3) if agg["trades"] else 0.0
+            agg["avg_duration_min"] = round(sum(agg["_dur"]) / len(agg["_dur"]), 1) if agg["_dur"] else 0.0
+            agg["timeframe"] = strat_tf.get(agg["strategy_id"], "1m")
+            agg.pop("_dur", None)
+
+        best_per_symbol = {}
+        for r in per_pair:
+            cur = best_per_symbol.get(r["symbol"])
+            if cur is None or r["pnl"] > cur["pnl"]:
+                best_per_symbol[r["symbol"]] = {"strategy_id": r["strategy_id"],
+                                                "strategy_name": r["strategy_name"],
+                                                "pnl": r["pnl"], "win_rate": r["win_rate"]}
+
+        result = {
+            "days": days,
+            "config": {k: cfg.get(k) for k in ("max_capital", "leverage", "fee_percent",
+                                               "tp1_crv", "tp_full_crv", "sl_mode",
+                                               "profit_secure_enabled", "be_mode",
+                                               "require_all_rules")},
+            "strategy_timeframes": strat_tf,
+            "per_pair": per_pair,
+            "per_strategy": sorted(per_strategy.values(), key=lambda x: -x["pnl"]),
+            "best_per_symbol": best_per_symbol,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        }
+        job["result"] = result
+        job["export_trades"] = export_trades
+        job["export_candles"] = export_candles
+        job["status"] = "done"
+        job["progress"] = 100
+        job["phase"] = "Fertig"
+        if db is not None:
+            try:
+                await db.backtests.insert_one({"id": job_id, "params": job["params"],
+                                               "created_at": job["created_at"],
+                                               "result": result})
+                await db.backtest_trades.insert_one({"job_id": job_id,
+                                                     "created_at": job["created_at"],
+                                                     "rows": export_trades[:50000]})
+            except Exception as e:
+                logger.warning(f"backtest persist failed: {e}")
+    except JobCancelled:
+        job["status"] = "cancelled"
+        job["phase"] = "Abgebrochen"
+        job["error"] = None
+        logger.info(f"backtest {job_id} cancelled")
+    except Exception as e:
+        logger.exception("backtest failed")
+        job["status"] = "error"
+        job["error"] = str(e)[:300]
