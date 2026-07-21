@@ -69,3 +69,23 @@ Infra: Render Free (512MB/0.1 CPU) – prüfen ob Code oder Infra der Flaschenha
 - P2: Zeitfenster-Optimierung (beste Handelszeiten automatisch finden)
 - P2: server.py in Module aufteilen; gemeinsame Frontend-Konstanten (DAY_OPTIONS/BE_MODES) in shared Modul
 - P2: Kerzen-Cache: numpy-basierte Kompakt-Repräsentation (statt dicts) → ~6× weniger RAM, wichtig für Multi-Coin 360d-Läufe auf Render Free
+
+## Umgesetzt (Juni 2026 – Iteration "Kapital / Analyse / Optimizer-Scope")
+Original-Anforderung: (1) Kapital-Zuweisungs-Popup Live+Paper, (2) Analyse: %-PnL + doppelte Live/Paper-Tabs entfernen, (3) Optimizer-Übernahme wahlweise nur für optimierte Coins oder global.
+User-Entscheidungen: Limit-Änderung betrifft nur neue Trades; %-PnL bezogen auf Positionsgröße (entry×qty).
+
+1. **Kapital-Zuweisung** (live/paper getrennt, persistiert in settings `_id=capital_allocation`):
+   - Backend: `GET/POST /api/autotrade/capital` (POST admin), Modi full|fixed|percent, paper mit `base_balance` (Default 1000). Validierung (fixed>0, 1–100%, fixed ≤ Live-Gesamtguthaben).
+   - `AutoTradeManager.capital_allocation/allocated_capital/used_margin` (bitunix_trade.py); `on_signal` begrenzt Gesamt-Exposure: freies Zuweisungs-Kapital = allocated − Summe max_capital offener Trades des Modus; Trade wird geclampt oder abgelehnt (<5 USDT frei), Telegram-Reject + Event-Notiz.
+   - `GET /api/autotrade/balance` liefert jetzt `allocation` (live+paper: allocated/used_margin/free).
+   - Frontend: Balance-Widget klickbar → `CapitalModal.js` (Tabs LIVE/PAPER, 3 Modi, Live-Vorschau, Validierung); Widget zeigt "Bot X · frei Y" (`bw-alloc`).
+2. **Analyse**: `_enrich_trade` → `computed.pnl_pct` (PnL/(entry×qty)×100). Trade-Zeile zeigt (±x.xx%) farbcodiert + Meta-Feld "PnL %". Unterer trade-filter entfernt; oberer pnl-filter (Alle/Live/Paper) filtert global: Trades, PnL-Karten, Performance je Strategie (Titel zeigt · LIVE/· PAPER).
+3. **Optimizer-Scope**: `POST /api/optimizer/apply` type=params akzeptiert `scope=global|coins`+`symbols`. coins → Indikator-Params in `coin_params[sid][symbol]` (scanner nutzt sie bereits per get_params) + trade_params in `strategy_coin_configs` (mit `optimizer_applied`-Zeitstempel, mode/enabled unangetastet). `GET /api/optimizer/overrides/{sid}` (liest DB). Frontend: Auswahl-Dialog beim Übernehmen (nur optimierte Coins vs. alle Coins), lila Punkt-Marker auf Coin-Chips + Legende.
+
+Getestet: testing_agent iteration_1.json – Backend 12/12, Frontend alle Flows PASS. Regression-Suite: backend/tests/test_capital_and_optimizer.py.
+
+## Backlog / Nächste Schritte
+- P1: Live-Verifikation der Kapital-Limits mit echten Bitunix-Keys (hier nicht konfiguriert)
+- P2: Warnhinweis im Kapital-Modal, wenn offenes Exposure > neues Limit
+- P2: Coin-Override-Marker auch in Strategie-Tabs/AutoTrade-Modal anzeigen; Button zum Entfernen einzelner Coin-Overrides
+- P2: server.py (2200+ Zeilen) in Router-Module aufteilen; Hydration-Warning `<span>` in `<option>` (Optimizer-Dropdown, vorbestehend)

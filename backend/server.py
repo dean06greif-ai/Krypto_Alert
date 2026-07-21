@@ -1663,9 +1663,12 @@ async def optimizer_overrides(strategy_id: str):
                   scanner.settings.get("coin_params", {}).get(strategy_id, {}).items() if v}
     trade_syms = set()
     prefix = strategy_id + "_"
-    for key, cfg in autotrader.config.get("strategy_coin_configs", {}).items():
-        if key.startswith(prefix) and cfg.get("optimizer_applied"):
-            trade_syms.add(key[len(prefix):])
+    docs = await app.mongodb.strategy_coin_configs.find(
+        {"_id": {"$regex": f"^{prefix}"}}).to_list(500)
+    for d in docs:
+        cfg = d.get("config", {})
+        if cfg.get("optimizer_applied"):
+            trade_syms.add((d.get("_id") or "")[len(prefix):])
     return {"strategy_id": strategy_id, "symbols": sorted(param_syms | trade_syms)}
 
 
