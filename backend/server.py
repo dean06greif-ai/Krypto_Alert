@@ -1,9 +1,11 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 import os
+import json
 import logging
 import asyncio
 import uuid
@@ -20,6 +22,8 @@ from services.market_data import MarketDataFeed
 from services.strategy_scanner import StrategyScanner
 from services.telegram_bot import TelegramNotifier
 from services.bitunix_trade import BitunixTradeClient, AutoTradeManager, DEFAULT_COIN_CFG
+from services.ai_engine import ai_engine
+from services.news_feed import news_feed
 from strategies.registry import registry as strategy_registry
 
 logging.basicConfig(level=logging.INFO)
@@ -92,6 +96,18 @@ async def lifespan(app: FastAPI):
     for c in customs:
         c.pop("_id", None)
     strategy_registry.load_custom(customs)
+
+    # ---- KI Trader engine ----
+    ai_engine.setup(db=app.mongodb, scanner=scanner, signal_cb=emit_ai_signal,
+                    toggle_check=toggle_enabled, symbols=list(ALL_SYMBOLS))
+    await ai_engine.load_config()
+    _ens = list(scanner.settings.get("enabled_strategies") or [])
+    if "ai_trader" not in _ens and "ai_trader" not in scanner.settings.get("deleted_strategies", []):
+        _ens.append("ai_trader")
+        scanner.settings["enabled_strategies"] = _ens
+        await app.mongodb.settings.update_one(
+            {"_id": "scanner_settings"},
+            {"$set": {"enabled_strategies": _ens}}, upsert=True)
 
     # load autotrade config
     at_cfg = await app.mongodb.settings.find_one({"_id": "autotrade_config"})
@@ -211,6 +227,7 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(start_scanner())
     asyncio.create_task(daily_reset_loop())
+    asyncio.create_task(ai_engine.run_loop())
 
     # BUGFIX (win-rate): re-hydrate the in-memory open_signal_evals from today's
     # still-open signals so evaluate_open_signals() can mark them as win/loss
@@ -2732,6 +2749,70 @@ async def toggle_stop_signals(_: bool = Depends(require_admin)):
     await _persist_control_state()
     await broadcast({"type": "control_state", "data": dict(control_state)})
     return {"status": "success", "signals_paused": new_val}
+
+
+# ---------------- KI Trader (AI Trading Engine) ----------------
+async def emit_ai_signal(signal: Dict) -> bool:
+    """Route an AI decision through the normal signal/auto-trade pipeline."""
+    symbol = signal["symbol"]
+    candles = scanner.candle_buffer.get(symbol, [])
+    await process_signal(signal, candles)
+    if signal.get("id"):
+        await broadcast({"type": "signal", "data": _clean(signal)})
+        return True
+    return False
+
+
+@app.get("/api/ai/status")
+async def ai_status():
+    return ai_engine.status()
+
+
+@app.post("/api/ai/config")
+async def ai_config(updates: Dict, _: bool = Depends(require_admin)):
+    cfg = await ai_engine.update_config(updates)
+    return {"status": "success", "config": cfg}
+
+
+@app.post("/api/ai/analyze")
+async def ai_analyze_now(_: bool = Depends(require_admin)):
+    result = await ai_engine.run_analysis(manual=True)
+    return result
+
+
+@app.get("/api/ai/chat/history")
+async def ai_chat_history(limit: int = 80):
+    return {"messages": await ai_engine.chat_history(limit)}
+
+
+@app.post("/api/ai/chat")
+async def ai_chat(body: Dict, _: bool = Depends(require_admin)):
+    text = (body.get("message") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Nachricht fehlt")
+
+    async def gen():
+        try:
+            async for token in ai_engine.chat_stream(text):
+                yield f"data: {json.dumps({'t': token})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)[:200]})}\n\n"
+        yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+@app.delete("/api/ai/chat")
+async def ai_chat_clear(_: bool = Depends(require_admin)):
+    await ai_engine.clear_chat()
+    return {"status": "success"}
+
+
+@app.get("/api/ai/news")
+async def ai_news(limit: int = 20):
+    return {"headlines": await news_feed.get_headlines(limit)}
 
 
 if __name__ == "__main__":

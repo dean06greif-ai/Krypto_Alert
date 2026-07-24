@@ -11,6 +11,7 @@ import AlertModal from './components/AlertModal';
 import SettingsPanel from './components/SettingsPanel';
 import StrategyBuilder from './components/StrategyBuilder';
 import StrategyAutoTradeModal from './components/StrategyAutoTradeModal';
+import AITradingPanel from './components/AITradingPanel';
 import StrategyComparison from './components/StrategyComparison';
 import Backtester from './components/Backtester';
 import Optimizer from './components/Optimizer';
@@ -43,6 +44,7 @@ function App() {
   const [currentAlert, setCurrentAlert] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showStrategySettings, setShowStrategySettings] = useState(false);
+  const [showAIPanel, setShowAIPanel] = useState(false);
   const [showBuilder, setShowBuilder] = useState(false);
   const [strategyAutoTradeId, setStrategyAutoTradeId] = useState(null);
   const [showComparison, setShowComparison] = useState(false);
@@ -328,7 +330,10 @@ function App() {
             onSelect={setSelectedStrategy}
             onToggleSignals={(id) => requireAdmin(() => toggleSignals(id))}
             onManage={() => setShowBuilder(true)}
-            onEditParams={() => setShowStrategySettings(true)}
+            onEditParams={() => {
+              if (selectedStrategy === 'ai_trader') requireAdmin(() => setShowAIPanel(true));
+              else setShowStrategySettings(true);
+            }}
             onOpenStrategyAutoTrade={(id) => requireAdmin(() => setStrategyAutoTradeId(id))}
           />
           <ErrorBoundary onReset={() => setSelectedCoin('BTCUSDT')}>
@@ -381,6 +386,9 @@ function App() {
           controlState={controlState}
           onControlChanged={loadControlState}
         />
+      )}
+      {showAIPanel && (
+        <AITradingPanel onClose={() => setShowAIPanel(false)} />
       )}
       {showBuilder && (
         <StrategyBuilder
