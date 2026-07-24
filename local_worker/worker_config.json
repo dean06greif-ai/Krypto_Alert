@@ -1,0 +1,9 @@
+{
+  "server": "http://localhost:8001",
+  "token": "7801fdb4ce368cfbc4ef6ab818ed6000f94bb92b06f9fea8",
+  "data_dir": "/root/lw_data",
+  "name": "TestWorker",
+  "worker_id": "480299526ada4952",
+  "ram_limit_mb": 4096,
+  "max_parallel_jobs": 1
+}
