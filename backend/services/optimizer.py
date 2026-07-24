@@ -209,6 +209,24 @@ def _mk_strategy(definition: Dict) -> CustomStrategy:
     return CustomStrategy({**definition, "id": definition.get("id") or "opt_eval"})
 
 
+async def _evaluate_batch(pool, items, histories, fs_map, should_stop):
+    """items: Liste (strategy, settings, cfg) -> Metriken in gleicher Reihenfolge.
+    pool=None -> sequenziell (exakt wie bisher); sonst Prozess-Pool (Multi-Core)."""
+    if pool is None:
+        out = []
+        for st, s, c in items:
+            out.append(await asyncio.to_thread(_evaluate, st, histories, s, c,
+                                               fs_map, should_stop))
+        return out
+    from services import parallel_sim
+    loop = asyncio.get_running_loop()
+    futs = [loop.run_in_executor(pool, parallel_sim.evaluate_task,
+                                 parallel_sim.strategy_spec(st),
+                                 list(histories.keys()), s, c)
+            for st, s, c in items]
+    return list(await asyncio.gather(*futs))
+
+
 def _labels(definition: Dict) -> Dict:
     s = _mk_strategy(definition)
     return {"long": [s._auto_label(r) for r in definition.get("long_rules", [])],
@@ -251,7 +269,8 @@ def _tpe_suggest(space: Dict[str, List], history: List[Dict], rng: random.Random
 # ---------------- Modus 1: Parameter-Optimierung ----------------
 async def _optimize_params(job, strategy, histories, settings, cfg, objective,
                            min_trades, iterations, trade_space, progress,
-                           algorithm="random", fs_map=None, should_stop=None):
+                           algorithm="random", fs_map=None, should_stop=None,
+                           pool=None, workers=1):
     meta = strategy.DEFAULT_PARAMS or {}
     space = {}
     for k, mm in meta.items():
@@ -282,36 +301,45 @@ async def _optimize_params(job, strategy, histories, settings, cfg, objective,
             "score": round(best_score, 3), "is_baseline": True}
     results = []
     history = []
-    for it in range(iterations):
+    algo_tag = "Bayes" if algorithm == "bayes" else "Random"
+    it = 0
+    batch_size = max(1, int(workers))
+    while it < iterations:
         if should_stop and should_stop():
             raise JobCancelled()
-        if algorithm == "bayes":
-            flat = _tpe_suggest(flat_space, history, rng)
-        else:
-            flat = {k: rng.choice(v) for k, v in flat_space.items()}
-        p = {k[2:]: v for k, v in flat.items() if k.startswith("p:")}
-        tp = {k[2:]: v for k, v in flat.items() if k.startswith("t:")}
-        if isinstance(tp.get("tp_full_crv"), (int, float)) and isinstance(tp.get("tp1_crv"), (int, float)) \
-                and tp["tp_full_crv"] < tp["tp1_crv"]:
-            tp["tp_full_crv"], tp["tp1_crv"] = tp["tp1_crv"], tp["tp_full_crv"]
-        sid = strategy.STRATEGY_ID
-        sp = dict(settings.get("strategy_params", {}))
-        sp[sid] = {**sp.get(sid, {}), **p}
-        eff_settings = {**settings, "strategy_params": sp}
-        eff_cfg = {**cfg, **tp}
-        m = await asyncio.to_thread(_evaluate, strategy, histories, eff_settings, eff_cfg,
-                                    fs_map, should_stop)
-        sc = _score(m, objective, min_trades)
-        results.append({"params": p, "trade_params": tp, "metrics": m, "score": round(sc, 3)})
-        history.append({"flat": flat, "score": sc})
-        if sc > best_score:
-            best_score = sc
-            best = {"params": p, "trade_params": tp, "metrics": m,
-                    "score": round(sc, 3), "is_baseline": False}
-            job["best"] = best
-        algo_tag = "Bayes" if algorithm == "bayes" else "Random"
-        progress(it + 1, iterations,
-                 f"{algo_tag} · Kombination {it + 1}/{iterations} · Best Score {round(best_score, 2)}")
+        # Kandidaten für den Batch erzeugen (Random: identische Sequenz wie
+        # sequenziell; Bayes: Batch-Vorschläge aus der bisherigen Historie)
+        flats = []
+        for _ in range(min(batch_size, iterations - it)):
+            if algorithm == "bayes":
+                flats.append(_tpe_suggest(flat_space, history, rng))
+            else:
+                flats.append({k: rng.choice(v) for k, v in flat_space.items()})
+        items, metas = [], []
+        for flat in flats:
+            p = {k[2:]: v for k, v in flat.items() if k.startswith("p:")}
+            tp = {k[2:]: v for k, v in flat.items() if k.startswith("t:")}
+            if isinstance(tp.get("tp_full_crv"), (int, float)) and isinstance(tp.get("tp1_crv"), (int, float)) \
+                    and tp["tp_full_crv"] < tp["tp1_crv"]:
+                tp["tp_full_crv"], tp["tp1_crv"] = tp["tp1_crv"], tp["tp_full_crv"]
+            sid = strategy.STRATEGY_ID
+            sp = dict(settings.get("strategy_params", {}))
+            sp[sid] = {**sp.get(sid, {}), **p}
+            items.append((strategy, {**settings, "strategy_params": sp}, {**cfg, **tp}))
+            metas.append((flat, p, tp))
+        ms = await _evaluate_batch(pool, items, histories, fs_map, should_stop)
+        for (flat, p, tp), m in zip(metas, ms):
+            it += 1
+            sc = _score(m, objective, min_trades)
+            results.append({"params": p, "trade_params": tp, "metrics": m, "score": round(sc, 3)})
+            history.append({"flat": flat, "score": sc})
+            if sc > best_score:
+                best_score = sc
+                best = {"params": p, "trade_params": tp, "metrics": m,
+                        "score": round(sc, 3), "is_baseline": False}
+                job["best"] = best
+            progress(it, iterations,
+                     f"{algo_tag} · Kombination {it}/{iterations} · Best Score {round(best_score, 2)}")
     top = sorted(results, key=lambda x: -x["score"])[:10]
     return {"params": base_params, "metrics": baseline}, best, top
 
@@ -319,7 +347,7 @@ async def _optimize_params(job, strategy, histories, settings, cfg, objective,
 # ---------------- Modus 2: Strategie-Discovery ----------------
 async def _discover(job, histories, settings, cfg, objective, min_trades,
                     max_rules, allowed, progress, base_definition=None,
-                    fs_map=None, should_stop=None):
+                    fs_map=None, should_stop=None, pool=None, workers=1):
     cands = build_candidates(allowed)
     if not cands:
         raise RuntimeError("Keine Indikatoren ausgewählt")
@@ -345,23 +373,31 @@ async def _discover(job, histories, settings, cfg, objective, min_trades,
         job["best"] = {"rules": _labels(definition), "metrics": m0}
     total = len(cands) * max_rules
     done = 0
+    chunk_size = max(1, int(workers))
     for round_i in range(max_rules):
         round_best = None
-        for cand in cands:
-            done += 1
+        cand_pool = [c for c in cands if c["label"] not in used]
+        done += len(cands) - len(cand_pool)  # übersprungene wie bisher mitzählen
+        idx = 0
+        while idx < len(cand_pool):
             if should_stop and should_stop():
                 raise JobCancelled()
-            if cand["label"] in used:
-                continue
-            d = {**definition,
-                 "long_rules": definition["long_rules"] + [dict(cand["long"])],
-                 "short_rules": definition["short_rules"] + [dict(cand["short"])]}
-            m = await asyncio.to_thread(_evaluate, _mk_strategy(d), histories, settings,
-                                        cfg, fs_map, should_stop)
-            sc = _score(m, objective, min_trades)
-            progress(done, total, f"Runde {round_i + 1}: teste '{cand['label']}'")
-            if round_best is None or sc > round_best[0]:
-                round_best = (sc, cand, m)
+            chunk = cand_pool[idx: idx + chunk_size]
+            items = []
+            for cand in chunk:
+                d = {**definition,
+                     "long_rules": definition["long_rules"] + [dict(cand["long"])],
+                     "short_rules": definition["short_rules"] + [dict(cand["short"])]}
+                items.append((_mk_strategy(d), settings, cfg))
+            ms = await _evaluate_batch(pool, items, histories, fs_map, should_stop)
+            for cand, m in zip(chunk, ms):
+                done += 1
+                sc = _score(m, objective, min_trades)
+                progress(done, total, f"Runde {round_i + 1}: teste '{cand['label']}'")
+                # Reihenfolge = Kandidaten-Reihenfolge -> identische Greedy-Auswahl
+                if round_best is None or sc > round_best[0]:
+                    round_best = (sc, cand, m)
+            idx += len(chunk)
         if round_best is None:
             break
         sc, cand, m = round_best
@@ -419,7 +455,7 @@ async def _refine(job, definition, base_score, base_metrics, histories, settings
 async def _optimize_trade_settings(job, definition, base_score, base_metrics,
                                    histories, settings, cfg, objective, min_trades,
                                    iterations, trade_space, progress,
-                                   fs_map=None, should_stop=None):
+                                   fs_map=None, should_stop=None, pool=None, workers=1):
     """Random-Search über Trade-Einstellungen (TP/SL, BE, Gewinnsicherung,
     Hebel, Auto-Leverage, Zeitfenster) für eine (entdeckte) Strategie."""
     rng = random.Random()
@@ -427,20 +463,27 @@ async def _optimize_trade_settings(job, definition, base_score, base_metrics,
     best_tp: Dict = {}
     best_score = base_score
     best_m = base_metrics
-    for it in range(iterations):
+    it = 0
+    batch_size = max(1, int(workers))
+    while it < iterations:
         if should_stop and should_stop():
             raise JobCancelled()
-        tp = {k: rng.choice(v) for k, v in trade_space.items()}
-        if isinstance(tp.get("tp_full_crv"), (int, float)) and isinstance(tp.get("tp1_crv"), (int, float)) \
-                and tp["tp_full_crv"] < tp["tp1_crv"]:
-            tp["tp_full_crv"], tp["tp1_crv"] = tp["tp1_crv"], tp["tp_full_crv"]
-        m = await asyncio.to_thread(_evaluate, strategy, histories, settings,
-                                    {**cfg, **tp}, fs_map, should_stop)
-        sc = _score(m, objective, min_trades)
-        progress(it + 1, iterations, f"Trade-Einstellungen {it + 1}/{iterations}")
-        if sc > best_score:
-            best_score, best_tp, best_m = sc, tp, m
-            job["best"] = {"rules": _labels(definition), "metrics": m, "trade_params": tp}
+        tps = []
+        for _ in range(min(batch_size, iterations - it)):
+            tp = {k: rng.choice(v) for k, v in trade_space.items()}
+            if isinstance(tp.get("tp_full_crv"), (int, float)) and isinstance(tp.get("tp1_crv"), (int, float)) \
+                    and tp["tp_full_crv"] < tp["tp1_crv"]:
+                tp["tp_full_crv"], tp["tp1_crv"] = tp["tp1_crv"], tp["tp_full_crv"]
+            tps.append(tp)
+        items = [(strategy, settings, {**cfg, **tp}) for tp in tps]
+        ms = await _evaluate_batch(pool, items, histories, fs_map, should_stop)
+        for tp, m in zip(tps, ms):
+            it += 1
+            sc = _score(m, objective, min_trades)
+            progress(it, iterations, f"Trade-Einstellungen {it}/{iterations}")
+            if sc > best_score:
+                best_score, best_tp, best_m = sc, tp, m
+                job["best"] = {"rules": _labels(definition), "metrics": m, "trade_params": tp}
     return best_tp, best_m, best_score
 
 
@@ -452,6 +495,7 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
     def cancelled():
         return bool(job.get("cancel"))
 
+    pool = None
     try:
         mode = body.get("mode", "params")
         symbols = body.get("symbols") or ["BTCUSDT"]
@@ -511,6 +555,19 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
         # Vorberechnete Indikator-Serien für den schnellen Custom-Pfad
         fs_map = {sym: fast_sim.FastSeries(c) for sym, c in histories.items()}
 
+        # Multi-Core (nur lokaler Worker, SIM_WORKERS>1): Iterationen/Kandidaten
+        # werden in Batches über einen Prozess-Pool bewertet – gleiche
+        # _evaluate-Logik, Cloud bleibt unverändert sequenziell.
+        workers = 1
+        try:
+            from services import parallel_sim
+            workers = parallel_sim.workers_configured()
+            if workers > 1:
+                pool = parallel_sim.make_pool(histories, workers)
+        except Exception as e:
+            logger.warning(f"Multi-Core deaktiviert: {e}")
+            pool, workers = None, 1
+
         result = {"mode": mode, "timeframe": tf, "days": days,
                   "symbols": list(histories.keys()), "objective": objective,
                   "algorithm": algorithm, "min_trades": min_trades,
@@ -530,7 +587,7 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
             baseline, best, top = await _optimize_params(
                 job, strategy, histories, settings, cfg, objective, min_trades,
                 iterations, trade_space, prog,
-                algorithm, fs_map, cancelled)
+                algorithm, fs_map, cancelled, pool, workers)
             result.update({"strategy_id": sid,
                            "strategy_name": getattr(strategy, "STRATEGY_NAME", sid),
                            "baseline": baseline, "best": best, "top": top,
@@ -550,7 +607,8 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
 
             definition, best_m, best_sc, steps = await _discover(
                 job, histories, settings, cfg, objective, min_trades,
-                max_rules, allowed, prog_d, base_definition, fs_map, cancelled)
+                max_rules, allowed, prog_d, base_definition, fs_map, cancelled,
+                pool, workers)
             refine_log = []
             refine_end = span_end
             if do_refine and best_m:
@@ -573,7 +631,7 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
                 best_trade_params, best_m, best_sc = await _optimize_trade_settings(
                     job, definition, best_sc, best_m, histories, settings, cfg,
                     objective, min_trades, iterations, trade_space, prog_t,
-                    fs_map, cancelled)
+                    fs_map, cancelled, pool, workers)
             result.update({"definition": definition, "rules": _labels(definition),
                            "metrics": best_m, "steps": steps, "refine_log": refine_log,
                            "trade_params": best_trade_params,

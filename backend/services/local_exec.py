@@ -62,7 +62,7 @@ def worker_online() -> bool:
 
 def heartbeat(worker_id: str, body: Dict):
     w = WORKERS.setdefault(worker_id, {})
-    for k in ("name", "version", "resources", "gpu", "data", "running_jobs"):
+    for k in ("name", "version", "resources", "gpu", "data", "running_jobs", "sim_workers"):
         if body.get(k) is not None:
             w[k] = body[k]
     w["last_seen"] = _now()
@@ -82,6 +82,7 @@ def workers_public() -> List[Dict]:
             "resources": w.get("resources") or {},
             "gpu": w.get("gpu") or {},
             "data": w.get("data") or {},
+            "sim_workers": w.get("sim_workers"),
             "running_jobs": w.get("running_jobs") or [],
         })
     out.sort(key=lambda x: (not x["online"], x.get("last_seen") or ""), reverse=False)

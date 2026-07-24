@@ -24,7 +24,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-WORKER_VERSION = "1.0.0"
+WORKER_VERSION = "1.1.0"
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "worker_config.json"
 
@@ -82,6 +82,8 @@ def setup_modules(cfg):
     os.environ["CANDLE_CACHE_DIR"] = str(data_dir)
     os.environ["CANDLE_CACHE_MAX_CANDLES"] = str(int(cfg.get("ram_limit_mb", 4096)) * 2000)
     os.environ["CANDLE_CACHE_DISK"] = "1"
+    # Multi-Core: 0 = alle Kerne (wird per Website-Einstellung überschrieben)
+    os.environ.setdefault("SIM_WORKERS", "0")
 
 
 # nach setup_modules() importiert (siehe main)
@@ -181,6 +183,11 @@ def gpu_info():
     except ImportError:
         pass
     return {"available": False, "note": "GPU-Beschleunigung folgt in Phase 2"}
+
+
+def _sim_workers_effective():
+    from services import parallel_sim
+    return parallel_sim.workers_configured()
 
 
 # ---------------- HTTP-Helfer ----------------
@@ -395,6 +402,7 @@ async def run(cfg):
                 "version": WORKER_VERSION,
                 "resources": resources(int(server_settings.get("cpu_cores") or 0)),
                 "gpu": gpu_info(), "data": index.summary(),
+                "sim_workers": _sim_workers_effective(),
                 "running_jobs": list(active) + list(active_data),
                 "want_compute": len(active) < max_par,
                 "want_data": len(active_data) == 0,
@@ -411,6 +419,7 @@ async def run(cfg):
             new_settings = resp.get("settings") or {}
             if new_settings != server_settings:
                 server_settings = new_settings
+                os.environ["SIM_WORKERS"] = str(int(server_settings.get("cpu_cores") or 0))
                 if server_settings.get("ram_limit_mb"):
                     cc.MAX_CANDLES_IN_MEMORY = int(server_settings["ram_limit_mb"]) * 2000
                 nd = (server_settings.get("data_dir") or "").strip()

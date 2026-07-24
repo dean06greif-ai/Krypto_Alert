@@ -153,6 +153,7 @@ export default function LocalWorkerPanel({ onClose }) {
           {worker && (
             <span className="lw-status-meta" data-testid="lw-status-meta">
               {res.cores ? `${res.cores} Kerne` : ''}
+              {worker.sim_workers ? ` · Multi-Core: ${worker.sim_workers} Prozesse` : ''}
               {res.ram_total_mb ? ` · RAM ${Math.round((res.ram_used_mb || 0) / 1000)}/${Math.round(res.ram_total_mb / 1000)} GB` : ''}
               {res.cpu_percent != null ? ` · CPU ${res.cpu_percent}%` : ''}
               {worker.gpu?.available ? ` · GPU: ${worker.gpu.name}` : ' · GPU: – (Phase 2)'}
@@ -199,7 +200,8 @@ export default function LocalWorkerPanel({ onClose }) {
         <div className="lw-section-title"><Gear size={14} weight="bold" /> EINSTELLUNGEN (werden automatisch an den Worker übertragen)</div>
         {settings && (
           <div className="lw-grid" data-testid="lw-settings">
-            <label>CPU-Kerne (0 = alle)
+            <label title="Anzahl der Prozesse für Multi-Core-Simulation (Backtest-Paare & Optimizer-Iterationen parallel). 0 = alle Kerne, 1 = sequenziell.">
+              CPU-Kerne Multi-Core (0 = alle)
               <input type="number" min={0} max={128} value={settings.cpu_cores}
                 onChange={e => set('cpu_cores', parseInt(e.target.value) || 0)}
                 data-testid="lw-set-cores" />
