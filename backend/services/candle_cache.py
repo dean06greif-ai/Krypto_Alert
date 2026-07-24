@@ -126,6 +126,7 @@ async def _fetch_range(session, symbol: str, start_ms: int, end_ms: int,
     import aiohttp
     from services.backtester import BINANCE_URL, JobCancelled  # avoid cyclic top-level
 
+    t0 = time.perf_counter()
     out: List[Dict] = []
     cur = start_ms
     span = max(end_ms - start_ms, 1)
@@ -157,6 +158,8 @@ async def _fetch_range(session, symbol: str, start_ms: int, end_ms: int,
         if len(data) < 1000:
             break
         await asyncio.sleep(0.06)
+    DOWNLOAD_STATS["candles"] += len(out)
+    DOWNLOAD_STATS["seconds"] += time.perf_counter() - t0
     return out
 
 
@@ -260,6 +263,14 @@ def stats() -> Dict:
 
 def clear():
     _MEM.clear()
+
+
+# ---- Download-Zähler (für Benchmark-Statistik: Cache- vs. Netz-Kerzen) ----
+DOWNLOAD_STATS = {"candles": 0, "seconds": 0.0}
+
+
+def download_stats() -> Dict:
+    return dict(DOWNLOAD_STATS)
 
 
 # ---- Public Helfer für Daten-Verwaltung (lokaler Worker & Server) ----

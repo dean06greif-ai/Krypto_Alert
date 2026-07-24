@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { authHeaders, isAdmin } from '../auth';
 import SafeOverlay from './SafeOverlay';
 import LocalWorkerPanel from './LocalWorkerPanel';
+import BenchmarkBar from './BenchmarkBar';
 import TIMEFRAMES from '../constants/timeframes';
 import EquityChart from './EquityChart';
 import './Optimizer.css';
@@ -617,6 +618,7 @@ export default function Optimizer({ onClose }) {
                   title={`EQUITY-KURVE · ${equityScope === 'all' ? 'ALLE COINS (Robustheit)' : 'Optimierte Coins'}`} />
               </div>
             )}
+            {result.benchmark && <BenchmarkBar b={result.benchmark} testid="opt-benchmark" />}
             {result.mode === 'params' ? (
               <>
                 <div className="opt-section-title">

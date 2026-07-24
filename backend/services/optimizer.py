@@ -13,6 +13,7 @@ import gc
 import logging
 import math
 import random
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List
@@ -209,22 +210,33 @@ def _mk_strategy(definition: Dict) -> CustomStrategy:
     return CustomStrategy({**definition, "id": definition.get("id") or "opt_eval"})
 
 
-async def _evaluate_batch(pool, items, histories, fs_map, should_stop):
+async def _evaluate_batch(job, pool, items, histories, fs_map, should_stop):
     """items: Liste (strategy, settings, cfg) -> Metriken in gleicher Reihenfolge.
-    pool=None -> sequenziell (exakt wie bisher); sonst Prozess-Pool (Multi-Core)."""
+    pool=None -> sequenziell (exakt wie bisher); sonst Prozess-Pool (Multi-Core).
+    Zählt Evaluierungen + CPU-/Wall-Zeit in job['_bench'] (Benchmark-Statistik)."""
+    b = job.setdefault("_bench", {"evaluations": 0, "cpu_seconds": 0.0,
+                                  "sim_seconds": 0.0})
+    t0 = time.perf_counter()
     if pool is None:
         out = []
         for st, s, c in items:
+            _t = time.perf_counter()
             out.append(await asyncio.to_thread(_evaluate, st, histories, s, c,
                                                fs_map, should_stop))
-        return out
-    from services import parallel_sim
-    loop = asyncio.get_running_loop()
-    futs = [loop.run_in_executor(pool, parallel_sim.evaluate_task,
-                                 parallel_sim.strategy_spec(st),
-                                 list(histories.keys()), s, c)
-            for st, s, c in items]
-    return list(await asyncio.gather(*futs))
+            b["cpu_seconds"] += time.perf_counter() - _t
+    else:
+        from services import parallel_sim
+        loop = asyncio.get_running_loop()
+        futs = [loop.run_in_executor(pool, parallel_sim.evaluate_task_timed,
+                                     parallel_sim.strategy_spec(st),
+                                     list(histories.keys()), s, c)
+                for st, s, c in items]
+        timed = await asyncio.gather(*futs)
+        out = [m for m, _ in timed]
+        b["cpu_seconds"] += sum(d for _, d in timed)
+    b["sim_seconds"] += time.perf_counter() - t0
+    b["evaluations"] += len(items)
+    return out
 
 
 def _labels(definition: Dict) -> Dict:
@@ -294,8 +306,8 @@ async def _optimize_params(job, strategy, histories, settings, cfg, objective,
                   **{f"t:{k}": v for k, v in trade_space.items()}}
     rng = random.Random()
     base_params = strategy.get_params(settings)
-    baseline = await asyncio.to_thread(_evaluate, strategy, histories, settings, cfg,
-                                       fs_map, should_stop)
+    baseline = (await _evaluate_batch(job, pool, [(strategy, settings, cfg)],
+                                      histories, fs_map, should_stop))[0]
     best_score = _score(baseline, objective, min_trades)
     best = {"params": {}, "trade_params": {}, "metrics": baseline,
             "score": round(best_score, 3), "is_baseline": True}
@@ -327,7 +339,7 @@ async def _optimize_params(job, strategy, histories, settings, cfg, objective,
             sp[sid] = {**sp.get(sid, {}), **p}
             items.append((strategy, {**settings, "strategy_params": sp}, {**cfg, **tp}))
             metas.append((flat, p, tp))
-        ms = await _evaluate_batch(pool, items, histories, fs_map, should_stop)
+        ms = await _evaluate_batch(job, pool, items, histories, fs_map, should_stop)
         for (flat, p, tp), m in zip(metas, ms):
             it += 1
             sc = _score(m, objective, min_trades)
@@ -364,8 +376,8 @@ async def _discover(job, histories, settings, cfg, objective, min_trades,
     steps = []
     # Basis-Strategie zuerst bewerten (Weiterentwicklung bestehender Strategien)
     if definition["long_rules"] or definition["short_rules"]:
-        m0 = await asyncio.to_thread(_evaluate, _mk_strategy(definition), histories,
-                                     settings, cfg, fs_map, should_stop)
+        m0 = (await _evaluate_batch(job, pool, [(_mk_strategy(definition), settings, cfg)],
+                                    histories, fs_map, should_stop))[0]
         best_score = _score(m0, objective, min_trades)
         best_metrics = m0
         steps.append({"round": 0, "added": "Basis-Strategie",
@@ -389,7 +401,7 @@ async def _discover(job, histories, settings, cfg, objective, min_trades,
                      "long_rules": definition["long_rules"] + [dict(cand["long"])],
                      "short_rules": definition["short_rules"] + [dict(cand["short"])]}
                 items.append((_mk_strategy(d), settings, cfg))
-            ms = await _evaluate_batch(pool, items, histories, fs_map, should_stop)
+            ms = await _evaluate_batch(job, pool, items, histories, fs_map, should_stop)
             for cand, m in zip(chunk, ms):
                 done += 1
                 sc = _score(m, objective, min_trades)
@@ -438,8 +450,8 @@ async def _refine(job, definition, base_score, base_metrics, histories, settings
         v = float(r["value"])
         delta = (abs(v) if abs(v) > 0.01 else 1.0) * random.uniform(-0.25, 0.25)
         r["value"] = round(v + delta, 3)
-        m = await asyncio.to_thread(_evaluate, _mk_strategy(d), histories, settings,
-                                    cfg, fs_map, should_stop)
+        m = (await _evaluate_batch(job, None, [(_mk_strategy(d), settings, cfg)],
+                                   histories, fs_map, should_stop))[0]
         sc = _score(m, objective, min_trades)
         progress(it + 1, iterations, f"Feintuning {it + 1}/{iterations}")
         if sc > best_score:
@@ -476,7 +488,7 @@ async def _optimize_trade_settings(job, definition, base_score, base_metrics,
                 tp["tp_full_crv"], tp["tp1_crv"] = tp["tp1_crv"], tp["tp_full_crv"]
             tps.append(tp)
         items = [(strategy, settings, {**cfg, **tp}) for tp in tps]
-        ms = await _evaluate_batch(pool, items, histories, fs_map, should_stop)
+        ms = await _evaluate_batch(job, pool, items, histories, fs_map, should_stop)
         for tp, m in zip(tps, ms):
             it += 1
             sc = _score(m, objective, min_trades)
@@ -497,6 +509,9 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
 
     pool = None
     try:
+        from services import candle_cache as _cc
+        t_start = time.perf_counter()
+        dl_before = _cc.download_stats()
         mode = body.get("mode", "params")
         symbols = body.get("symbols") or ["BTCUSDT"]
         days = min(max(int(body.get("days") or 3), 1), 1500)
@@ -537,6 +552,8 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
             base_definition = copy.deepcopy(bstrat.definition)
 
         histories: Dict[str, List[Dict]] = {}
+        raw_candles = 0
+        _t_data = time.perf_counter()
         async with aiohttp.ClientSession() as session:
             for idx, sym in enumerate(symbols):
                 if cancelled():
@@ -544,11 +561,13 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
                 job["phase"] = f"Lade Daten: {sym}"
                 job["progress"] = round(idx / max(len(symbols), 1) * 10)
                 raw = await fetch_history(session, sym, days, job=job)
+                raw_candles += len(raw)
                 candles = aggregate_candles(raw, tf)
                 del raw
                 gc.collect()
                 if len(candles) > 100:
                     histories[sym] = candles
+        data_seconds = time.perf_counter() - _t_data
         if not histories:
             raise RuntimeError("Zu wenig Daten für diesen Timeframe/Zeitraum")
 
@@ -636,6 +655,17 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
                            "metrics": best_m, "steps": steps, "refine_log": refine_log,
                            "trade_params": best_trade_params,
                            "base_strategy_id": bsid if base_definition else None})
+
+        # Benchmark-Statistik (Zähler aus _evaluate_batch via job['_bench'])
+        from services.backtester import _build_benchmark
+        b = job.pop("_bench", {})
+        result["benchmark"] = _build_benchmark(
+            {"data_seconds": data_seconds, "sim_seconds": b.get("sim_seconds", 0.0),
+             "cpu_seconds": b.get("cpu_seconds", 0.0), "workers": workers,
+             "evaluations": b.get("evaluations", 0),
+             "sim_candles": sum(len(c) for c in histories.values()),
+             "raw_candles": raw_candles},
+            t_start, dl_before, _cc.download_stats(), job.get("execution") or "cloud")
 
         job["result"] = result
         job["status"] = "done"

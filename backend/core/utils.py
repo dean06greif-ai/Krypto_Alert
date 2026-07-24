@@ -100,7 +100,8 @@ def _watch_job_task(task, jobs: Dict, job_id: str):
 
 def _job_public(job: Dict) -> Dict:
     """Job ohne Export-Rohdaten (sonst riesige Antworten) + ETA."""
-    j = {k: v for k, v in job.items() if k not in ("export_candles", "export_trades")}
+    j = {k: v for k, v in job.items()
+         if k not in ("export_candles", "export_trades", "_bench")}
     try:
         created = datetime.fromisoformat(job["created_at"])
         elapsed = (datetime.now(timezone.utc) - created).total_seconds()

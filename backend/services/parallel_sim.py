@@ -138,3 +138,18 @@ def evaluate_task(spec: Dict, symbols: List[str], settings: Dict, cfg: Dict) -> 
     hist = {s: _DATA[s] for s in symbols}
     fs = {s: _fast(s) for s in symbols}
     return _evaluate(strat, hist, settings, cfg, fs, None)
+
+
+# ---- Timed-Varianten für die Benchmark-Statistik (gleiche Logik + Dauer) ----
+def sim_pair_task_timed(*args):
+    import time
+    t0 = time.perf_counter()
+    res = sim_pair_task(*args)
+    return res, time.perf_counter() - t0
+
+
+def evaluate_task_timed(*args):
+    import time
+    t0 = time.perf_counter()
+    m = evaluate_task(*args)
+    return m, time.perf_counter() - t0

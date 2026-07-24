@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { authHeaders, isAdmin } from '../auth';
 import SafeOverlay from './SafeOverlay';
 import LocalWorkerPanel from './LocalWorkerPanel';
+import BenchmarkBar from './BenchmarkBar';
 import EquityChart from './EquityChart';
 import TIMEFRAMES from '../constants/timeframes';
 import './Backtester.css';
@@ -751,6 +752,7 @@ export default function Backtester({ onClose }) {
 
         {result && (
           <>
+            {result.benchmark && <BenchmarkBar b={result.benchmark} testid="bt-benchmark" />}
             <div className="bt-section-title">
               <Trophy size={15} weight="fill" style={{ color: '#FFD700' }} />
               GESAMT-RANKING ({result.date_from ? `${result.date_from} bis ${result.date_to || 'heute'}` : `${result.days} Tage`} · Kapital {result.config?.max_capital} USDT · {result.config?.auto_leverage_enabled ? 'Auto-Hebel' : `${result.config?.leverage}x`} · Gebühren inkl.)

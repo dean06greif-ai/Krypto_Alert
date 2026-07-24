@@ -7,6 +7,7 @@ Gewinnsicherung, Zeitfenster und Gebühren.
 import asyncio
 import gc
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
@@ -558,13 +559,18 @@ async def _simulate_all_sequential(job, strategy_ids, symbols, days, cfg, regist
     export_trades: List[Dict] = []
     export_candles: Dict[str, List[Dict]] = {}
     strat_tf: Dict[str, str] = {}
+    bench = {"data_seconds": 0.0, "sim_seconds": 0.0, "cpu_seconds": 0.0,
+             "workers": 1, "pairs": 0, "sim_candles": 0, "raw_candles": 0}
 
     async with aiohttp.ClientSession() as session:
         for sym in symbols:
             if cancelled():
                 raise JobCancelled()
             job["phase"] = f"Lade Daten: {sym}"
+            _t = time.perf_counter()
             history = await fetch_history(session, sym, days, job=job)
+            bench["data_seconds"] += time.perf_counter() - _t
+            bench["raw_candles"] += len(history)
             if start_ms or end_ms:
                 history = [c for c in history
                            if (not start_ms or c["timestamp"] >= start_ms)
@@ -626,9 +632,15 @@ async def _simulate_all_sequential(job, strategy_ids, symbols, days, cfg, regist
                 def cb(i, m, _base=base, _next=nxt):
                     job["progress"] = _base + round((i / m) * (_next - _base))
 
+                _t = time.perf_counter()
                 res = await asyncio.to_thread(simulate_pair, strat, candles, sym,
                                               eff_settings, pair_cfg, cb, True,
                                               cancelled, provider)
+                _dur = time.perf_counter() - _t
+                bench["sim_seconds"] += _dur
+                bench["cpu_seconds"] += _dur
+                bench["pairs"] += 1
+                bench["sim_candles"] += len(candles)
                 all_trades = res.pop("all_trades", [])
                 if len(export_trades) < MAX_EXPORT_TRADES:
                     for t in all_trades:
@@ -651,7 +663,7 @@ async def _simulate_all_sequential(job, strategy_ids, symbols, days, cfg, regist
             del history, tf_cache, fs_cache
             gc.collect()
 
-    return per_pair, export_trades, export_candles, strat_tf
+    return per_pair, export_trades, export_candles, strat_tf, bench
 
 
 async def _simulate_all_parallel(job, strategy_ids, symbols, days, cfg, registry,
@@ -666,15 +678,19 @@ async def _simulate_all_parallel(job, strategy_ids, symbols, days, cfg, registry
     export_trades: List[Dict] = []
     export_candles: Dict[str, List[Dict]] = {}
     strat_tf: Dict[str, str] = {}
+    bench = {"data_seconds": 0.0, "sim_seconds": 0.0, "cpu_seconds": 0.0,
+             "workers": workers, "pairs": 0, "sim_candles": 0, "raw_candles": 0}
 
     # Phase 1: Daten laden (netzwerk-gebunden, wie bisher sequenziell + Cache)
     all_hist: Dict[str, List[Dict]] = {}
+    _t = time.perf_counter()
     async with aiohttp.ClientSession() as session:
         for i, sym in enumerate(symbols):
             if cancelled():
                 raise JobCancelled()
             job["phase"] = f"Lade Daten: {sym}"
             history = await fetch_history(session, sym, days, job=job)
+            bench["raw_candles"] += len(history)
             if start_ms or end_ms:
                 history = [c for c in history
                            if (not start_ms or c["timestamp"] >= start_ms)
@@ -682,6 +698,7 @@ async def _simulate_all_parallel(job, strategy_ids, symbols, days, cfg, registry
             if len(history) > 100:
                 all_hist[sym] = history
             job["progress"] = round((i + 1) / max(len(symbols), 1) * 25)
+    bench["data_seconds"] = time.perf_counter() - _t
 
     # Phase 2: Paare vorbereiten + Timeframe-Aggregationen (einmal pro sym|tf)
     agg: Dict[str, List[Dict]] = {}
@@ -706,14 +723,15 @@ async def _simulate_all_parallel(job, strategy_ids, symbols, days, cfg, registry
     del all_hist
     gc.collect()
     if not pairs:
-        return per_pair, export_trades, export_candles, strat_tf
+        return per_pair, export_trades, export_candles, strat_tf, bench
 
     # Phase 3: Prozess-Pool – alle Paare parallel
     use_fast = bool(cfg.get("use_fast_path", True))
     pool = parallel_sim.make_pool(agg, workers)
     loop = asyncio.get_running_loop()
+    _t = time.perf_counter()
     try:
-        futs = [loop.run_in_executor(pool, parallel_sim.sim_pair_task,
+        futs = [loop.run_in_executor(pool, parallel_sim.sim_pair_task_timed,
                                      parallel_sim.strategy_spec(strat), key, sym,
                                      eff_s, pcfg, True, use_fast)
                 for sid, strat, sym, tf, key, eff_s, pcfg in pairs]
@@ -730,12 +748,16 @@ async def _simulate_all_parallel(job, strategy_ids, symbols, days, cfg, registry
         results = [f.result() for f in futs]  # Submit-Reihenfolge = stabile Exporte
     finally:
         parallel_sim.close_pool(pool, kill=cancelled())
+    bench["sim_seconds"] = time.perf_counter() - _t
 
     # Phase 4: Ergebnisse einsammeln (gleiche Struktur wie sequenziell)
-    for (sid, strat, sym, tf, key, _s, _c), res in zip(pairs, results):
+    for (sid, strat, sym, tf, key, _s, _c), (res, dur) in zip(pairs, results):
+        bench["cpu_seconds"] += dur
         if res.get("_error"):
             logger.warning(f"parallel sim {sid}/{sym} failed: {res['_error']}")
             continue
+        bench["pairs"] += 1
+        bench["sim_candles"] += len(agg[key])
         all_trades = res.pop("all_trades", [])
         if len(export_trades) < MAX_EXPORT_TRADES:
             for t in all_trades:
@@ -751,7 +773,39 @@ async def _simulate_all_parallel(job, strategy_ids, symbols, days, cfg, registry
         if stored + len(cds) <= MAX_EXPORT_CANDLES:
             export_candles[key] = cds
             stored += len(cds)
-    return per_pair, export_trades, export_candles, strat_tf
+    return per_pair, export_trades, export_candles, strat_tf, bench
+
+
+def _build_benchmark(bench: Dict, t_start: float, dl_before: Dict, dl_after: Dict,
+                     execution: str) -> Dict:
+    """Laufzeit-Statistik eines Laufs: Cache- vs. Download-Kerzen, Multi-Core-
+    Speedup und geschätzte Zeitersparnis durch lokale/gecachte Daten."""
+    downloaded = max(dl_after.get("candles", 0) - dl_before.get("candles", 0), 0)
+    dl_seconds = max(dl_after.get("seconds", 0.0) - dl_before.get("seconds", 0.0), 0.0)
+    raw = max(bench.get("raw_candles", 0), 0)
+    cached = max(raw - downloaded, 0)
+    # Download-Rate: gemessen wenn genug geladen wurde, sonst typischer Binance-Wert
+    rate = downloaded / dl_seconds if (downloaded > 2000 and dl_seconds > 0.5) else 2500.0
+    sim = bench.get("sim_seconds", 0.0)
+    cpu = bench.get("cpu_seconds", 0.0)
+    speedup = round(cpu / sim, 2) if (sim > 0.05 and cpu > 0) else 1.0
+    return {
+        "execution": execution,
+        "workers": bench.get("workers", 1),
+        "total_seconds": round(time.perf_counter() - t_start, 2),
+        "data_seconds": round(bench.get("data_seconds", 0.0), 2),
+        "sim_seconds": round(sim, 2),
+        "cpu_seconds": round(cpu, 2),
+        "parallel_speedup": max(speedup, 1.0),
+        "pairs": bench.get("pairs", 0),
+        "evaluations": bench.get("evaluations"),
+        "sim_candles": bench.get("sim_candles", 0),
+        "raw_candles": raw,
+        "downloaded_candles": downloaded,
+        "cached_candles": cached,
+        "cache_ratio": round(cached / raw * 100, 1) if raw else 0.0,
+        "est_cache_saved_seconds": round(cached / rate, 1) if cached else 0.0,
+    }
 
 
 async def run_backtest(job_id: str, strategy_ids: List[str], symbols: List[str],
@@ -769,23 +823,29 @@ async def run_backtest(job_id: str, strategy_ids: List[str], symbols: List[str],
     try:
         # Multi-Core nur wenn SIM_WORKERS gesetzt (lokaler Worker); sonst
         # bisheriger sequenzieller Pfad (Server/Cloud unverändert).
+        from services import candle_cache as _cc
+        t_start = time.perf_counter()
+        dl_before = _cc.download_stats()
         try:
             from services import parallel_sim
             workers = parallel_sim.workers_configured()
         except Exception:
             workers = 1
         if workers > 1:
-            per_pair, export_trades, export_candles, strat_tf = \
+            per_pair, export_trades, export_candles, strat_tf, bench = \
                 await _simulate_all_parallel(job, strategy_ids, symbols, days, cfg,
                                              registry, settings, strategy_configs,
                                              default_timeframe, start_ms, end_ms,
                                              cancelled, workers)
         else:
-            per_pair, export_trades, export_candles, strat_tf = \
+            per_pair, export_trades, export_candles, strat_tf, bench = \
                 await _simulate_all_sequential(job, strategy_ids, symbols, days, cfg,
                                                registry, settings, strategy_configs,
                                                default_timeframe, start_ms, end_ms,
                                                cancelled)
+        benchmark = _build_benchmark(bench, t_start, dl_before,
+                                     _cc.download_stats(),
+                                     job.get("execution") or "cloud")
 
         # aggregate per strategy
         per_strategy: Dict[str, Dict] = {}
@@ -840,6 +900,7 @@ async def run_backtest(job_id: str, strategy_ids: List[str], symbols: List[str],
             "per_pair": per_pair,
             "per_strategy": sorted(per_strategy.values(), key=lambda x: -x["pnl"]),
             "best_per_symbol": best_per_symbol,
+            "benchmark": benchmark,
             "finished_at": datetime.now(timezone.utc).isoformat(),
         }
         job["result"] = result
