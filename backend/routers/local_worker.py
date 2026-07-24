@@ -164,7 +164,9 @@ async def localworker_package():
                     z.write(p, f"{sub}/{p.name}")
             if WORKER_DIR.is_dir():
                 for p in sorted(WORKER_DIR.iterdir()):
-                    if p.is_file():
+                    # Keine lokalen Configs/Logs mit ausliefern (enthalten Token)
+                    if p.is_file() and p.name != "worker_config.json" \
+                            and not p.name.endswith(".log"):
                         z.write(p, p.name)
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"Paket konnte nicht erstellt werden: {e}")
