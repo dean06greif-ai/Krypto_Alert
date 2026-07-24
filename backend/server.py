@@ -1469,6 +1469,7 @@ async def strategy_comparison(mode: str = "all", days: int = 0):
             "strategy_name": t.get("strategy_name") or sid,
             "trades": 0, "wins": 0, "losses": 0, "breakevens": 0,
             "pnl": 0.0, "fees": 0.0, "gross_win": 0.0, "gross_loss": 0.0,
+            "_cap_sum": 0.0,
             "long_trades": 0, "short_trades": 0,
             "paper_trades": 0, "live_trades": 0,
             "_durs": [], "_equity": 0.0, "_peak": 0.0, "max_drawdown": 0.0,
