@@ -27,6 +27,7 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
   const [paramCoin, setParamCoin] = useState(''); // '' = Global, else per-coin override
   const [sessionScope, setSessionScope] = useState('global'); // 'global' or strategy_id
   const [busy, setBusy] = useState(false);
+  const importParamsRef = React.useRef(null);
   const ALL_COINS = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","AVAXUSDT","DOTUSDT","POLUSDT","GOLD","SILVER","OIL"];
 
   useEffect(() => {
@@ -250,6 +251,47 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
     || strategies[0];
   const is24_7 = scopedSessions.length === 0;
 
+  // ---- Komplettes Strategie-Backup direkt aus dem ⚙-Panel ----
+  const exportStrategyBackup = async () => {
+    if (!activeStrategy) return;
+    try {
+      const res = await fetch(`${API_URL}/api/strategies/${activeStrategy.id}/export`);
+      if (!res.ok) { toast.error('Export fehlgeschlagen'); return; }
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      const safe = (activeStrategy.name || activeStrategy.id).replace(/[^a-z0-9äöüß_-]+/gi, '_');
+      a.download = `strategie-backup-${safe}-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast.success(`"${activeStrategy.name}" komplett exportiert (inkl. aller Parameter & Trade-Einstellungen)`);
+    } catch { toast.error('Verbindungsfehler beim Export'); }
+  };
+
+  const importStrategyBackup = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!isAdmin()) { toast.error('Admin-Login erforderlich'); e.target.value = ''; return; }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const d = JSON.parse(reader.result);
+        if (d.type !== 'strategy_backup') { toast.error('Keine gültige Strategie-Backup-Datei'); return; }
+        const res = await fetch(`${API_URL}/api/strategies/import`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify(d),
+        });
+        const out = await res.json();
+        if (!res.ok) { toast.error(out.detail || 'Import fehlgeschlagen'); return; }
+        toast.success(`Strategie "${d.name || out.id}" 1:1 wiederhergestellt – Panel neu öffnen, um die Werte zu sehen`);
+      } catch { toast.error('Datei konnte nicht gelesen werden'); }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
   return (
     <SafeOverlay className="settings-overlay" onClose={onClose}>
       <div className="settings-panel" onClick={(e) => e.stopPropagation()} data-testid="settings-panel">
@@ -396,6 +438,18 @@ const SettingsPanel = ({ onClose, focusStrategy, mode = 'all', controlState, onC
                   >
                     Alle Parameter zurücksetzen
                   </button>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                    <button className="btn" onClick={exportStrategyBackup} data-testid="strategy-export-btn"
+                      title="Komplette Strategie sichern: Regeln, Parameter, Timeframe, Zeitfenster, Live/Paper-Einstellungen">
+                      ⬇ Strategie komplett exportieren
+                    </button>
+                    <button className="btn" onClick={() => importParamsRef.current?.click()} data-testid="strategy-import-btn"
+                      title="Backup-Datei laden – stellt alle Einstellungen 1:1 wieder her">
+                      ⬆ Backup laden
+                    </button>
+                    <input ref={importParamsRef} type="file" accept=".json,application/json"
+                      style={{ display: 'none' }} onChange={importStrategyBackup} data-testid="strategy-import-file" />
+                  </div>
                 </div>
               )}
 

@@ -77,6 +77,9 @@ class CustomStrategy(BaseStrategy):
         self.STRATEGY_ID = definition["id"]
         self.STRATEGY_NAME = definition.get("name", "Custom")
         self.STRATEGY_DESCRIPTION = definition.get("description", "Custom Strategie")
+        # Fix: Discovery-/Custom-Strategien nutzen den Timeframe aus der Definition
+        # (vorher wurde er ignoriert und immer 1m verwendet)
+        self.STRATEGY_TIMEFRAME = definition.get("timeframe") or "1m"
 
     def _used_indicators(self):
         used = set()

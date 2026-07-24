@@ -58,3 +58,9 @@
 .switch .slider:before { content: ''; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: 0.2s; }
 .switch input:checked + .slider { background: #00FF66; }
 .switch input:checked + .slider:before { transform: translateX(18px); }
+
+/* Fix: Break-Even/Select-Dropdowns waren weiß (Namen erst beim Hover sichtbar) */
+.at-field select { width: 100%; box-sizing: border-box; background: #0A0A0A; border: 1px solid #2A2D3A; border-radius: 8px; padding: 9px 11px; color: #fff; font-family: 'JetBrains Mono', monospace; cursor: pointer; }
+.at-field select:focus { outline: none; border-color: #00FF66; }
+.at-field select option { background: #0A0A0A; color: #fff; }
+.at-panel select, .at-panel select option { background-color: #0A0A0A; color: #fff; }

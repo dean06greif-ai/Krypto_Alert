@@ -10,7 +10,7 @@ import uuid
 import jwt
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 load_dotenv()
 
@@ -102,6 +102,12 @@ async def lifespan(app: FastAPI):
         cfg = {"mode": os.getenv("TRADING_MODE", "paper"), "coins": {}, "strategy_overrides": {}}
         await app.mongodb.settings.insert_one({"_id": "autotrade_config", **cfg})
         autotrader.set_config(cfg)
+
+    # ---- Load persisted capital allocation (live/paper getrennt) ----
+    cap_doc = await app.mongodb.settings.find_one({"_id": "capital_allocation"})
+    if cap_doc:
+        cap_doc.pop("_id", None)
+        autotrader.config["capital_allocation"] = cap_doc
 
     # ---- Load strategy_coin_configs from dedicated collection ----
     # Without this, the per-strategy-per-coin paper/live mode lives only in the
@@ -219,14 +225,16 @@ async def lifespan(app: FastAPI):
         })
         rehydrated = 0
         async for s in cursor:
-            if not s.get("tp1") or not s.get("sl"):
+            tp1 = s.get("tp1") or s.get("take_profit_1")
+            sl = s.get("sl") or s.get("stop_loss")
+            if not tp1 or not sl:
                 continue
             open_signal_evals.append({
                 "id": s.get("id"),
                 "symbol": s.get("symbol"),
                 "type": s.get("type"),
-                "tp1": s.get("tp1"),
-                "sl": s.get("sl"),
+                "tp1": tp1,
+                "sl": sl,
                 "strategy_id": s.get("strategy_id", "unknown"),
             })
             rehydrated += 1
@@ -333,15 +341,18 @@ async def process_signal(signal: Dict, candles: List[Dict]):
     await app.mongodb.signals.insert_one(dict(signal))
 
     # BUGFIX (win-rate): track this signal in-memory so evaluate_open_signals()
-    # can later mark it as win/loss based on price hitting TP1 or SL. Without
-    # this the wins/losses counters (and thus win_rate) stayed 0 forever.
-    if signal.get("signal_class") != "PRE_SIGNAL" and signal.get("tp1") and signal.get("sl"):
+    # can later mark it as win/loss based on price hitting TP1 or SL.
+    # Scanner-Signale nutzen die Keys take_profit_1/stop_loss (nicht tp1/sl) –
+    # ohne den Fallback wurde NIE ein Signal ausgewertet -> Tages-Winrate blieb 0.
+    _tp1 = signal.get("tp1") or signal.get("take_profit_1")
+    _sl = signal.get("sl") or signal.get("stop_loss")
+    if signal.get("signal_class") != "PRE_SIGNAL" and _tp1 and _sl:
         open_signal_evals.append({
             "id": signal["id"],
             "symbol": symbol,
             "type": signal["type"],
-            "tp1": signal["tp1"],
-            "sl": signal["sl"],
+            "tp1": _tp1,
+            "sl": _sl,
             "strategy_id": signal.get("strategy_id", "unknown"),
         })
 
@@ -415,11 +426,18 @@ def _enrich_trade(t: Dict) -> Dict:
     if capital:
         pnl_pct_capital = round(float(t.get("realized_pnl") or 0) / capital * 100, 2)
 
+    # PnL in % of the position size (entry * qty)
+    pos_size = entry * qty
+    pnl_pct = None
+    if pos_size:
+        pnl_pct = round(float(t.get("realized_pnl") or 0) / pos_size * 100, 2)
+
     t["computed"] = {
         "duration_seconds": dur,
         "risk_usd": risk_usd,
         "r_multiple": r_multiple,
         "pnl_pct_capital": pnl_pct_capital,
+        "pnl_pct": pnl_pct,
         "sl_distance_pct": pct_from_entry(sl),
         "initial_sl_distance_pct": pct_from_entry(init_sl),
         "tp1_distance_pct": pct_from_entry(tp1),
@@ -1302,6 +1320,122 @@ async def builder_options():
             "indicator_meta": INDICATOR_META, "period_fields": PERIOD_FIELDS}
 
 
+# ---- Strategie-Backup: kompletter Export/Import pro Strategie ----
+@app.get("/api/strategies/{strategy_id}/export")
+async def export_strategy(strategy_id: str):
+    """Komplette Strategie als Backup exportieren: Definition/Regeln, Parameter,
+    Timeframe, Zeitfenster, Live/Paper-Trade-Einstellungen (global + pro Coin)
+    und Backtest-Einstellungen. Ziel: 1:1-Wiederherstellung nach Löschung."""
+    strat = strategy_registry.get(strategy_id)
+    if not strat:
+        raise HTTPException(status_code=404, detail="Strategie nicht gefunden")
+    s = scanner.settings
+    coin_cfgs = {}
+    docs = await app.mongodb.strategy_coin_configs.find().to_list(2000)
+    prefix = f"{strategy_id}_"
+    for d in docs:
+        key = d.get("_id") or ""
+        if key.startswith(prefix):
+            sym = key[len(prefix):]
+            if sym in ALL_SYMBOLS:
+                coin_cfgs[sym] = d.get("config", {})
+    bt_doc = await app.mongodb.settings.find_one({"_id": "backtest_strategy_configs"})
+    return {
+        "type": "strategy_backup",
+        "version": 2,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "strategy_id": strategy_id,
+        "name": getattr(strat, "STRATEGY_NAME", strategy_id),
+        "is_custom": strategy_id in strategy_registry._custom_ids,
+        "definition": getattr(strat, "definition", None),
+        "strategy_params": s.get("strategy_params", {}).get(strategy_id, {}),
+        "coin_params": s.get("coin_params", {}).get(strategy_id, {}),
+        "timeframe": s.get("strategy_timeframes", {}).get(strategy_id),
+        "strategy_sessions": s.get("strategy_sessions", {}).get(strategy_id, []),
+        "strategy_override": autotrader.config.get("strategy_overrides", {}).get(strategy_id, {}),
+        "strategy_coin_configs": coin_cfgs,
+        "backtest_config": ((bt_doc or {}).get("configs", {})).get(strategy_id, {}),
+        "enabled_in_tabs": strategy_id in s.get("enabled_strategies", []),
+    }
+
+
+@app.post("/api/strategies/import")
+async def import_strategy(body: Dict, _: bool = Depends(require_admin)):
+    """Strategie-Backup importieren: stellt eine gelöschte Strategie inkl. aller
+    Parameter/Einstellungen 1:1 wieder her bzw. überschreibt verstellte Werte."""
+    if body.get("type") != "strategy_backup":
+        raise HTTPException(status_code=400, detail="Keine gültige Strategie-Backup-Datei")
+    sid = body.get("strategy_id")
+    if not sid:
+        raise HTTPException(status_code=400, detail="strategy_id fehlt in der Datei")
+    definition = body.get("definition")
+    is_custom = bool(body.get("is_custom")) or isinstance(definition, dict)
+    if is_custom and isinstance(definition, dict):
+        definition = dict(definition)
+        definition["id"] = sid
+        definition.setdefault("timeframe", "1m")
+        await app.mongodb.custom_strategies.update_one({"id": sid}, {"$set": definition}, upsert=True)
+        strategy_registry.upsert_custom(definition)
+    elif not strategy_registry.get(sid):
+        raise HTTPException(status_code=404,
+                            detail="Built-in-Strategie existiert in dieser Version nicht")
+    # gelöschte Built-ins reaktivieren
+    updates: Dict = {"deleted_strategies":
+                     [d for d in scanner.settings.get("deleted_strategies", []) if d != sid]}
+    if body.get("strategy_params"):
+        sp = dict(scanner.settings.get("strategy_params", {}))
+        sp[sid] = body["strategy_params"]
+        updates["strategy_params"] = sp
+    if body.get("coin_params"):
+        cp = dict(scanner.settings.get("coin_params", {}))
+        cp[sid] = body["coin_params"]
+        updates["coin_params"] = cp
+    if body.get("timeframe"):
+        tfs = dict(scanner.settings.get("strategy_timeframes", {}))
+        tfs[sid] = body["timeframe"]
+        updates["strategy_timeframes"] = tfs
+    if body.get("strategy_sessions"):
+        ss = dict(scanner.settings.get("strategy_sessions", {}))
+        ss[sid] = body["strategy_sessions"]
+        updates["strategy_sessions"] = ss
+    if body.get("enabled_in_tabs"):
+        en = list(scanner.settings.get("enabled_strategies", []))
+        if sid not in en:
+            en.append(sid)
+        updates["enabled_strategies"] = en
+    scanner.update_settings(updates)
+    await app.mongodb.settings.update_one({"_id": "scanner_settings"},
+                                          {"$set": scanner.settings}, upsert=True)
+    if isinstance(body.get("strategy_override"), dict) and body["strategy_override"]:
+        overrides = dict(autotrader.config.get("strategy_overrides", {}))
+        overrides[sid] = body["strategy_override"]
+        new_cfg = {"mode": autotrader.config.get("mode", "paper"),
+                   "coins": autotrader.config.get("coins", {}),
+                   "strategy_overrides": overrides}
+        autotrader.set_config(new_cfg)
+        await app.mongodb.settings.update_one(
+            {"_id": "autotrade_config"},
+            {"$set": {"mode": new_cfg["mode"], "coins": new_cfg["coins"],
+                      "strategy_overrides": overrides}}, upsert=True)
+    n_coin = 0
+    for sym, ccfg in (body.get("strategy_coin_configs") or {}).items():
+        if sym not in ALL_SYMBOLS or not isinstance(ccfg, dict):
+            continue
+        key = f"{sid}_{sym}"
+        await app.mongodb.strategy_coin_configs.replace_one(
+            {"_id": key}, {"_id": key, "config": ccfg}, upsert=True)
+        autotrader.config.setdefault("strategy_coin_configs", {})[key] = ccfg
+        n_coin += 1
+    if isinstance(body.get("backtest_config"), dict) and body["backtest_config"]:
+        doc = await app.mongodb.settings.find_one({"_id": "backtest_strategy_configs"})
+        configs = (doc or {}).get("configs", {})
+        configs[sid] = body["backtest_config"]
+        await app.mongodb.settings.update_one({"_id": "backtest_strategy_configs"},
+                                              {"$set": {"configs": configs}}, upsert=True)
+    return {"status": "success", "id": sid, "name": body.get("name"),
+            "restored_custom": is_custom, "coin_configs": n_coin}
+
+
 # ---------------- Strategie-Vergleich ----------------
 @app.get("/api/analytics/strategy-comparison")
 async def strategy_comparison(mode: str = "all", days: int = 0):
@@ -1352,6 +1486,7 @@ async def strategy_comparison(mode: str = "all", days: int = 0):
             e["breakevens"] += 1
         e["pnl"] = round(e["pnl"] + pnl, 4)
         e["fees"] = round(e["fees"] + float(t.get("fees_paid") or 0), 4)
+        e["_cap_sum"] += float(t.get("max_capital") or 0)
         if pnl > 0:
             e["gross_win"] += pnl
         else:
@@ -1387,6 +1522,11 @@ async def strategy_comparison(mode: str = "all", days: int = 0):
         decided = e["wins"] + e["losses"]
         e["win_rate"] = round(e["wins"] / decided * 100, 1) if decided else 0.0
         e["avg_pnl"] = round(e["pnl"] / e["trades"], 4) if e["trades"] else 0.0
+        # PnL % relativ zur durchschnittlich eingesetzten Marge pro Trade
+        cap_sum = e.pop("_cap_sum", 0.0)
+        avg_cap = cap_sum / e["trades"] if e["trades"] and cap_sum > 0 else 0.0
+        e["pnl_pct"] = round(e["pnl"] / avg_cap * 100, 1) if avg_cap else None
+        e["max_drawdown_pct"] = round(e["max_drawdown"] / avg_cap * 100, 1) if avg_cap else None
         gl = e.pop("gross_loss")
         gw = e.pop("gross_win")
         e["profit_factor"] = round(gw / gl, 2) if gl > 0 else (round(gw, 2) if gw else 0.0)
@@ -1416,7 +1556,18 @@ from services import backtester as bt
 async def start_backtest(body: Dict, _: bool = Depends(require_admin)):
     strategy_ids = body.get("strategy_ids") or []
     symbols = body.get("symbols") or []
-    days = min(max(int(body.get("days") or 3), 1), 365)
+    days = min(max(int(body.get("days") or 3), 1), 1500)
+    # Benutzerdefinierter Datumsbereich: days aus date_from ableiten
+    date_from = body.get("date_from") or None
+    date_to = body.get("date_to") or None
+    if date_from:
+        try:
+            df = datetime.fromisoformat(str(date_from))
+            if df.tzinfo is None:
+                df = df.replace(tzinfo=timezone.utc)
+            days = min(max((datetime.now(timezone.utc) - df).days + 2, 1), 1500)
+        except ValueError:
+            date_from = None
     if not strategy_ids or not symbols:
         raise HTTPException(status_code=400, detail="strategy_ids und symbols erforderlich")
     valid_ids = {m["id"] for m in strategy_registry.list_all()}
@@ -1433,7 +1584,10 @@ async def start_backtest(body: Dict, _: bool = Depends(require_admin)):
               "breakeven_enabled", "trail_after_tp1", "profit_secure_enabled",
               "profit_secure_trigger_pct", "profit_lock_pct",
               "be_mode", "be_trigger_crv", "be_trigger_profit_pct",
-              "be_smart_lookback", "require_all_rules", "sessions"):
+              "be_smart_lookback", "require_all_rules", "sessions",
+              "tp_mode", "tp1_percent", "tp_full_percent",
+              "maintenance_margin_rate", "use_fast_path",
+              "auto_leverage_enabled", "auto_lev_mode", "auto_lev_value", "auto_lev_max"):
         if body.get(k) is not None:
             cfg[k] = body[k]
     strategy_configs = body.get("strategy_configs") or {}
@@ -1441,14 +1595,34 @@ async def start_backtest(body: Dict, _: bool = Depends(require_admin)):
         strategy_configs = {}
     default_tf = body.get("timeframe")
     params = {"strategy_ids": strategy_ids, "symbols": symbols, "days": days,
+              "date_from": date_from, "date_to": date_to,
               "max_capital": cfg["max_capital"], "leverage": cfg["leverage"],
               "fee_percent": cfg["fee_percent"], "timeframe": default_tf,
               "strategy_configs": strategy_configs}
     job_id = bt.create_job(params)
-    asyncio.create_task(bt.run_backtest(job_id, strategy_ids, symbols, days, cfg,
-                                        strategy_registry, scanner.settings,
-                                        app.mongodb, strategy_configs, default_tf))
+    task = asyncio.create_task(bt.run_backtest(job_id, strategy_ids, symbols, days, cfg,
+                                               strategy_registry, scanner.settings,
+                                               app.mongodb, strategy_configs, default_tf,
+                                               date_from, date_to))
+    _watch_job_task(task, bt.JOBS, job_id)
     return {"status": "started", "job_id": job_id}
+
+
+def _watch_job_task(task, jobs: Dict, job_id: str):
+    """Ghost-Job-Schutz: Stirbt der Task, ohne den Status zu setzen,
+    wird der Job als Fehler markiert (vorher: 'läuft' blockierte für immer)."""
+    def _done(t):
+        job = jobs.get(job_id)
+        if job and job.get("status") == "running":
+            job["status"] = "error"
+            job["error"] = "Job-Task unerwartet beendet (automatisch zurückgesetzt)"
+            job["phase"] = "Fehler"
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc:
+            logger.error(f"job task {job_id} crashed: {exc}")
+    task.add_done_callback(_done)
 
 
 def _job_public(job: Dict) -> Dict:
@@ -1519,6 +1693,44 @@ async def set_backtest_strategy_configs(body: Dict, _: bool = Depends(require_ad
     return {"status": "success", "configs": configs}
 
 
+def _equity_points(rows: List[Dict]) -> List[Dict]:
+    rows = [r for r in rows if r.get("closed")]
+    rows.sort(key=lambda r: r["closed"])
+    points = []
+    eq, peak = 0.0, 0.0
+    for r in rows:
+        pnl = float(r.get("pnl") or 0)
+        eq += pnl
+        peak = max(peak, eq)
+        points.append({"t": r["closed"], "equity": round(eq, 4),
+                       "peak": round(peak, 4), "drawdown": round(peak - eq, 4),
+                       "pnl": round(pnl, 4), "symbol": r.get("symbol"),
+                       "strategy_id": r.get("strategy_id"),
+                       "strategy_name": r.get("strategy_name"),
+                       "side": r.get("side"), "result": r.get("result"),
+                       "liquidated": bool(r.get("liquidated"))})
+    return points
+
+
+async def _backtest_trade_rows(job_id: str):
+    job = bt.JOBS.get(job_id)
+    rows = (job or {}).get("export_trades")
+    if rows is None:
+        doc = await app.mongodb.backtest_trades.find_one({"job_id": job_id})
+        rows = (doc or {}).get("rows")
+    return rows
+
+
+@app.get("/api/backtest/equity/{job_id}")
+async def backtest_equity(job_id: str):
+    """Equity-Kurve (kumulierter PnL Trade für Trade) inkl. Drawdown &
+    Liquidations-Markern für das Equity-Chart im Backtester."""
+    rows = await _backtest_trade_rows(job_id)
+    if rows is None:
+        raise HTTPException(status_code=404, detail="Keine Trade-Daten für diesen Backtest gefunden")
+    return {"job_id": job_id, "points": _equity_points(rows)}
+
+
 # ---- CSV-Export der Backtest-Rohdaten (Trades + Kerzen) ----
 def _rows_to_csv(rows: List[Dict], fieldnames: List[str]) -> str:
     import csv
@@ -1551,6 +1763,14 @@ async def backtest_export(job_id: str, kind: str = "trades"):
                              "close": c["close"], "volume": c.get("volume", 0)})
         csv_str = _rows_to_csv(rows, ["symbol", "timeframe", "timestamp", "time_utc",
                                       "open", "high", "low", "close", "volume"])
+    elif kind == "equity":
+        rows = await _backtest_trade_rows(job_id)
+        if rows is None:
+            raise HTTPException(status_code=404, detail="Keine Trade-Daten für diesen Backtest gefunden")
+        csv_str = _rows_to_csv(_equity_points(rows),
+                               ["t", "equity", "peak", "drawdown", "pnl", "symbol",
+                                "strategy_id", "strategy_name", "side", "result",
+                                "liquidated"])
     else:
         rows = (job or {}).get("export_trades")
         if rows is None:
@@ -1561,6 +1781,7 @@ async def backtest_export(job_id: str, kind: str = "trades"):
         fields = ["strategy_id", "strategy_name", "symbol", "timeframe", "side",
                   "opened", "closed", "duration_min", "entry", "exit", "sl_initial",
                   "sl_final", "tp1", "tp_full", "risk", "result", "pnl", "fees", "qty",
+                  "leverage", "liquidated", "liq_price",
                   "tp1_done", "breakeven_moved", "crv_signal", "rules_met", "rules_total",
                   "rsi_entry", "ema_fast_entry", "ema_slow_entry", "atr_entry",
                   "entry_candle_open", "entry_candle_high", "entry_candle_low",
@@ -1573,6 +1794,105 @@ async def backtest_export(job_id: str, kind: str = "trades"):
 
 # ---------------- Optimizer ----------------
 from services import optimizer as opt
+
+
+# ---------------- System / RAM / Cache ----------------
+@app.get("/api/system/ram")
+async def system_ram():
+    """RAM-Auslastung inkl. Bewertung, was viel Speicher braucht."""
+    import psutil
+    from services import candle_cache
+    proc = psutil.Process()
+    rss_mb = proc.memory_info().rss / 1024 / 1024
+    vm = psutil.virtual_memory()
+    cstats = candle_cache.stats()
+    # ~500 Bytes pro Kerze im dict-Format (Messung)
+    cache_mb = cstats["total_candles"] * 500 / 1024 / 1024
+    export_candles = 0
+    export_trades = 0
+    for j in bt.JOBS.values():
+        export_candles += sum(len(v) for v in (j.get("export_candles") or {}).values())
+        export_trades += len(j.get("export_trades") or [])
+    export_mb = export_candles * 500 / 1024 / 1024 + export_trades * 900 / 1024 / 1024
+    return {
+        "process_rss_mb": round(rss_mb, 1),
+        "system_total_mb": round(vm.total / 1024 / 1024),
+        "system_available_mb": round(vm.available / 1024 / 1024),
+        "system_used_percent": vm.percent,
+        "candle_cache": {
+            "symbols": cstats["symbols"],
+            "total_candles": cstats["total_candles"],
+            "estimated_mb": round(cache_mb, 1),
+            "max_candles": cstats["max_candles"],
+            "disk_enabled": cstats["disk_enabled"],
+        },
+        "backtest_exports": {
+            "candles": export_candles, "trades": export_trades,
+            "estimated_mb": round(export_mb, 1),
+        },
+        "breakdown_hint": {
+            "kerzen_cache": f"~{round(cache_mb, 1)} MB (größter Posten bei langen Zeiträumen)",
+            "backtest_export": f"~{round(export_mb, 1)} MB (Kerzen/Trades des letzten Laufs für CSV)",
+            "fast_path": "FastSeries: ~8 Bytes/Kerze pro Indikator-Serie, wird nach jedem "
+                         "Symbol wieder freigegeben (gering)",
+            "basis": "Python + Bibliotheken: ~150-250 MB Grundlast",
+        },
+    }
+
+
+@app.post("/api/system/cache/clear")
+async def system_cache_clear(_: bool = Depends(require_admin)):
+    """Kerzen-Cache leeren + Backtest-Export-Rohdaten freigeben (RAM-Reset)."""
+    import gc
+    from services import candle_cache
+    before = candle_cache.stats()["total_candles"]
+    candle_cache.clear()
+    for j in bt.JOBS.values():
+        j.pop("export_candles", None)
+        j.pop("export_trades", None)
+    gc.collect()
+    return {"status": "cleared", "candles_freed": before}
+
+
+# ---- Backtest-Einstellungen in Live/Paper-Trading übernehmen ----
+@app.post("/api/backtest/apply")
+async def backtest_apply(body: Dict, _: bool = Depends(require_admin)):
+    """Übernimmt Backtest-Konfiguration einer Strategie als Live/Paper-Setup
+    für ausgewählte Coins (schreibt strategy_coin_configs)."""
+    sid = body.get("strategy_id")
+    if not sid or not strategy_registry.get(sid):
+        raise HTTPException(status_code=400, detail="Gültige strategy_id erforderlich")
+    symbols = [s for s in (body.get("symbols") or []) if s in ALL_SYMBOLS]
+    if not symbols:
+        raise HTTPException(status_code=400, detail="Mindestens 1 Coin erforderlich")
+    mode = body.get("mode", "paper")
+    if mode not in ("paper", "live"):
+        raise HTTPException(status_code=400, detail="mode muss paper|live sein")
+    cfg_in = body.get("config") or {}
+    allowed = ("max_capital", "leverage", "fee_percent", "tp1_crv", "tp_full_crv",
+               "tp1_close_percent", "sl_mode", "sl_fixed_percent", "sl_lookback",
+               "sl_ticks", "breakeven_enabled", "be_mode", "be_trigger_crv",
+               "be_trigger_profit_pct", "be_smart_lookback", "require_all_rules",
+               "profit_secure_enabled", "profit_secure_trigger_pct", "profit_lock_pct",
+               "tp_mode", "tp1_percent", "tp_full_percent", "trade_pre_signals",
+               "maintenance_margin_rate")
+    applied = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for sym in symbols:
+        key = f"{sid}_{sym}"
+        doc = await app.mongodb.strategy_coin_configs.find_one({"_id": key})
+        merged = {**DEFAULT_STRATEGY_COIN_CFG, **((doc or {}).get("config", {}))}
+        for k in allowed:
+            if cfg_in.get(k) is not None:
+                merged[k] = cfg_in[k]
+        merged["mode"] = mode
+        merged["enabled"] = True
+        merged["backtest_applied"] = now_iso
+        await app.mongodb.strategy_coin_configs.replace_one(
+            {"_id": key}, {"_id": key, "config": merged}, upsert=True)
+        autotrader.config.setdefault("strategy_coin_configs", {})[key] = merged
+        applied.append(sym)
+    return {"status": "success", "strategy_id": sid, "mode": mode, "symbols": applied}
 
 
 @app.post("/api/optimizer/run")
@@ -1601,10 +1921,37 @@ async def start_optimizer(body: Dict, _: bool = Depends(require_admin)):
                                        "min_trades", "max_rules", "indicators",
                                        "algorithm", "base_strategy_id")}
     job_id = opt.create_job(params)
-    asyncio.create_task(opt.run_optimizer(job_id, body, strategy_registry,
-                                          scanner.settings, DEFAULT_COIN_CFG,
-                                          app.mongodb))
+    task = asyncio.create_task(opt.run_optimizer(job_id, body, strategy_registry,
+                                                 scanner.settings, DEFAULT_COIN_CFG,
+                                                 app.mongodb))
+    _watch_job_task(task, opt.JOBS, job_id)
     return {"status": "started", "job_id": job_id}
+
+
+@app.post("/api/optimizer/reset")
+async def optimizer_reset(_: bool = Depends(require_admin)):
+    """Notfall-Reset: hängende/geisterhafte Optimierungen freigeben."""
+    n = 0
+    for j in opt.JOBS.values():
+        if j.get("status") == "running":
+            j["cancel"] = True
+            j["status"] = "cancelled"
+            j["phase"] = "Zurückgesetzt (Notfall-Reset)"
+            n += 1
+    return {"status": "reset", "cleared": n}
+
+
+@app.post("/api/backtest/reset")
+async def backtest_reset(_: bool = Depends(require_admin)):
+    """Notfall-Reset: hängende/geisterhafte Backtests freigeben."""
+    n = 0
+    for j in bt.JOBS.values():
+        if j.get("status") == "running":
+            j["cancel"] = True
+            j["status"] = "cancelled"
+            j["phase"] = "Zurückgesetzt (Notfall-Reset)"
+            n += 1
+    return {"status": "reset", "cleared": n}
 
 
 @app.get("/api/optimizer/status/{job_id}")
@@ -1643,6 +1990,142 @@ async def optimizer_results(limit: int = 5):
     return {"results": [_clean(r) for r in rows]}
 
 
+async def _load_optimizer_result(job_id: str) -> Optional[Dict]:
+    """Best-Ergebnis eines Optimizer-Laufs: erst RAM-Cache, dann DB."""
+    job = opt.JOBS.get(job_id)
+    if job and job.get("result"):
+        return job["result"]
+    if app.mongodb is not None:
+        doc = await app.mongodb.optimizer_runs.find_one({"id": job_id})
+        if doc:
+            return doc.get("result")
+    return None
+
+
+@app.get("/api/optimizer/equity/{job_id}")
+async def optimizer_equity(job_id: str, scope: str = "optimized"):
+    """Equity-Kurve für das beste Optimizer-Ergebnis. scope=optimized (Standard)
+    simuliert nur die im Lauf verwendeten Coins, scope=all simuliert alle Top-Coins,
+    damit man sieht, wie robust die Strategie außerhalb des Trainingssets ist."""
+    from services.backtester import fetch_history, simulate_pair
+    from services import backtester as bt_svc
+    result = await _load_optimizer_result(job_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Optimierungs-Ergebnis nicht gefunden")
+
+    tf = result.get("timeframe") or "1m"
+    days = int(result.get("days") or 3)
+    mode = result.get("mode") or "params"
+    opt_symbols = list(result.get("symbols") or [])
+    if scope == "all":
+        symbols = list(TOP_10_COINS)
+    else:
+        symbols = opt_symbols
+    if not symbols:
+        raise HTTPException(status_code=400, detail="Keine Coins verfügbar")
+
+    # Best-Parameter + Trade-Parameter aus dem Ergebnis rekonstruieren
+    if mode == "params":
+        sid = result.get("strategy_id")
+        strategy = strategy_registry.get(sid)
+        if not strategy:
+            raise HTTPException(status_code=404, detail="Strategie nicht mehr verfügbar")
+        best = result.get("best") or {}
+        best_params = best.get("params") or {}
+        best_tp = best.get("trade_params") or {}
+        strat_name = getattr(strategy, "STRATEGY_NAME", sid)
+    else:
+        from strategies.custom_strategy import CustomStrategy
+        definition = result.get("definition")
+        if not definition:
+            raise HTTPException(status_code=400, detail="Keine Regeldefinition im Ergebnis")
+        strategy = CustomStrategy({**definition, "id": definition.get("id") or f"opt_{job_id}"})
+        sid = strategy.STRATEGY_ID
+        best_params = {}
+        best_tp = result.get("trade_params") or {}
+        strat_name = definition.get("name") or "Entdeckte Strategie"
+
+    eff_settings = dict(scanner.settings)
+    if best_params:
+        sp = dict(eff_settings.get("strategy_params", {}))
+        sp[sid] = {**sp.get(sid, {}), **best_params}
+        eff_settings["strategy_params"] = sp
+
+    cap = float(result.get("max_capital") or DEFAULT_COIN_CFG.get("max_capital", 100.0))
+    eff_cfg = {**DEFAULT_COIN_CFG, "max_capital": cap, **best_tp}
+
+    points: List[Dict] = []
+    try:
+        import aiohttp
+
+        async def _sim_one(session, sym):
+            try:
+                raw = await fetch_history(session, sym, days)
+                candles = bt_svc.aggregate_candles(raw, tf)
+                del raw
+                if len(candles) <= 100:
+                    return []
+                res = await asyncio.to_thread(simulate_pair, strategy, candles, sym,
+                                              eff_settings, eff_cfg, None, True, None, None)
+                out = []
+                for t in (res.get("all_trades") or []):
+                    if not t.get("closed"):
+                        continue
+                    out.append({
+                        "t": t["closed"], "pnl": float(t.get("pnl") or 0),
+                        "symbol": sym, "strategy_id": sid, "strategy_name": strat_name,
+                        "side": t.get("side"), "result": t.get("result"),
+                        "liquidated": bool(t.get("liquidated")),
+                    })
+                return out
+            except Exception as e:
+                logger.warning(f"optimizer_equity {sym} failed: {e}")
+                return []
+
+        async with aiohttp.ClientSession() as session:
+            # Parallelisiert – gerade für scope=all deutlich schneller (bis zu 10x)
+            results_lists = await asyncio.gather(*[_sim_one(session, s) for s in symbols])
+            for lst in results_lists:
+                points.extend(lst)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Simulation fehlgeschlagen: {e}")
+
+    points.sort(key=lambda p: p["t"])
+    # Kumulierten PnL + Peak/Drawdown ergänzen, damit das Frontend die gleichen Felder wie beim Backtest bekommt
+    eq, peak = 0.0, 0.0
+    out = []
+    for p in points:
+        eq += p["pnl"]; peak = max(peak, eq)
+        out.append({**p, "equity": round(eq, 4), "peak": round(peak, 4),
+                    "drawdown": round(peak - eq, 4)})
+    return {"job_id": job_id, "scope": scope, "symbols": symbols, "points": out}
+
+
+@app.get("/api/optimizer/overrides/{strategy_id}")
+async def optimizer_overrides(strategy_id: str):
+    """Coins, die Coin-spezifische Optimizer-Einstellungen für diese Strategie haben."""
+    param_syms = {s for s, v in
+                  scanner.settings.get("coin_params", {}).get(strategy_id, {}).items() if v}
+    trade_syms = set()
+    prefix = strategy_id + "_"
+    docs = await app.mongodb.strategy_coin_configs.find(
+        {"_id": {"$regex": f"^{prefix}"}}).to_list(500)
+    for d in docs:
+        cfg = d.get("config", {})
+        if cfg.get("optimizer_applied"):
+            trade_syms.add((d.get("_id") or "")[len(prefix):])
+    return {"strategy_id": strategy_id, "symbols": sorted(param_syms | trade_syms)}
+
+
+# Trade-Parameter, die der Optimizer in Live/Paper/Backtest-Configs schreiben darf
+OPT_TRADE_KEYS = ("tp1_crv", "tp_full_crv", "tp1_close_percent", "sl_lookback",
+                  "sl_mode", "sl_fixed_percent", "atr_sl_multiplier",
+                  "be_mode", "be_trigger_crv", "be_trigger_profit_pct",
+                  "profit_secure_enabled", "profit_secure_trigger_pct", "profit_lock_pct",
+                  "leverage", "auto_leverage_enabled", "auto_lev_mode",
+                  "auto_lev_value", "auto_lev_max", "sessions")
+
+
 @app.post("/api/optimizer/apply")
 async def optimizer_apply(body: Dict, _: bool = Depends(require_admin)):
     """Optimierungs-Ergebnis übernehmen:
@@ -1654,16 +2137,49 @@ async def optimizer_apply(body: Dict, _: bool = Depends(require_admin)):
         if not sid or not strategy_registry.get(sid):
             raise HTTPException(status_code=400, detail="Gültige strategy_id erforderlich")
         params = body.get("params") or {}
+        trade_params = body.get("trade_params") or {}
+        scope = body.get("scope", "global")
+
+        # ---- scope=coins: Coin-spezifische Overrides nur für optimierte Coins ----
+        if scope == "coins":
+            symbols = [s for s in (body.get("symbols") or []) if s in ALL_SYMBOLS]
+            if not symbols:
+                raise HTTPException(status_code=400,
+                                    detail="Mindestens 1 Coin erforderlich für scope=coins")
+            now_iso = datetime.now(timezone.utc).isoformat()
+            if params:
+                cp = dict(scanner.settings.get("coin_params", {}))
+                strat_cp = dict(cp.get(sid, {}))
+                for sym in symbols:
+                    strat_cp[sym] = {**strat_cp.get(sym, {}), **params}
+                cp[sid] = strat_cp
+                scanner.update_settings({"coin_params": cp})
+                await app.mongodb.settings.update_one({"_id": "scanner_settings"},
+                                                      {"$set": scanner.settings}, upsert=True)
+            for sym in symbols:
+                key = f"{sid}_{sym}"
+                doc = await app.mongodb.strategy_coin_configs.find_one({"_id": key})
+                cfg_sc = dict((doc or {}).get("config", {}))
+                for k in OPT_TRADE_KEYS:
+                    if trade_params.get(k) is not None:
+                        cfg_sc[k] = trade_params[k]
+                cfg_sc["optimizer_applied"] = now_iso
+                await app.mongodb.strategy_coin_configs.replace_one(
+                    {"_id": key}, {"_id": key, "config": cfg_sc}, upsert=True)
+                autotrader.config.setdefault("strategy_coin_configs", {})[key] = cfg_sc
+            return {"status": "success", "strategy_id": sid, "scope": "coins",
+                    "symbols": symbols, "params": params, "trade_params": trade_params}
+
+        # ---- scope=global (Default): Einstellungen für alle Coins ----
         sp = dict(scanner.settings.get("strategy_params", {}))
         sp[sid] = {**sp.get(sid, {}), **params}
         scanner.update_settings({"strategy_params": sp})
         await app.mongodb.settings.update_one({"_id": "scanner_settings"},
                                               {"$set": scanner.settings}, upsert=True)
-        trade_params = body.get("trade_params") or {}
         if trade_params:
             overrides = dict(autotrader.config.get("strategy_overrides", {}))
             current = overrides.get(sid, dict(DEFAULT_STRATEGY_OVERRIDE))
-            for k in ("tp1_crv", "tp_full_crv", "tp1_close_percent", "sl_lookback"):
+            for k in OPT_TRADE_KEYS:
                 if trade_params.get(k) is not None:
                     current[k] = trade_params[k]
             overrides[sid] = current
@@ -1676,7 +2192,7 @@ async def optimizer_apply(body: Dict, _: bool = Depends(require_admin)):
                 {"$set": {"mode": new_cfg["mode"], "coins": new_cfg["coins"],
                           "strategy_overrides": overrides}}, upsert=True)
         return {"status": "success", "strategy_id": sid, "params": sp[sid],
-                "trade_params": trade_params}
+                "trade_params": trade_params, "scope": "global"}
     if apply_type == "backtest":
         # Beste Parameter in die Backtest-Strategie-Einstellungen übernehmen,
         # damit optimierte Strategien direkt im Backtester getestet werden können
@@ -1690,7 +2206,7 @@ async def optimizer_apply(body: Dict, _: bool = Depends(require_admin)):
         if params:
             c["params"] = {**c.get("params", {}), **params}
         trade_params = body.get("trade_params") or {}
-        for k in ("tp1_crv", "tp_full_crv", "tp1_close_percent", "sl_lookback"):
+        for k in OPT_TRADE_KEYS:
             if trade_params.get(k) is not None:
                 c[k] = trade_params[k]
         if body.get("timeframe"):
@@ -1731,6 +2247,18 @@ async def optimizer_apply(body: Dict, _: bool = Depends(require_admin)):
             scanner.update_settings({"strategy_timeframes": tfs})
         await app.mongodb.settings.update_one({"_id": "scanner_settings"},
                                               {"$set": scanner.settings}, upsert=True)
+        # Optimierte Trade-Einstellungen als Backtest-Config der neuen Strategie sichern
+        trade_params = body.get("trade_params") or {}
+        if trade_params:
+            doc = await app.mongodb.settings.find_one({"_id": "backtest_strategy_configs"})
+            configs = (doc or {}).get("configs", {})
+            c = dict(configs.get(sid, {}))
+            for k in OPT_TRADE_KEYS:
+                if trade_params.get(k) is not None:
+                    c[k] = trade_params[k]
+            configs[sid] = c
+            await app.mongodb.settings.update_one({"_id": "backtest_strategy_configs"},
+                                                  {"$set": {"configs": configs}}, upsert=True)
         return {"status": "success", "id": sid, "definition": definition,
                 "updated": bool(body.get("update_strategy_id"))}
     raise HTTPException(status_code=400, detail="type muss params|strategy|backtest sein")
@@ -1807,6 +2335,10 @@ DEFAULT_STRATEGY_OVERRIDE = {
     "profit_secure_enabled": False,
     "profit_secure_trigger_pct": 30.0,
     "profit_lock_pct": 50.0,
+    "auto_leverage_enabled": False,
+    "auto_lev_mode": "liq_pct",
+    "auto_lev_value": 0.5,
+    "auto_lev_max": 50,
 }
 
 
@@ -1896,6 +2428,10 @@ DEFAULT_STRATEGY_COIN_CFG: dict = {
     "profit_secure_enabled": False,
     "profit_secure_trigger_pct": 30.0,
     "profit_lock_pct": 50.0,
+    "auto_leverage_enabled": False,
+    "auto_lev_mode": "liq_pct",
+    "auto_lev_value": 0.5,
+    "auto_lev_max": 50,
 }
 
 @app.get("/api/autotrade/strategy/{strategy_id}/coin/{symbol}")
@@ -1973,6 +2509,69 @@ async def close_trade(trade_id: str, _: bool = Depends(require_admin)):
     return {"status": "success", "result": res}
 
 
+@app.get("/api/autotrade/capital")
+async def get_capital_allocation():
+    """Kapital-Zuweisung für Live & Paper inkl. aktuell zugewiesenem/freiem Kapital."""
+    total = await autotrader._live_total_balance()
+    out = {}
+    for scope in ("live", "paper"):
+        a = autotrader.capital_allocation(scope)
+        allocated = await autotrader.allocated_capital(
+            scope, total=total if scope == "live" else None)
+        used = await autotrader.used_margin(scope)
+        out[scope] = {
+            **a,
+            "allocated": round(allocated, 2) if allocated is not None else None,
+            "used_margin": round(used, 2),
+            "free": round(allocated - used, 2) if allocated is not None else None,
+        }
+    return {"allocation": out,
+            "live_total_balance": round(total, 2) if total is not None else None,
+            "bitunix_configured": trade_client.configured()}
+
+
+@app.post("/api/autotrade/capital")
+async def set_capital_allocation(body: Dict, _: bool = Depends(require_admin)):
+    """Kapital-Zuweisung speichern: scope=live|paper, mode=full|fixed|percent, value."""
+    scope = body.get("scope")
+    if scope not in ("live", "paper"):
+        raise HTTPException(status_code=400, detail="scope muss live|paper sein")
+    mode = body.get("mode")
+    if mode not in ("full", "fixed", "percent"):
+        raise HTTPException(status_code=400, detail="mode muss full|fixed|percent sein")
+    try:
+        value = float(body.get("value") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Ungültiger Wert")
+    if mode == "fixed" and value <= 0:
+        raise HTTPException(status_code=400, detail="Fester Betrag muss größer als 0 sein")
+    if mode == "percent" and not (0 < value <= 100):
+        raise HTTPException(status_code=400, detail="Prozentsatz muss zwischen 1 und 100 liegen")
+    if mode == "fixed" and scope == "live":
+        total = await autotrader._live_total_balance()
+        if total is not None and value > total:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Fester Betrag ({value:.2f} USDT) übersteigt das Gesamtguthaben ({total:.2f} USDT)")
+    alloc = dict(autotrader.config.get("capital_allocation", {}) or {})
+    entry = dict(alloc.get(scope, {}))
+    entry.update({"mode": mode, "value": value})
+    if scope == "paper" and body.get("base_balance") is not None:
+        try:
+            bb = float(body["base_balance"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Ungültiges Simulations-Guthaben")
+        if bb <= 0:
+            raise HTTPException(status_code=400, detail="Simulations-Guthaben muss größer als 0 sein")
+        entry["base_balance"] = bb
+    alloc[scope] = entry
+    autotrader.config["capital_allocation"] = alloc
+    await app.mongodb.settings.update_one({"_id": "capital_allocation"},
+                                          {"$set": alloc}, upsert=True)
+    logger.info(f"[Capital] Allocation saved: {scope} -> {entry}")
+    return {"status": "success", "allocation": alloc}
+
+
 @app.get("/api/autotrade/balance")
 async def get_balance():
     # Current mode (live or paper)
@@ -2041,6 +2640,27 @@ async def get_balance():
                 result["paper_closed_trades"] = len(paper_closed)
         except Exception:
             pass  # Don't break the main balance if paper query fails
+
+    # ---- Kapital-Zuweisung (für Balance-Widget) ----
+    try:
+        live_total = result.get("wallet_balance")
+        alloc_out = {}
+        for scope in ("live", "paper"):
+            a = autotrader.capital_allocation(scope)
+            allocated = await autotrader.allocated_capital(
+                scope, total=live_total if scope == "live" else None)
+            used = await autotrader.used_margin(scope)
+            alloc_out[scope] = {
+                "mode": a.get("mode", "full"),
+                "value": a.get("value", 0),
+                "base_balance": a.get("base_balance"),
+                "allocated": round(allocated, 2) if allocated is not None else None,
+                "used_margin": round(used, 2),
+                "free": round(allocated - used, 2) if allocated is not None else None,
+            }
+        result["allocation"] = alloc_out
+    except Exception as e:
+        logger.warning(f"balance allocation info failed: {e}")
 
     return result
 

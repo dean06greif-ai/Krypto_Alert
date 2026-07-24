@@ -358,3 +358,79 @@ class EMAPullbackScalpingStrategy(BaseStrategy):
             "take_profit_full": round(tpf, 6),
             "crv": round(self.indicators.calculate_crv(entry, sl, tpf), 2),
         }
+
+    # ----------------------- Vectorized Fast-Path -----------------------
+    @staticmethod
+    def vectorized_signals(fs, params: Dict) -> Optional[Dict]:
+        """3-EMA-Trend + Pullback + Rückkehr (inkl. Pre-Signale) -- vektorisiert."""
+        import numpy as np
+        import pandas as pd
+        ema_f_p = int(params["ema_fast_period"])
+        ema_m_p = int(params["ema_mid_period"])
+        ema_s_p = int(params["ema_slow_period"])
+        slope_lb = int(params["ema_slope_lookback"])
+        pb_lb = int(params["pullback_lookback"])
+        min_spacing = float(params["ema_min_spacing_pct"]) / 100.0
+        require_mid = int(params.get("require_mid_ema_touch", 0)) == 1
+        need = max(ema_s_p + slope_lb + 5, pb_lb + ema_s_p, 120)
+
+        close, low, high = fs.close, fs.low, fs.high
+        ef = fs._cached_ema(ema_f_p)
+        em = fs._cached_ema(ema_m_p)
+        es = fs._cached_ema(ema_s_p)
+        atr = fs.get("atr", {"atr_period": int(params["atr_period"])})
+
+        def shift(a, k):
+            return np.concatenate([np.full(k, np.nan), a[:-k]])
+
+        ef_p, em_p, es_p = shift(ef, slope_lb), shift(em, slope_lb), shift(es, slope_lb)
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            r1_long = (ef > ef_p) & (em > em_p) & (es > es_p)
+            r1_short = (ef < ef_p) & (em < em_p) & (es < es_p)
+
+            spacing = np.abs(ef - em) / close
+            r2_long = (ef > em) & (em > es) & (spacing >= min_spacing)
+            r2_short = (ef < em) & (em < es) & (spacing >= min_spacing)
+
+            # Pullback über die letzten (pb_lb - 1) Kerzen VOR der aktuellen
+            def rolled_any(cond):
+                s = pd.Series(np.where(np.isnan(cond.astype(float)), 0.0,
+                                       cond.astype(float)))
+                win = max(pb_lb - 1, 1)
+                return (s.rolling(win, min_periods=1).max().shift(1)
+                        .to_numpy() >= 0.5)
+
+            dip_fast = rolled_any(low < ef)
+            dip_mid = rolled_any(low < em)
+            brk_slow_l = rolled_any(low < es)
+            spike_fast = rolled_any(high > ef)
+            spike_mid = rolled_any(high > em)
+            brk_slow_s = rolled_any(high > es)
+
+            r3_long = dip_fast & ~brk_slow_l & (dip_mid if require_mid
+                                                else np.ones(fs.n, dtype=bool))
+            r3_short = spike_fast & ~brk_slow_s & (spike_mid if require_mid
+                                                   else np.ones(fs.n, dtype=bool))
+
+            r4_long = close > ef
+            r4_short = close < ef
+
+            massive = (~np.isnan(atr)) & (atr > 0) & ((high - low) > atr * 4.0)
+
+            long_ok = r1_long & r2_long & r3_long & r4_long & ~massive
+            short_ok = r1_short & r2_short & r3_short & r4_short & ~massive
+            long_pre = (r1_long & r2_long & r3_long & ~r4_long & ~massive
+                        & (close > em))
+            short_pre = (r1_short & r2_short & r3_short & ~r4_short & ~massive
+                         & (close < em))
+
+        valid = (~np.isnan(ef) & ~np.isnan(em) & ~np.isnan(es)
+                 & ~np.isnan(ef_p) & ~np.isnan(em_p) & ~np.isnan(es_p))
+        long_ok &= valid
+        short_ok &= valid
+        long_pre &= valid
+        short_pre &= valid
+        return {"long": long_ok, "short": short_ok,
+                "long_pre": long_pre, "short_pre": short_pre,
+                "warmup": need, "rules_total": 4, "rsi": None}

@@ -24,6 +24,7 @@ class FastSeries:
     def __init__(self, candles: List[Dict]):
         self.candles = candles
         self.n = len(candles)
+        self.open = np.array([c["open"] for c in candles], dtype=float)
         self.close = np.array([c["close"] for c in candles], dtype=float)
         self.high = np.array([c["high"] for c in candles], dtype=float)
         self.low = np.array([c["low"] for c in candles], dtype=float)
@@ -307,6 +308,8 @@ def build_builtin_signal_provider(strategy, fs: FastSeries, settings: Dict,
     warmup = int(out.get("warmup", 60))
     total = int(out.get("rules_total", 0))
     rsi_arr = out.get("rsi")
+    long_pre = out.get("long_pre")
+    short_pre = out.get("short_pre")
     close = fs.close
 
     def provider(i: int) -> Optional[Dict]:
@@ -322,6 +325,19 @@ def build_builtin_signal_provider(strategy, fs: FastSeries, settings: Dict,
             return {"type": "SHORT", "signal_class": "SIGNAL",
                     "entry_price": float(close[i]),
                     "rules_met_count": total, "rules_total": total,
+                    "rsi": float(rsi_arr[i]) if rsi_arr is not None
+                    and not np.isnan(rsi_arr[i]) else None}
+        # Pre-Signale (z.B. EMA Pullback: alles außer Rückkehr-Regel erfüllt)
+        if long_pre is not None and long_pre[i]:
+            return {"type": "LONG", "signal_class": "PRE_SIGNAL",
+                    "entry_price": float(close[i]),
+                    "rules_met_count": max(total - 1, 0), "rules_total": total,
+                    "rsi": float(rsi_arr[i]) if rsi_arr is not None
+                    and not np.isnan(rsi_arr[i]) else None}
+        if short_pre is not None and short_pre[i]:
+            return {"type": "SHORT", "signal_class": "PRE_SIGNAL",
+                    "entry_price": float(close[i]),
+                    "rules_met_count": max(total - 1, 0), "rules_total": total,
                     "rsi": float(rsi_arr[i]) if rsi_arr is not None
                     and not np.isnan(rsi_arr[i]) else None}
         return None
@@ -343,3 +359,43 @@ def _cross_down(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     out = (ap >= bp) & (a < b)
     out &= ~np.isnan(ap) & ~np.isnan(bp)
     return out
+
+
+def sweep_arrays(fs: FastSeries, left: int = 2, right: int = 2):
+    """Vektorisierte Liquidity-Sweep-Erkennung (identisch zu TI.liquidity_sweep):
+    Fraktal-Swings; letzte 3 Swing-Lows/Highs VOR der aktuellen Kerze;
+    bullish = Low unterschreitet Recent-Low, Close schließt darüber."""
+    n = fs.n
+    win = left + right + 1
+    lo_s = pd.Series(fs.low)
+    hi_s = pd.Series(fs.high)
+    is_sl = (fs.low <= lo_s.rolling(win, center=True).min().to_numpy())
+    is_sh = (fs.high >= hi_s.rolling(win, center=True).max().to_numpy())
+    bull = np.zeros(n, dtype=bool)
+    bear = np.zeros(n, dtype=bool)
+    lows: List[float] = []   # letzte Swing-Low-Preise
+    highs: List[float] = []
+    low, high, close = fs.low, fs.high, fs.close
+    for t in range(n):
+        # Swing bei j ist ab t sichtbar, wenn j + right <= t - 1  (prior = candles[:-1])
+        j = t - 1 - right
+        if j >= left:
+            if is_sl[j]:
+                lows.append(low[j])
+                if len(lows) > 3:
+                    lows.pop(0)
+            if is_sh[j]:
+                highs.append(high[j])
+                if len(highs) > 3:
+                    highs.pop(0)
+        if t < left + right + 4:  # len(candles) >= left+right+5 Guard
+            continue
+        if lows:
+            rl = min(lows)
+            if low[t] < rl and close[t] > rl:
+                bull[t] = True
+        if highs:
+            rh = max(highs)
+            if high[t] > rh and close[t] < rh:
+                bear[t] = True
+    return bull, bear

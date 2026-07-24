@@ -1,71 +1,79 @@
-# PRD – Crypto Scanner / Daytrading Website (extern gehostet, Render + eigenes Frontend)
+# PRD – Antons Daytrading Website (Crypto Scanner / Backtester / Optimizer)
 
-## Original-Problemstellung (Juni 2026)
-Bestehende funktionierende Daytrading-Website (GitHub: dean06greif-ai/CryptoParameterOptimizer1) verbessern:
-längere Zeiträume (60/90/180/360 Tage) überall, Abbruch-Button + persistenter Fortschritt (%, Kombination, Restzeit),
-Backtests schneller & 100% akkurat ohne Selbst-Abbruch, Bayes'sche Optimierung, bestehende Strategien weiterentwickeln,
-optimierte Parameter in Backtester übertragen, Zeitfenster pro Strategie (auch im Backtester), Break-Even konfigurierbar
-(TP1/CRV/Gewinn-%/Smart/aus), Bugs: Min-Rel-Volumen ohne Wirkung, Trades bei 3/5 Regeln, Gewinnsicherung unsichtbar/wirkungslos.
-Infra: Render Free (512MB/0.1 CPU) – prüfen ob Code oder Infra der Flaschenhals ist.
+## Original-Problemstellung
+Bestehende, funktionierende externe Daytrading-Website (von GitHub: AntonsBacktesterUpgrade22071051,
+React + FastAPI + MongoDB, Bitunix-Anbindung für Live/Paper-Trading) soll verbessert werden.
+Die Seite bleibt extern/ausgelagert gehostet.
 
 ## Architektur
-- Frontend: React (CRA/craco), Komponenten unter frontend/src/components (Backtester.js, Optimizer.js, SettingsPanel.js, StrategyAutoTradeModal.js, StrategyBuilder.js ...)
-- Backend: FastAPI (backend/server.py ~2000 Zeilen), Services: backtester.py, optimizer.py, fast_sim.py (NEU), strategy_scanner.py, bitunix_trade.py, market_data.py
-- DB: MongoDB (settings, custom_strategies, auto_trades, backtests, optimizer_runs, backtest_trades)
-- Marktdaten: Binance public API (data-api.binance.vision), Fallback Bitunix/OKX; Live-Trading via Bitunix (Keys via env)
-- Admin-Auth: JWT, Login Admin/admin (env ADMIN_USER/ADMIN_PASSWORD)
+- Frontend: React (CRA), recharts, lightweight-charts, Phosphor Icons – /app/frontend
+- Backend: FastAPI – /app/backend/server.py + services/ (backtester, optimizer, fast_sim,
+  bitunix_trade, strategy_scanner, candle_cache) + strategies/ (registry, custom_strategy)
+- DB: MongoDB (settings, custom_strategies, strategy_coin_configs, backtest_results,
+  backtest_trades, optimizer_results, trades)
+- Admin-Auth: POST /api/auth/login (Admin/admin), Bearer-Token
 
-## Umgesetzt (21.07.2026 – aktueller Durchgang)
-1. **Kerzen-Cache** (`services/candle_cache.py`):
-   - Hybrid In-Memory (LRU nach used_at) + Disk-Fallback (`/tmp/candle_cache/*.pkl.gz`, gzipped pickle).
-   - Nur der fehlende Head/Tail wird nachgeladen (EXTEND-HEAD/EXTEND-TAIL).
-   - TAIL_TTL 45s: laufende Minute wird periodisch refresht.
-   - Default MAX 500k Kerzen (~250MB), Rest evict → Disk → automatischer Reload beim nächsten Zugriff.
-   - Cache-Stats in `GET /api/debug/status` sichtbar.
-   - `fetch_history` verwendet ihn transparent (kein Aufrufer-Change nötig).
-   - Verifiziert: 2. identischer 30d/2-Coin/3-Strategien-Backtest lief in 2.3s statt 23s (10× schneller).
-2. **Fast-Path für Built-in-Strategien** (opt-in via `vectorized_signals()`):
-   - Infrastruktur in `services/fast_sim.py:build_builtin_signal_provider()`.
-   - Built-in ohne Methode → automatischer Legacy-Fallback (kein Bruch).
-   - Umgesetzt für: `rsi_only` (inkl. vektorisiertem Liquidity-Sweep O(N)), `macd_rsi_momentum`, `scalping_4_rules`.
-   - Verifiziert: identische Trades/PnL zu Legacy, 38× / 104× / 236× schneller.
-   - Backtester + Optimizer nutzen den Fast-Path für Built-ins automatisch.
-3. **Render-Deployment-Vorbereitung** (`/app/render.yaml`):
-   - `startCommand` respektiert `$PORT`, `--workers 1` (0.1 CPU).
-   - OMP/OpenBLAS/MKL-Threads auf 1 gepinnt (verhindert Context-Switch-Overhead).
-   - Kerzen-Cache Env-Vars (MAX_CANDLES, DIR, DISK) vorkonfiguriert.
-   - Health-Check `/api/health`.
-   - Deployment-Agent Check: PASS (keine Blocker).
+## Umgesetzt am 22.07.2026 (alle Punkte getestet, 11/11 Backend-Tests, Frontend 100%)
+1. **Strategie-Komplett-Backup pro Strategie**
+   - GET /api/strategies/{id}/export → JSON (Name, Typ, Long/Short-Regeln, Parameter,
+     TP/SL, Break-Even, Gewinnsicherung, Auto-Leverage, Timeframe, Zeitfenster,
+     Live/Paper-Overrides, Per-Coin-Trade-Configs, Backtest-Config)
+   - POST /api/strategies/import → 1:1-Wiederherstellung auch nach Löschung
+   - UI: Download-Button pro Strategie + "Strategie importieren" im Strategie-Manager
+     (StrategyBuilder), Export/Import zusätzlich im ⚙-Einstellungspanel (SettingsPanel)
+     und Trade-Settings-Export weiterhin im Blitz-Modal (StrategyAutoTradeModal)
+2. **Discovery/Custom-Strategien im Backtester bearbeitbar**: ⚙-Panel zeigt jetzt
+   Regeln (Schwellenwerte editierbar) + Indikator-Perioden als Definition-Override
+   (strategy_configs[sid].definition, nur für den Backtest)
+3. **Auto-Leverage** (effective_leverage in backtester.py, genutzt von Backtester + Live/Paper):
+   Modi: Liquidation X% hinter Stop / X Ticks (1 Tick = 0.01%) hinter Stop, Max-Hebel-Cap.
+   Verfügbar: global im Backtester, pro Strategie (⚙), Live/Paper-Modal, pro Coin.
+4. **Optimizer aufgeteilt in Gruppen** (Checkboxen): TP/SL, Break-Even, Gewinnsicherung,
+   Hebel, Auto-Leverage, Zeitfenster (body.optimize{...}); Discovery/Combo bekommen eine
+   zusätzliche Trade-Settings-Suchphase; beim "Als Strategie speichern" werden die besten
+   trade_params in die Backtest-Config der neuen Strategie geschrieben.
+5. **PnL % + Drawdown %**: Backtest-Ranking, Matrix (inkl. Ø Hebel), Optimizer-Metriken,
+   Strategie-Vergleich (avg-margin-basiert).
+6. **Equity-Kurven-Chart pro Backtest** (EquityChart.js, recharts): Equity + Peak,
+   Drawdown-Flächen, Liquidations-Marker, Long/Short getrennt, Coin-Beiträge,
+   Strategie-Filter, Export equity.csv (GET /api/backtest/export/{job}?kind=equity,
+   GET /api/backtest/equity/{job}).
+7. **QoL**: Backtester- & Optimizer-Auswahl bleibt via localStorage erhalten
+   (bt_ui_state_v1 / opt_ui_state_v1) – kein Reset beim Raus-/Reintabben.
+8. **Zeiträume**: Presets 540/720/900/1080/1440 Tage + benutzerdefinierter Von/Bis-Bereich
+   (Backend filtert Kerzen nach Datum, days-Limit 365 → 1500, auch im Optimizer).
+9. **RAM-Anzeige** (Backend-RAM, Kerzen-Cache, Cache-leeren) jetzt auch im Optimizer.
 
-## Umgesetzt (20.07.2026 – dieser Durchgang)
-1. Zeiträume: Backtester & Optimizer bis 365 Tage (UI: 60/90/180/360), Server-Clamps angehoben
-2. Abbruch + persistenter Fortschritt: POST /api/backtest|optimizer/cancel/{id}, GET .../active, ETA (eta_seconds) im Status; Frontend resumed laufende Jobs beim Öffnen des Modals, Abbrechen-Buttons
-3. Performance/Stabilität:
-   - fast_sim.py: Indikator-Serien 1x über gesamte Historie vorberechnet für Custom-Strategien (~100x schneller, identische Ergebnisse verifiziert) – genutzt in Backtester + Optimizer (Discovery/Refine/Params)
-   - run_backtest verarbeitet Symbole nacheinander und gibt Speicher frei (vorher: alle 1m-Historien gleichzeitig im RAM → OOM-Abbrüche bei 90d/alle Coins auf 512MB)
-   - Status-Endpoint liefert keine export_candles/export_trades mehr (vorher riesige JSON beim Polling)
-   - fetch_history mit 4 Retries statt stillem Abbruch bei Netzwerkfehler; Export-Limits (400k Kerzen / 100k Trades)
-4. Bugfixes:
-   - Min. Rel. Volumen: harter Filter bei rsi_only & bollinger_reversion (war nur weiche Confluence → verifiziert: 1000 → 0 Trades)
-   - 3/5-Regeln-Trades: Ursache = min_confluence-Design + Pre-Signale; neue Option require_all_rules ("Nur 100% Regel-Treffer") im Backtester + AutoTrade-Konfiguration
-   - Gewinnsicherung: war im Live/Paper-Monitor NICHT implementiert → in _manage_trade ergänzt (Event "GEWINNSICHERUNG", Live-SL-Sync); Backtest zeigt "Gesichert"-Spalte + profit_secured im CSV
-5. Break-Even Modi: be_mode = tp1 | crv (be_trigger_crv) | profit_pct (be_trigger_profit_pct) | smart (Swing-Low/High, Live-Fallback=tp1) | off – in Backtester (global + pro Strategie) und StrategyAutoTradeModal
-6. Bayes'sche Optimierung: TPE-lite (algorithm=bayes) im Optimizer params-Modus
-7. Strategien weiterentwickeln: Discovery/Combo mit base_strategy_id (startet von bestehender Custom-Strategie), Speichern als Update (update_strategy_id) oder neue Strategie; StrategyBuilder konnte bereits editieren
-8. Optimierung → Backtester: /api/optimizer/apply type=backtest schreibt beste Params in backtest_strategy_configs; UI-Button "In Backtester übernehmen"
-9. Zeitfenster pro Strategie: settings.strategy_sessions (Scanner nutzt sie mit Fallback auf global); SettingsPanel Zeitfenster-Tab mit Scope-Dropdown; Backtester: globales Sessions-Feld + pro-Strategie im ⚙-Panel (Format "09:00-12:00,15:00-22:00", Europe/Berlin, DST-korrekt)
-
-## Testing
-- Testing-Agent Iteration 2: Backend 11/11, Frontend alle Checks grün (test_reports/iteration_2.json)
-- Hinweis: Zeitfenster-Tab erreichbar über ⚙ neben Strategie-Tabs (mode='strategy'), nicht über Header-Zahnrad (mode='general')
-
-## Infra-Einschätzung (für User)
-- Hauptursachen der Abbrüche waren Code-seitig (RAM-Verbrauch, riesige Status-Antworten, kein Retry) → behoben
-- 0.1 CPU bleibt für params-Optimierung von Built-in-Strategien auf 1m + viele Tage langsam (läuft jetzt aber durch statt abzubrechen); Render-Upgrade beschleunigt linear
+## Umgesetzt am 24.07.2026 – Equity-Chart Feintuning (Iteration 5, 100% getestet)
+1. **Coin-Chips einzeln zu-/abschaltbar** (statt „alle an/aus")
+   - Top-3 Coins nach |PnL| automatisch vorausgewählt, „alle an" / „alle aus" als
+     Sammelbuttons. Coin-Chip zeigt PnL-Wert als Badge.
+   - Recompute bei Strategie-Wechsel (verhindert Coins aus alter Strategie).
+2. **Multi-Strategie-Default**: bei ≥2 Strategien wird automatisch die 1. gewählt
+   (statt „Alle Strategien") → verhindert Lag durch Über-Rendering.
+3. **Liquidations-Marker Toggle** – Standard AUS (Hauptursache für Lag bei vielen
+   Liquidationen). Chip zeigt Anzahl vorhandener Liquidationen im Label.
+4. **Performance**: `isAnimationActive={false}` auf allen Lines/Areas, Downsampling
+   auf max. 800 sichtbare Punkte (Liquidationen werden auf nächstliegenden Index
+   remapt). Info-Chip zeigt „(Downsampling aktiv)" wenn aktiv.
+5. **Equity-Kurve im Optimizer** (neu):
+   - Toggle-Button `opt-equity-toggle` im Ergebnisbereich, **Standard AUS** (Performance).
+   - Erst-Klick lädt scope=`optimized` (nur die im Lauf verwendeten Coins).
+   - Zweiter Button „Auch andere Coins prüfen" (scope=`all`) → simuliert die
+     Best-Kombination auf allen Top-10-Coins → Robustheits-Check außerhalb des
+     Trainings-Sets.
+   - Neuer Endpoint: `GET /api/optimizer/equity/{job_id}?scope=optimized|all`
+     (async parallelisiert via `asyncio.gather`: 5.7s für 10 Coins statt >30s).
+   - Werden auch nach Reload aus `optimizer_runs` in Mongo wiederhergestellt.
+6. **EquityChart wiederverwendbar**: akzeptiert entweder `jobId` (Backtester lädt selbst)
+   ODER `points`-Prop (Optimizer füttert vorbereitete Simulation direkt).
 
 ## Backlog / Nächste Schritte
-- P1: Vektorisierter Fast-Path für weitere Built-ins (bollinger_reversion, bollinger_squeeze, ema_pullback, ict_liquidity_sweep, stochastic_reversal, vwap_reversion) — aktuell laufen sie noch im Legacy-Pfad (funktionieren, sind aber ~50-100× langsamer als möglich)
-- P1: Walk-Forward-Validierung / Out-of-Sample-Split gegen Overfitting der Optimierung
-- P2: Zeitfenster-Optimierung (beste Handelszeiten automatisch finden)
-- P2: server.py in Module aufteilen; gemeinsame Frontend-Konstanten (DAY_OPTIONS/BE_MODES) in shared Modul
-- P2: Kerzen-Cache: numpy-basierte Kompakt-Repräsentation (statt dicts) → ~6× weniger RAM, wichtig für Multi-Coin 360d-Läufe auf Render Free
+- P1: server.py (2700+ Zeilen) in Router-Module aufteilen
+- P1: Pydantic-Validierung für /api/strategies/import Payload
+- P1: Robustheits-Check als eigener Feature-Screen (mehrere Marktphasen automatisch
+  parallel testen und Ergebnisse gegenüberstellen)
+- P2: React-Hydration-Warnung (<span> in <option>) beseitigen (nur Dev-Warnung)
+- P2: Auto-Lev-Suchraum im Optimizer nach Modus getrennt sampeln (Ticks vs. %)
+- P2: PnL % auch in PerformanceAnalytics-Charts
+- P2: optimizer_equity scope=all optional per SSE streamen (für sehr lange days-Läufe)

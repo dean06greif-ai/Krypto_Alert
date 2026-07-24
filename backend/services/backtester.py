@@ -25,7 +25,9 @@ TRADE_CFG_KEYS = ("max_capital", "leverage", "fee_percent", "tp1_crv", "tp_full_
                   "sl_ticks", "breakeven_enabled", "trail_after_tp1", "trail_atr_mult",
                   "profit_secure_enabled", "profit_secure_trigger_pct", "profit_lock_pct",
                   "trade_pre_signals", "be_mode", "be_trigger_crv", "be_trigger_profit_pct",
-                  "be_smart_lookback", "require_all_rules", "sessions")
+                  "be_smart_lookback", "require_all_rules", "sessions",
+                  "tp_mode", "tp1_percent", "tp_full_percent", "maintenance_margin_rate",
+                  "auto_leverage_enabled", "auto_lev_mode", "auto_lev_value", "auto_lev_max")
 
 JOBS: Dict[str, Dict] = {}
 
@@ -130,12 +132,34 @@ def compute_levels(cfg: Dict, side: str, entry: float, candles: List[Dict]):
     if risk < min_risk_abs:
         risk = min_risk_abs
         sl = entry - risk if side == "LONG" else entry + risk
-    if side == "LONG":
-        tp1 = entry + risk * float(cfg.get("tp1_crv", 1.0))
-        tpf = entry + risk * float(cfg.get("tp_full_crv", 2.0))
-    else:
-        tp1 = entry - risk * float(cfg.get("tp1_crv", 1.0))
-        tpf = entry - risk * float(cfg.get("tp_full_crv", 2.0))
+    tp_mode = cfg.get("tp_mode", "crv")
+    tp1 = tpf = None
+    if tp_mode == "fixed_pct":
+        p1 = float(cfg.get("tp1_percent", 0.5)) / 100
+        pf = float(cfg.get("tp_full_percent", 1.0)) / 100
+        if side == "LONG":
+            tp1, tpf = entry * (1 + p1), entry * (1 + pf)
+        else:
+            tp1, tpf = entry * (1 - p1), entry * (1 - pf)
+    elif tp_mode == "structure" and candles:
+        lookback = int(cfg.get("sl_lookback", 10))
+        if side == "LONG":
+            target = max(c["high"] for c in candles[-lookback:])
+            if target > entry * 1.001:
+                tpf = target
+                tp1 = entry + (target - entry) * 0.5
+        else:
+            target = min(c["low"] for c in candles[-lookback:])
+            if target < entry * 0.999:
+                tpf = target
+                tp1 = entry - (entry - target) * 0.5
+    if tp1 is None or tpf is None:  # crv (Standard) oder Struktur-Fallback
+        if side == "LONG":
+            tp1 = entry + risk * float(cfg.get("tp1_crv", 1.0))
+            tpf = entry + risk * float(cfg.get("tp_full_crv", 2.0))
+        else:
+            tp1 = entry - risk * float(cfg.get("tp1_crv", 1.0))
+            tpf = entry - risk * float(cfg.get("tp_full_crv", 2.0))
     return sl, tp1, tpf, risk, atr
 
 
@@ -149,6 +173,29 @@ def resolve_be_mode(cfg: Dict) -> str:
     return "tp1" if cfg.get("breakeven_enabled", True) else "off"
 
 
+def effective_leverage(cfg: Dict, entry: float, sl: float) -> float:
+    """Auto-Leverage: Hebel so wählen, dass der Liquidationspreis einen
+    konfigurierbaren Abstand HINTER dem Stop-Loss liegt.
+    auto_lev_mode: 'liq_pct'  -> Abstand = X % vom Preis hinter dem SL
+                   'liq_ticks'-> Abstand = X Ticks (1 Tick = 0.01% vom Preis)"""
+    base = float(cfg.get("leverage", 10) or 10)
+    if not cfg.get("auto_leverage_enabled") or not entry or entry <= 0:
+        return base
+    mmr = float(cfg.get("maintenance_margin_rate", 0.5)) / 100
+    sl_dist = abs(entry - sl) / entry
+    if sl_dist <= 0:
+        return base
+    val = float(cfg.get("auto_lev_value", 0.5) or 0.5)
+    if cfg.get("auto_lev_mode", "liq_pct") == "liq_ticks":
+        extra = max(val, 0.0) * 0.0001
+    else:
+        extra = max(val, 0.0) / 100.0
+    liq_dist = sl_dist + extra
+    lev = 1.0 / max(liq_dist + mmr, 1e-6)
+    max_lev = float(cfg.get("auto_lev_max", 50) or 50)
+    return round(max(1.0, min(lev, max_lev)), 2)
+
+
 def simulate_pair(strategy, candles: List[Dict], symbol: str, settings: Dict,
                   cfg: Dict, progress_cb=None, collect_trades: bool = False,
                   should_stop: Callable[[], bool] = None,
@@ -157,6 +204,10 @@ def simulate_pair(strategy, candles: List[Dict], symbol: str, settings: Dict,
     fee_pct = float(cfg.get("fee_percent", 0.06)) / 100
     capital = float(cfg.get("max_capital", 100.0))
     leverage = float(cfg.get("leverage", 10))
+    # Liquidation (Isolated Margin): Distanz bis Liquidationspreis in % vom Entry.
+    # ~ 1/Hebel minus Maintenance-Margin-Rate (Default 0.5%).
+    mmr = float(cfg.get("maintenance_margin_rate", 0.5)) / 100
+    auto_lev = bool(cfg.get("auto_leverage_enabled"))
     tp1_close = float(cfg.get("tp1_close_percent", 50)) / 100
     be_mode = resolve_be_mode(cfg)
     be_trigger_crv = float(cfg.get("be_trigger_crv", 1.0) or 1.0)
@@ -180,6 +231,9 @@ def simulate_pair(strategy, candles: List[Dict], symbol: str, settings: Dict,
             else (t["entry"] - price) * t["qty_rem"]
         t["pnl"] -= fee
         t["fees"] += fee
+        # Isolated Margin: Verlust kann die eingesetzte Marge nicht übersteigen
+        if t["pnl"] < -capital:
+            t["pnl"] = -capital
         t["exit"] = price
         t["result"] = result
         t["closed_ts"] = ts
@@ -217,14 +271,26 @@ def simulate_pair(strategy, candles: List[Dict], symbol: str, settings: Dict,
                 return lo <= level
 
             sl_hit = hit(t["sl"], "down" if side == "LONG" else "up")
+            liq_hit = hit(t["liq"], "down" if side == "LONG" else "up")
             tpf_hit = hit(t["tpf"], "up" if side == "LONG" else "down")
             tp1_hit = (not t["tp1_done"]) and hit(t["tp1"], "up" if side == "LONG" else "down")
 
-            # conservative: SL first when both touched in same candle
-            if sl_hit:
-                is_be = t["be_moved"]
-                res = "breakeven" if is_be else ("win" if t["tp1_done"] else "loss")
-                close_trade(t, t["sl"], res, c["timestamp"])
+            # conservative: SL/Liquidation first when both touched in same candle
+            if sl_hit or liq_hit:
+                # Welches Level wird zuerst erreicht? (LONG: das höhere von SL/Liq)
+                if side == "LONG":
+                    level = max(t["sl"], t["liq"])
+                    is_liq = liq_hit and t["liq"] >= t["sl"]
+                else:
+                    level = min(t["sl"], t["liq"])
+                    is_liq = liq_hit and t["liq"] <= t["sl"]
+                if is_liq:
+                    t["liquidated"] = True
+                    close_trade(t, t["liq"], "loss", c["timestamp"])
+                else:
+                    is_be = t["be_moved"]
+                    res = "breakeven" if is_be else ("win" if t["tp1_done"] else "loss")
+                    close_trade(t, level, res, c["timestamp"])
                 open_t = None
             else:
                 if tp1_hit and not tpf_hit:
@@ -303,10 +369,14 @@ def simulate_pair(strategy, candles: List[Dict], symbol: str, settings: Dict,
                     continue
                 window = candles[max(0, i - WINDOW):i + 1]
                 sl, tp1, tpf, risk, atr = compute_levels(cfg, side, entry, window)
-                qty = capital * leverage / entry
+                lev_t = effective_leverage(cfg, entry, sl) if auto_lev else leverage
+                liq_dist_t = max(1.0 / max(lev_t, 1.0) - mmr, 0.0005)
+                qty = capital * lev_t / entry
                 entry_fee = entry * qty * fee_pct
+                liq = entry * (1 - liq_dist_t) if side == "LONG" else entry * (1 + liq_dist_t)
                 open_t = {
                     "side": side, "entry": entry, "sl": sl, "tp1": tp1, "tpf": tpf,
+                    "liq": liq, "liquidated": False, "lev": round(lev_t, 2),
                     "qty": qty, "qty_rem": qty, "atr": atr,
                     "pnl": -entry_fee, "fees": entry_fee,
                     "tp1_done": False, "be_moved": False, "secured": False,
@@ -354,7 +424,9 @@ def simulate_pair(strategy, candles: List[Dict], symbol: str, settings: Dict,
                 "result": t.get("result"), "pnl": round(t["pnl"], 4),
                 "fees": round(t["fees"], 4), "qty": round(t["qty"], 6),
                 "tp1_done": t["tp1_done"], "breakeven_moved": t["be_moved"],
-                "profit_secured": t["secured"],
+                "profit_secured": t["secured"], "liquidated": t.get("liquidated", False),
+                "liq_price": round(t.get("liq", 0), 8),
+                "leverage": t.get("lev"),
                 "duration_min": round((t["closed_ts"] - t["opened_ts"]) / 60000, 1)
                 if t.get("closed_ts") else None,
                 "atr_entry": round(t.get("atr") or 0, 8),
@@ -372,8 +444,13 @@ def simulate_pair(strategy, candles: List[Dict], symbol: str, settings: Dict,
         "wins": wins, "losses": losses, "breakevens": breakevens,
         "secured": sum(1 for t in trades if t["secured"]),
         "be_moved": sum(1 for t in trades if t["be_moved"]),
+        "liquidations": sum(1 for t in trades if t.get("liquidated")),
         "win_rate": round(wins / decided * 100, 1) if decided else 0.0,
         "pnl": round(pnl_total, 2),
+        "pnl_pct": round(pnl_total / capital * 100, 2) if capital else 0.0,
+        "max_drawdown_pct": round(max_dd / capital * 100, 2) if capital else 0.0,
+        "avg_leverage": round(sum(t.get("lev", leverage) for t in trades) / len(trades), 1)
+        if trades else round(leverage, 1),
         "fees": round(fees_total, 2),
         "avg_pnl": round(pnl_total / len(trades), 3) if trades else 0.0,
         "profit_factor": round(gross_win / gross_loss, 2) if gross_loss > 0 else (round(gross_win, 2) if gross_win else 0.0),
@@ -416,11 +493,29 @@ MAX_EXPORT_CANDLES = 400000
 MAX_EXPORT_TRADES = 100000
 
 
+def _range_ms(s, end_of_day=False):
+    if not s:
+        return None
+    try:
+        dtv = datetime.fromisoformat(str(s))
+        if dtv.tzinfo is None:
+            dtv = dtv.replace(tzinfo=timezone.utc)
+        ms = int(dtv.timestamp() * 1000)
+        if end_of_day and len(str(s)) <= 10:
+            ms += 86399999
+        return ms
+    except ValueError:
+        return None
+
+
 async def run_backtest(job_id: str, strategy_ids: List[str], symbols: List[str],
                        days: int, cfg: Dict, registry, settings: Dict, db=None,
-                       strategy_configs: Dict = None, default_timeframe: str = None):
+                       strategy_configs: Dict = None, default_timeframe: str = None,
+                       date_from: str = None, date_to: str = None):
     job = JOBS[job_id]
     strategy_configs = strategy_configs or {}
+    start_ms = _range_ms(date_from)
+    end_ms = _range_ms(date_to, end_of_day=True)
 
     def cancelled():
         return bool(job.get("cancel"))
@@ -441,6 +536,10 @@ async def run_backtest(job_id: str, strategy_ids: List[str], symbols: List[str],
                     raise JobCancelled()
                 job["phase"] = f"Lade Daten: {sym}"
                 history = await fetch_history(session, sym, days, job=job)
+                if start_ms or end_ms:
+                    history = [c for c in history
+                               if (not start_ms or c["timestamp"] >= start_ms)
+                               and (not end_ms or c["timestamp"] <= end_ms)]
                 done_units += 1
                 job["progress"] = round(done_units / total_units * 100)
                 if len(history) <= 100:
@@ -458,6 +557,15 @@ async def run_backtest(job_id: str, strategy_ids: List[str], symbols: List[str],
                         done_units += 1
                         continue
                     scfg = strategy_configs.get(sid) or {}
+                    # Pro-Backtest Definition-Override für Custom-/Discovery-Strategien
+                    # (Regeln + Indikator-Perioden im ⚙-Panel bearbeitbar)
+                    if scfg.get("definition") and getattr(strat, "IS_CUSTOM", False):
+                        try:
+                            from strategies.custom_strategy import CustomStrategy
+                            strat = CustomStrategy({**strat.definition,
+                                                    **scfg["definition"], "id": sid})
+                        except Exception as e:
+                            logger.warning(f"definition override failed {sid}: {e}")
                     tf = resolve_timeframe(strat, sid, scfg, settings, default_timeframe)
                     strat_tf[sid] = tf
                     if tf not in tf_cache:
@@ -476,7 +584,10 @@ async def run_backtest(job_id: str, strategy_ids: List[str], symbols: List[str],
                         eff_settings = {**settings, "strategy_params": sp}
                     # Schneller Pfad für Custom-Strategien
                     provider = None
-                    if getattr(strat, "IS_CUSTOM", False):
+                    use_fast = bool(cfg.get("use_fast_path", True))
+                    if not use_fast:
+                        pass  # Legacy-Pfad erzwungen (RAM-Schonung / Verifikation)
+                    elif getattr(strat, "IS_CUSTOM", False):
                         try:
                             if tf not in fs_cache:
                                 fs_cache[tf] = fast_sim.FastSeries(candles)
@@ -534,6 +645,7 @@ async def run_backtest(job_id: str, strategy_ids: List[str], symbols: List[str],
             agg = per_strategy.setdefault(r["strategy_id"], {
                 "strategy_id": r["strategy_id"], "strategy_name": r["strategy_name"],
                 "trades": 0, "wins": 0, "losses": 0, "breakevens": 0, "secured": 0,
+                "liquidations": 0,
                 "pnl": 0.0, "fees": 0.0, "max_drawdown": 0.0, "symbols": 0,
                 "_dur": [],
             })
@@ -542,15 +654,19 @@ async def run_backtest(job_id: str, strategy_ids: List[str], symbols: List[str],
             agg["losses"] += r["losses"]
             agg["breakevens"] += r["breakevens"]
             agg["secured"] += r.get("secured", 0)
+            agg["liquidations"] += r.get("liquidations", 0)
             agg["pnl"] = round(agg["pnl"] + r["pnl"], 2)
             agg["fees"] = round(agg["fees"] + r["fees"], 2)
             agg["max_drawdown"] = round(agg["max_drawdown"] + r["max_drawdown"], 2)
             agg["symbols"] += 1
             if r["trades"]:
                 agg["_dur"].append(r["avg_duration_min"])
+        cap_ref = float(cfg.get("max_capital", 100.0)) or 100.0
         for agg in per_strategy.values():
             d = agg["wins"] + agg["losses"]
             agg["win_rate"] = round(agg["wins"] / d * 100, 1) if d else 0.0
+            agg["pnl_pct"] = round(agg["pnl"] / cap_ref * 100, 1)
+            agg["max_drawdown_pct"] = round(agg["max_drawdown"] / cap_ref * 100, 1)
             agg["avg_pnl"] = round(agg["pnl"] / agg["trades"], 3) if agg["trades"] else 0.0
             agg["avg_duration_min"] = round(sum(agg["_dur"]) / len(agg["_dur"]), 1) if agg["_dur"] else 0.0
             agg["timeframe"] = strat_tf.get(agg["strategy_id"], "1m")
@@ -566,10 +682,12 @@ async def run_backtest(job_id: str, strategy_ids: List[str], symbols: List[str],
 
         result = {
             "days": days,
+            "date_from": date_from, "date_to": date_to,
             "config": {k: cfg.get(k) for k in ("max_capital", "leverage", "fee_percent",
                                                "tp1_crv", "tp_full_crv", "sl_mode",
                                                "profit_secure_enabled", "be_mode",
-                                               "require_all_rules")},
+                                               "require_all_rules", "auto_leverage_enabled",
+                                               "auto_lev_mode", "auto_lev_value")},
             "strategy_timeframes": strat_tf,
             "per_pair": per_pair,
             "per_strategy": sorted(per_strategy.values(), key=lambda x: -x["pnl"]),

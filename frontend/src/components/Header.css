@@ -258,3 +258,12 @@
     flex-wrap: wrap;
   }
 }
+/* ---- clickable balance widget (Kapital-Zuweisung) ---- */
+.balance-widget.bw-clickable {
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+.balance-widget.bw-clickable:hover {
+  border-color: #00FF66;
+  background: rgba(0, 255, 102, 0.05);
+}

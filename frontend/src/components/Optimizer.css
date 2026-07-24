@@ -143,3 +143,73 @@
 .opt-eta { color: #ffa502; font-weight: 600; }
 .opt-apply-bt { margin-left: 8px; background: rgba(0, 168, 255, 0.15); border-color: rgba(0, 168, 255, 0.4); color: #00A8FF; }
 .opt-save-row .opt-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+
+/* ---- Übernahme-Auswahl: alle Coins vs. nur optimierte Coins ---- */
+.opt-apply-choice {
+  background: #16181F;
+  border: 1px solid #2A2D3A;
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.opt-apply-choice-title {
+  font-size: 11px;
+  font-weight: 800;
+  color: #8A8EA0;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.opt-apply-choice-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid #2A2D3A;
+  background: #121212;
+  color: #fff;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+.opt-apply-choice-btn b { font-size: 12px; }
+.opt-apply-choice-btn span { font-size: 10px; color: #8A8EA0; }
+.opt-apply-choice-btn.coins:hover { border-color: #B388FF; }
+.opt-apply-choice-btn.global:hover { border-color: #00FF66; }
+.opt-apply-choice-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.opt-apply-choice-cancel {
+  background: none;
+  border: none;
+  color: #5C6070;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 4px;
+}
+.opt-apply-choice-cancel:hover { color: #fff; }
+
+/* ---- Kennzeichnung: Coin hat Coin-spezifische Einstellungen ---- */
+.opt-chip { position: relative; }
+.opt-chip-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #B388FF;
+  box-shadow: 0 0 6px rgba(179, 136, 255, 0.8);
+}
+.opt-chip-dot.inline {
+  position: static;
+  display: inline-block;
+  margin-right: 4px;
+  box-shadow: none;
+}
+.opt-override-legend {
+  margin-top: 6px;
+  font-size: 10px;
+  color: #B388FF;
+}

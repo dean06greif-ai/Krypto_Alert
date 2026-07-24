@@ -201,3 +201,73 @@ class BollingerReversionStrategy(BaseStrategy):
         return {"entry": round(entry, 6), "stop_loss": round(sl, 6),
                 "take_profit_1": round(tp1, 6), "take_profit_full": round(tpf, 6),
                 "crv": round(self.indicators.calculate_crv(entry, sl, tpf), 2)}
+
+    # ----------------------- Vectorized Fast-Path -----------------------
+    @staticmethod
+    def vectorized_signals(fs, params: Dict) -> Optional[Dict]:
+        """BB-Extrem + RSI(2) + Reversal + Trend-Sperre + VWAP/Volumen -- vektorisiert."""
+        import numpy as np
+        from services import fast_sim
+        bb_p = int(params["bb_period"])
+        rsi_p = int(params["rsi_period"])
+        ema_f_p = int(params["ema_fast_period"])
+        ema_s_p = int(params["ema_slow_period"])
+        atr_p = int(params["atr_period"])
+        sl_lb = int(params["sl_lookback"])
+        need = max(bb_p, ema_s_p, atr_p, sl_lb, 14) + 10
+
+        d = {"bb_period": bb_p, "bb_std": float(params["bb_std"]),
+             "rsi_period": rsi_p, "ema_fast_period": ema_f_p,
+             "ema_slow_period": ema_s_p, "volume_sma_period": 20}
+        close, low, high = fs.close, fs.low, fs.high
+        basis = fs.get("bb_middle", d)
+        upper = fs.get("bb_upper", d)
+        lower = fs.get("bb_lower", d)
+        rsi = fs.get("rsi", d)
+        ef = fs.get("ema_fast", d)
+        es = fs.get("ema_slow", d)
+        vwap = fs.get("vwap", d)
+        rel_vol = fs.get("rel_volume", d)
+        std = (upper - basis) / float(params["bb_std"])
+        close_prev = np.concatenate([[np.nan], close[:-1]])
+        ef_prev = np.concatenate([np.full(5, np.nan), ef[:-5]])
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            slope = np.where((~np.isnan(ef_prev)) & (ef_prev != 0),
+                             (ef - ef_prev) / ef_prev, 0.0)
+            thr = float(params["trend_block_pct"]) / 100.0
+            strong_bull = (close > es) & (ef > es) & (slope > thr)
+            strong_bear = (close < es) & (ef < es) & (slope < -thr)
+            block = int(params["block_counter_trend"]) == 1
+            ones = np.ones(fs.n, dtype=bool)
+            trend_ok_long = ~strong_bear if block else ones
+            trend_ok_short = ~strong_bull if block else ones
+
+            bb_long = (low <= lower) | (close_prev <= lower)
+            bb_short = (high >= upper) | (close_prev >= upper)
+            rsi_long = rsi < float(params["rsi_long_threshold"])
+            rsi_short = rsi > float(params["rsi_short_threshold"])
+            rev_long = (close > close_prev) | (close > lower)
+            rev_short = (close < close_prev) | (close < upper)
+            if int(params["require_reversal"]) != 1:
+                rev_long = rev_short = ones
+            rel_ok = rel_vol >= float(params["rel_vol_min"])
+
+            sweep_bull, sweep_bear = fast_sim.sweep_arrays(fs)
+            c_vwap_l = close <= vwap
+            c_vwap_s = close >= vwap
+            long_conf = c_vwap_l.astype(int) + sweep_bull.astype(int)
+            short_conf = c_vwap_s.astype(int) + sweep_bear.astype(int)
+            min_conf = min(int(params["min_confluence"]), 2)
+
+            long_ok = (bb_long & rsi_long & rev_long & trend_ok_long
+                       & rel_ok & (long_conf >= min_conf))
+            short_ok = (bb_short & rsi_short & rev_short & trend_ok_short
+                        & rel_ok & (short_conf >= min_conf))
+
+        valid = (~np.isnan(rsi) & ~np.isnan(ef) & ~np.isnan(es) & (std > 0)
+                 & ~np.isnan(close_prev) & ~np.isnan(vwap) & ~np.isnan(rel_vol))
+        long_ok &= valid
+        short_ok &= valid
+        return {"long": long_ok, "short": short_ok,
+                "warmup": need, "rules_total": 5, "rsi": rsi}

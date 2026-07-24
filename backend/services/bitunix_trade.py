@@ -33,6 +33,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP, ROUND_HALF_UP
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from services.technical_indicators import TechnicalIndicators
+from services.backtester import effective_leverage
 
 logger = logging.getLogger(__name__)
 
@@ -419,6 +420,12 @@ class BitunixTradeClient:
         return None
 
 
+DEFAULT_CAPITAL_ALLOCATION = {
+    "live": {"mode": "full", "value": 0.0},
+    "paper": {"mode": "full", "value": 0.0, "base_balance": 1000.0},
+}
+
+
 DEFAULT_COIN_CFG = {
     "enabled": False,
     "max_capital": 100.0,
@@ -445,6 +452,11 @@ DEFAULT_COIN_CFG = {
     "trail_atr_mult": 1.5,
     "fee_percent": 0.06,
     "trade_pre_signals": False,
+    # --- Auto-Leverage: Hebel automatisch aus SL-Abstand berechnen ---
+    "auto_leverage_enabled": False,
+    "auto_lev_mode": "liq_pct",      # liq_pct | liq_ticks
+    "auto_lev_value": 0.5,           # % bzw. Ticks hinter dem Stop
+    "auto_lev_max": 50,              # maximaler Hebel
     # --- Gewinnsicherung: SL in den Gewinn ziehen + Marge freisetzen ---
     "profit_secure_enabled": False,
     "profit_secure_trigger_pct": 30.0,   # ab X% Gewinn auf die Marge
@@ -456,6 +468,12 @@ DEFAULT_COIN_CFG = {
     # Floor for the risk-per-trade so TP/SL never end up microscopic
     # (percent of entry price). Prevents the classic "0.07%" reject case.
     "min_risk_percent": 0.25,
+    # --- Take-Profit Modus: "crv" (dynamisch, R-Vielfache) | "fixed_pct" | "structure" ---
+    "tp_mode": "crv",
+    "tp1_percent": 0.5,       # bei tp_mode=fixed_pct: TP1-Abstand % vom Entry
+    "tp_full_percent": 1.0,   # bei tp_mode=fixed_pct: Full-TP-Abstand % vom Entry
+    # --- Liquidation (Isolated Margin) ---
+    "maintenance_margin_rate": 0.5,  # % - bestimmt Liquidationspreis (~1/Hebel - MMR)
 }
 
 
@@ -489,7 +507,66 @@ class AutoTradeManager:
                 "strategy_coin_configs",
                 self.config.get("strategy_coin_configs", {}) if hasattr(self, "config") and self.config else {},
             ),
+            "capital_allocation": config.get(
+                "capital_allocation",
+                self.config.get("capital_allocation", {}) if hasattr(self, "config") and self.config else {},
+            ),
         }
+
+    def capital_allocation(self, mode: str) -> Dict:
+        """Saved capital allocation for 'live' or 'paper' (merged with defaults)."""
+        base = dict(DEFAULT_CAPITAL_ALLOCATION.get(mode, {}))
+        base.update((self.config.get("capital_allocation", {}) or {}).get(mode, {}))
+        return base
+
+    async def _live_total_balance(self) -> Optional[float]:
+        if not self.client or not self.client.configured():
+            return None
+        try:
+            bal = await self.client.get_balance()
+            data = bal.get("data") if isinstance(bal, dict) else None
+            if isinstance(data, list) and data:
+                data = data[0]
+            if isinstance(data, dict):
+                def _num(v):
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return 0.0
+                return (_num(data.get("available") or data.get("availableBalance"))
+                        + _num(data.get("frozen")) + _num(data.get("margin")))
+        except Exception as e:
+            logger.warning(f"_live_total_balance failed: {e}")
+        return None
+
+    async def allocated_capital(self, mode: str, total: Optional[float] = None) -> Optional[float]:
+        """Effective capital cap (USDT) for the bot in the given mode.
+        None = no enforceable cap (e.g. live balance unknown)."""
+        a = self.capital_allocation(mode)
+        am, val = a.get("mode", "full"), float(a.get("value") or 0)
+        if mode == "paper":
+            base = float(a.get("base_balance") or 1000.0)
+            if am == "fixed":
+                return val if val > 0 else base
+            if am == "percent":
+                return base * min(max(val, 0), 100) / 100
+            return base
+        if total is None:
+            total = await self._live_total_balance()
+        if am == "fixed":
+            return min(val, total) if total is not None else val
+        if am == "percent":
+            return total * min(max(val, 0), 100) / 100 if total is not None else None
+        return total
+
+    async def used_margin(self, mode: str) -> float:
+        """Sum of margin (max_capital) bound in open trades of the given mode."""
+        if self.db is None:
+            return 0.0
+        used = 0.0
+        async for t in self.db.auto_trades.find({"status": "open", "mode": mode}):
+            used += float(t.get("max_capital") or 0)
+        return round(used, 6)
 
     def coin_cfg(self, symbol: str) -> Dict:
         c = dict(DEFAULT_COIN_CFG)
@@ -591,12 +668,34 @@ class AutoTradeManager:
         if risk < min_risk_abs:
             risk = min_risk_abs
             sl = entry - risk if side == "LONG" else entry + risk
-        if side == "LONG":
-            tp1 = entry + risk * cfg["tp1_crv"]
-            tpf = entry + risk * cfg["tp_full_crv"]
-        else:
-            tp1 = entry - risk * cfg["tp1_crv"]
-            tpf = entry - risk * cfg["tp_full_crv"]
+        tp_mode = cfg.get("tp_mode", "crv")
+        tp1 = tpf = None
+        if tp_mode == "fixed_pct":
+            p1 = float(cfg.get("tp1_percent", 0.5)) / 100
+            pf = float(cfg.get("tp_full_percent", 1.0)) / 100
+            if side == "LONG":
+                tp1, tpf = entry * (1 + p1), entry * (1 + pf)
+            else:
+                tp1, tpf = entry * (1 - p1), entry * (1 - pf)
+        elif tp_mode == "structure" and candles:
+            lb = int(cfg.get("sl_lookback", 10))
+            if side == "LONG":
+                target = max(c["high"] for c in candles[-lb:])
+                if target > entry * 1.001:
+                    tpf = target
+                    tp1 = entry + (target - entry) * 0.5
+            else:
+                target = min(c["low"] for c in candles[-lb:])
+                if target < entry * 0.999:
+                    tpf = target
+                    tp1 = entry - (entry - target) * 0.5
+        if tp1 is None or tpf is None:  # crv (Standard) oder Struktur-Fallback
+            if side == "LONG":
+                tp1 = entry + risk * cfg["tp1_crv"]
+                tpf = entry + risk * cfg["tp_full_crv"]
+            else:
+                tp1 = entry - risk * cfg["tp1_crv"]
+                tpf = entry - risk * cfg["tp_full_crv"]
         return round(sl, 6), round(tp1, 6), round(tpf, 6), risk, round(atr, 6)
 
     async def _notify_reject(self, symbol: str, side: str, reason: str) -> None:
@@ -657,9 +756,37 @@ class AutoTradeManager:
         if entry <= 0:
             return None
         sl, tp1, tpf, risk, atr = self._levels(cfg, side, entry, candles, signal)
-        qty = round((float(cfg["max_capital"]) * float(cfg["leverage"])) / entry, 6)
+
+        # Auto-Leverage: Hebel so setzen, dass die Liquidation den konfigurierten
+        # Abstand hinter dem Stop-Loss hat (sonst fester Hebel aus der Config)
+        lev_used = effective_leverage(cfg, entry, sl) if cfg.get("auto_leverage_enabled") \
+            else float(cfg["leverage"])
 
         mode = eff_mode
+
+        # ---- Kapital-Zuweisung: Gesamt-Exposure des Bots begrenzen ----
+        capital = float(cfg["max_capital"])
+        alloc_note = None
+        try:
+            alloc_cap = await self.allocated_capital(mode)
+        except Exception as e:
+            logger.warning(f"allocated_capital({mode}) failed: {e}")
+            alloc_cap = None
+        if alloc_cap is not None:
+            used = await self.used_margin(mode)
+            free_alloc = round(alloc_cap - used, 6)
+            if free_alloc < 5.0:
+                logger.info(f"{symbol}: Kapital-Limit erreicht "
+                            f"({used:.2f}/{alloc_cap:.2f} USDT belegt) -> kein Trade")
+                await self._notify_reject(
+                    symbol, side,
+                    f"Kapital-Limit erreicht: {used:.2f}/{alloc_cap:.2f} USDT belegt")
+                return None
+            if capital > free_alloc:
+                alloc_note = (f"Kapital auf {free_alloc:.2f} USDT begrenzt "
+                              f"(Limit {alloc_cap:.2f}, belegt {used:.2f})")
+                capital = free_alloc
+        qty = round((capital * lev_used) / entry, 6)
 
         # ---- LIVE MODE: hit the exchange FIRST; only persist on success ----
         if mode == "live" and self.client.configured():
@@ -670,10 +797,10 @@ class AutoTradeManager:
             meta = self.client.contract_meta(b_sym) or {}
             min_qty = float(meta.get("min_qty") or 0)
             if min_qty > 0 and qty < min_qty:
-                needed_capital = (min_qty * entry) / float(cfg["leverage"])
+                needed_capital = (min_qty * entry) / lev_used
                 logger.warning(
                     f"{symbol}: qty {qty} < min {min_qty}. Needs "
-                    f"~{needed_capital:.2f} USDT capital @ {cfg['leverage']}x."
+                    f"~{needed_capital:.2f} USDT capital @ {lev_used}x."
                 )
                 await self._notify_reject(
                     symbol, side,
@@ -705,7 +832,8 @@ class AutoTradeManager:
                 sl, tp1, tpf = round(sl, 6), round(tp1, 6), round(tpf, 6)
 
             try:
-                await self.client.set_leverage(symbol, cfg["leverage"], cfg["margin_mode"])
+                await self.client.set_leverage(symbol, max(int(round(lev_used)), 1),
+                                               cfg["margin_mode"])
                 side_order = "BUY" if side == "LONG" else "SELL"
                 res = await self.client.place_order(symbol, side_order, qty,
                                                     order_type=cfg["order_type"],
@@ -769,10 +897,18 @@ class AutoTradeManager:
         # damit Paper-Trades die REALE Kostenbasis von Live-Trades abbilden.
         entry_fee = round(entry * qty * float(cfg.get("fee_percent", 0.06)) / 100, 6)
 
+        # Liquidationspreis (Isolated Margin): ~ Entry * (1 ± (1/Hebel - MMR))
+        lev = max(lev_used, 1.0)
+        mmr = float(cfg.get("maintenance_margin_rate", 0.5)) / 100
+        liq_dist = max(1.0 / lev - mmr, 0.0005)
+        liq_price = round(entry * (1 - liq_dist) if side == "LONG"
+                          else entry * (1 + liq_dist), 6)
+
         trade = {
             "id": f"{symbol}-{int(time.time()*1000)}",
             "symbol": symbol, "side": side, "mode": mode,
             "entry": entry, "sl": sl, "tp1": tp1, "tpf": tpf, "initial_sl": sl,
+            "liq_price": liq_price, "liquidated": False,
             "atr": atr,
             "qty": qty, "qty_remaining": qty, "risk": round(risk, 6),
             "tp1_crv": cfg["tp1_crv"], "tp_full_crv": cfg["tp_full_crv"],
@@ -781,7 +917,8 @@ class AutoTradeManager:
             "be_mode": (cfg.get("be_mode") or ("tp1" if cfg.get("breakeven_enabled", True) else "off")),
             "be_trigger_crv": float(cfg.get("be_trigger_crv", 1.0) or 1.0),
             "be_trigger_profit_pct": float(cfg.get("be_trigger_profit_pct", 30.0) or 30.0),
-            "leverage": cfg["leverage"], "max_capital": cfg["max_capital"],
+            "leverage": round(lev_used, 2), "max_capital": round(capital, 6),
+            "auto_leverage": bool(cfg.get("auto_leverage_enabled")),
             "status": "open", "tp1_hit": False, "breakeven_moved": False,
             "realized_pnl": round(-entry_fee, 6), "fees_paid": entry_fee,
             "profit_secure_enabled": bool(cfg.get("profit_secure_enabled", False)),
@@ -792,7 +929,8 @@ class AutoTradeManager:
             "strategy_name": signal.get("strategy_name"),
             "opened_at": datetime.now(timezone.utc).isoformat(),
             "trade_date": signal.get("trade_date"),
-            "events": [f"OPEN {side} @ {entry} (Entry-Fee {entry_fee} USDT)"],
+            "events": ([f"OPEN {side} @ {entry} (Entry-Fee {entry_fee} USDT)"]
+                       + ([alloc_note] if alloc_note else [])),
             **trade_extra,
         }
 
@@ -834,6 +972,32 @@ class AutoTradeManager:
         hit_tp1 = (price >= t["tp1"]) if side == "LONG" else (price <= t["tp1"])
         hit_tpf = (price >= t["tpf"]) if side == "LONG" else (price <= t["tpf"])
         hit_sl = (price <= t["sl"]) if side == "LONG" else (price >= t["sl"])
+
+        # ---- Liquidations-Check (Isolated Margin): hat Vorrang vor allem ----
+        liq = t.get("liq_price")
+        if liq and qty_rem > 0:
+            hit_liq = (price <= liq) if side == "LONG" else (price >= liq)
+            if hit_liq:
+                fee = exit_fee(qty_rem, liq)
+                realized += pnl(qty_rem, liq) - fee
+                fees_paid += fee
+                margin = float(t.get("max_capital") or 0)
+                if margin > 0 and realized < -margin:
+                    realized = -margin  # Verlust maximal = eingesetzte Marge
+                events.append(f"LIQUIDATION @ {liq} (Marge verloren)")
+                updates.update({
+                    "fees_paid": round(fees_paid, 6),
+                    "realized_pnl": round(realized, 6),
+                    "qty_remaining": 0, "events": events[-20:],
+                    "status": "closed", "exit_price": liq, "result": "loss",
+                    "liquidated": True,
+                    "closed_at": datetime.now(timezone.utc).isoformat(),
+                })
+                if t["mode"] == "live" and self.client.configured():
+                    await self._live_flash_close(t, 0)
+                logger.info(f"AutoTrade LIQUIDATION {t['symbol']} pnl={updates['realized_pnl']}")
+                await self.db.auto_trades.update_one({"id": t["id"]}, {"$set": updates})
+                return
 
         # Break-Even Modus auflösen (Legacy: breakeven_enabled)
         be_mode = t.get("be_mode")

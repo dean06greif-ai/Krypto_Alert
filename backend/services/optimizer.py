@@ -28,12 +28,51 @@ logger = logging.getLogger(__name__)
 
 JOBS: Dict[str, Dict] = {}
 
-TRADE_PARAM_SPACE = {
-    "tp1_crv": [0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0],
-    "tp_full_crv": [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0],
-    "sl_lookback": [5, 8, 10, 14, 20, 30],
-    "tp1_close_percent": [30, 40, 50, 60, 70],
+TRADE_SPACES = {
+    "tpsl": {
+        "tp1_crv": [0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0],
+        "tp_full_crv": [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0],
+        "sl_lookback": [5, 8, 10, 14, 20, 30],
+        "tp1_close_percent": [30, 40, 50, 60, 70],
+        "sl_mode": ["structure", "atr", "fixed"],
+        "sl_fixed_percent": [0.5, 0.8, 1.0, 1.5, 2.0],
+        "atr_sl_multiplier": [0.8, 1.0, 1.2, 1.5, 2.0],
+    },
+    "breakeven": {
+        "be_mode": ["off", "tp1", "crv", "profit_pct"],
+        "be_trigger_crv": [0.5, 1.0, 1.5, 2.0],
+        "be_trigger_profit_pct": [15, 30, 50, 80],
+    },
+    "profit_secure": {
+        "profit_secure_enabled": [False, True],
+        "profit_secure_trigger_pct": [20, 30, 50, 80],
+        "profit_lock_pct": [30, 50, 70],
+    },
+    "leverage": {
+        "leverage": [3, 5, 10, 15, 20, 28, 40, 50],
+    },
+    "auto_leverage": {
+        "auto_leverage_enabled": [False, True],
+        "auto_lev_mode": ["liq_pct", "liq_ticks"],
+        "auto_lev_value": [0.1, 0.25, 0.5, 1.0, 3, 5, 10],
+        "auto_lev_max": [25, 50, 75, 100],
+    },
+    "sessions": {
+        "sessions": ["", "07:00-22:00", "09:00-12:00", "15:30-18:30",
+                     "09:00-12:00,15:30-18:30", "13:00-22:00", "22:00-06:00"],
+    },
 }
+
+# Back-Compat: alter Gesamtraum
+TRADE_PARAM_SPACE = TRADE_SPACES["tpsl"]
+
+
+def build_trade_space(flags: Dict) -> Dict:
+    space = {}
+    for group, on in (flags or {}).items():
+        if on and group in TRADE_SPACES:
+            space.update(TRADE_SPACES[group])
+    return space
 
 
 def create_job(params: Dict) -> str:
@@ -89,6 +128,9 @@ def _evaluate(strategy, histories: Dict[str, List[Dict]], settings: Dict, cfg: D
     agg["fees"] = round(agg["fees"], 2)
     agg["max_drawdown"] = round(agg["max_drawdown"], 2)
     agg["avg_pnl"] = round(agg["pnl"] / agg["trades"], 3) if agg["trades"] else 0.0
+    _cap = float(cfg.get("max_capital", 100) or 100)
+    agg["pnl_pct"] = round(agg["pnl"] / _cap * 100, 1)
+    agg["max_drawdown_pct"] = round(agg["max_drawdown"] / _cap * 100, 1)
     return agg
 
 
@@ -208,7 +250,7 @@ def _tpe_suggest(space: Dict[str, List], history: List[Dict], rng: random.Random
 
 # ---------------- Modus 1: Parameter-Optimierung ----------------
 async def _optimize_params(job, strategy, histories, settings, cfg, objective,
-                           min_trades, iterations, include_trade_params, progress,
+                           min_trades, iterations, trade_space, progress,
                            algorithm="random", fs_map=None, should_stop=None):
     meta = strategy.DEFAULT_PARAMS or {}
     space = {}
@@ -227,7 +269,7 @@ async def _optimize_params(job, strategy, histories, settings, cfg, objective,
                 space[k] = vals
         except (KeyError, TypeError, ValueError):
             continue
-    trade_space = TRADE_PARAM_SPACE if include_trade_params else {}
+    trade_space = trade_space or {}
     # Flacher Suchraum für Bayes: Strategie-Parameter "p:", Trade-Parameter "t:"
     flat_space = {**{f"p:{k}": v for k, v in space.items()},
                   **{f"t:{k}": v for k, v in trade_space.items()}}
@@ -249,7 +291,7 @@ async def _optimize_params(job, strategy, histories, settings, cfg, objective,
             flat = {k: rng.choice(v) for k, v in flat_space.items()}
         p = {k[2:]: v for k, v in flat.items() if k.startswith("p:")}
         tp = {k[2:]: v for k, v in flat.items() if k.startswith("t:")}
-        if tp.get("tp_full_crv") is not None and tp.get("tp1_crv") is not None \
+        if isinstance(tp.get("tp_full_crv"), (int, float)) and isinstance(tp.get("tp1_crv"), (int, float)) \
                 and tp["tp_full_crv"] < tp["tp1_crv"]:
             tp["tp_full_crv"], tp["tp1_crv"] = tp["tp1_crv"], tp["tp_full_crv"]
         sid = strategy.STRATEGY_ID
@@ -373,6 +415,35 @@ async def _refine(job, definition, base_score, base_metrics, histories, settings
     return best_def, best_m, log
 
 
+# ---------------- Trade-Einstellungen für Discovery-Strategien ----------------
+async def _optimize_trade_settings(job, definition, base_score, base_metrics,
+                                   histories, settings, cfg, objective, min_trades,
+                                   iterations, trade_space, progress,
+                                   fs_map=None, should_stop=None):
+    """Random-Search über Trade-Einstellungen (TP/SL, BE, Gewinnsicherung,
+    Hebel, Auto-Leverage, Zeitfenster) für eine (entdeckte) Strategie."""
+    rng = random.Random()
+    strategy = _mk_strategy(definition)
+    best_tp: Dict = {}
+    best_score = base_score
+    best_m = base_metrics
+    for it in range(iterations):
+        if should_stop and should_stop():
+            raise JobCancelled()
+        tp = {k: rng.choice(v) for k, v in trade_space.items()}
+        if isinstance(tp.get("tp_full_crv"), (int, float)) and isinstance(tp.get("tp1_crv"), (int, float)) \
+                and tp["tp_full_crv"] < tp["tp1_crv"]:
+            tp["tp_full_crv"], tp["tp1_crv"] = tp["tp1_crv"], tp["tp_full_crv"]
+        m = await asyncio.to_thread(_evaluate, strategy, histories, settings,
+                                    {**cfg, **tp}, fs_map, should_stop)
+        sc = _score(m, objective, min_trades)
+        progress(it + 1, iterations, f"Trade-Einstellungen {it + 1}/{iterations}")
+        if sc > best_score:
+            best_score, best_tp, best_m = sc, tp, m
+            job["best"] = {"rules": _labels(definition), "metrics": m, "trade_params": tp}
+    return best_tp, best_m, best_score
+
+
 # ---------------- Haupt-Runner ----------------
 async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
                         default_cfg: Dict, db=None):
@@ -384,7 +455,7 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
     try:
         mode = body.get("mode", "params")
         symbols = body.get("symbols") or ["BTCUSDT"]
-        days = min(max(int(body.get("days") or 3), 1), 365)
+        days = min(max(int(body.get("days") or 3), 1), 1500)
         tf = body.get("timeframe") or "1m"
         if tf not in TIMEFRAMES:
             tf = "1m"
@@ -398,6 +469,13 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
         for k in ("max_capital", "leverage", "fee_percent"):
             if body.get(k) is not None:
                 cfg[k] = body[k]
+
+        # Welche Einstellungs-Gruppen sollen mitoptimiert werden?
+        opt_flags = body.get("optimize")
+        if not isinstance(opt_flags, dict):
+            # Back-Compat: alter Schalter "include_trade_params"
+            opt_flags = {"tpsl": bool(body.get("include_trade_params", True))}
+        trade_space = build_trade_space(opt_flags)
 
         # Weiterentwicklung einer bestehenden Custom-Strategie
         base_definition = None
@@ -429,7 +507,8 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
 
         result = {"mode": mode, "timeframe": tf, "days": days,
                   "symbols": list(histories.keys()), "objective": objective,
-                  "algorithm": algorithm, "min_trades": min_trades}
+                  "algorithm": algorithm, "min_trades": min_trades,
+                  "optimize": opt_flags, "max_capital": cfg.get("max_capital")}
 
         if mode == "params":
             sid = body.get("strategy_id")
@@ -443,14 +522,20 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
 
             baseline, best, top = await _optimize_params(
                 job, strategy, histories, settings, cfg, objective, min_trades,
-                iterations, bool(body.get("include_trade_params", True)), prog,
+                iterations, trade_space, prog,
                 algorithm, fs_map, cancelled)
             result.update({"strategy_id": sid,
                            "strategy_name": getattr(strategy, "STRATEGY_NAME", sid),
                            "baseline": baseline, "best": best, "top": top,
                            "iterations": iterations})
         else:
-            span_end = 70 if mode == "combo" else 99
+            do_refine = mode == "combo"
+            do_trade = bool(trade_space)
+            span_end = 99
+            if do_refine and do_trade:
+                span_end = 55
+            elif do_refine or do_trade:
+                span_end = 70
 
             def prog_d(done, total, phase):
                 job["progress"] = 10 + round(done / max(total, 1) * (span_end - 10))
@@ -460,16 +545,31 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
                 job, histories, settings, cfg, objective, min_trades,
                 max_rules, allowed, prog_d, base_definition, fs_map, cancelled)
             refine_log = []
-            if mode == "combo" and best_m:
-                def prog_r(done, total, phase):
-                    job["progress"] = 70 + round(done / max(total, 1) * 29)
+            refine_end = span_end
+            if do_refine and best_m:
+                refine_end = 80 if do_trade else 99
+
+                def prog_r(done, total, phase, _s=span_end, _e=refine_end):
+                    job["progress"] = _s + round(done / max(total, 1) * (_e - _s))
                     job["phase"] = phase
 
                 definition, best_m, refine_log = await _refine(
                     job, definition, best_sc, best_m, histories, settings, cfg,
                     objective, min_trades, iterations, prog_r, fs_map, cancelled)
+                best_sc = _score(best_m, objective, min_trades) if best_m else best_sc
+            best_trade_params = {}
+            if do_trade and best_m:
+                def prog_t(done, total, phase, _s=refine_end):
+                    job["progress"] = _s + round(done / max(total, 1) * (99 - _s))
+                    job["phase"] = phase
+
+                best_trade_params, best_m, best_sc = await _optimize_trade_settings(
+                    job, definition, best_sc, best_m, histories, settings, cfg,
+                    objective, min_trades, iterations, trade_space, prog_t,
+                    fs_map, cancelled)
             result.update({"definition": definition, "rules": _labels(definition),
                            "metrics": best_m, "steps": steps, "refine_log": refine_log,
+                           "trade_params": best_trade_params,
                            "base_strategy_id": bsid if base_definition else None})
 
         job["result"] = result

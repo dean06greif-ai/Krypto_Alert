@@ -1,5 +1,6 @@
 """VWAP Mean Reversion: übertriebene Abweichung vom VWAP + Reversal-Kerze."""
 from typing import Dict, List, Optional
+import numpy as np
 from strategies.base_strategy import BaseStrategy
 
 
@@ -117,3 +118,40 @@ class VWAPReversionStrategy(BaseStrategy):
             "long_count": long_count, "short_count": short_count, "rules_total": len(rules),
             "signal_type": signal_type, "is_pre_signal": False, "levels": levels,
         }
+
+    # ----------------------- Vectorized Fast-Path -----------------------
+    @staticmethod
+    def vectorized_signals(fs, params: Dict) -> Optional[Dict]:
+        """VWAP-Abweichung + RSI-Extrem + HA-Flip + Volumen -- vektorisiert."""
+        rsi_p = int(params["rsi_period"])
+        atr_p = int(params["atr_period"])
+        need = max(rsi_p, atr_p, 30) + 10
+
+        d = {"rsi_period": rsi_p, "atr_period": atr_p, "volume_sma_period": 20}
+        close = fs.close
+        rsi = fs.get("rsi", d)
+        atr = fs.get("atr", d)
+        vwap = fs.get("vwap", d)
+        rel_vol = fs.get("rel_volume", d)
+        ha = fs.get("ha_color", d)
+        ha_prev = np.concatenate([[np.nan], ha[:-1]])
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            dev = close - vwap
+            min_dev = atr * float(params["dev_atr_mult"])
+            below = dev <= -min_dev
+            above = dev >= min_dev
+            rsi_l = rsi <= float(params["rsi_long_max"])
+            rsi_s = rsi >= float(params["rsi_short_min"])
+            flip_green = (ha >= 0.5) & (ha_prev < 0.5)
+            flip_red = (ha < 0.5) & (ha_prev >= 0.5)
+            vol_ok = rel_vol >= float(params["rel_vol_min"])
+
+            long_ok = below & rsi_l & flip_green & vol_ok
+            short_ok = above & rsi_s & flip_red & vol_ok
+
+        valid = ~np.isnan(rsi) & ~np.isnan(atr) & (atr > 0) & ~np.isnan(vwap) & ~np.isnan(ha_prev)
+        long_ok &= valid
+        short_ok &= valid
+        return {"long": long_ok, "short": short_ok,
+                "warmup": need, "rules_total": 4, "rsi": rsi}

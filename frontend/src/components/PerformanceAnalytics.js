@@ -52,6 +52,7 @@ const TradeDetailCard = ({ t, stratName, getCoinName }) => {
       ? { label: 'BEP', cls: 'res-be' }
       : { label: 'OFFEN', cls: 'res-open' };
   const pnl = t.realized_pnl || 0;
+  const pnlPct = c.pnl_pct;
 
   return (
     <div className={`tdc ${open ? 'tdc-open' : ''}`} data-testid={`trade-card-${t.id}`}>
@@ -64,6 +65,11 @@ const TradeDetailCard = ({ t, stratName, getCoinName }) => {
     <span className="mono text-secondary tdc-coin">{getCoinName(t.symbol)}</span>
     <span className={`tdc-result ${resultMeta.cls}`}>{resultMeta.label}</span>
     <span className={`mono tdc-pnl ${pnl >= 0 ? 'text-long' : 'text-short'}`}>{pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}</span>
+    {pnlPct != null && (
+      <span className={`mono tdc-pnl-pct ${pnlPct >= 0 ? 'text-long' : 'text-short'}`} data-testid={`trade-pnl-pct-${t.id}`}>
+        ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)
+      </span>
+    )}
     <CaretDown size={13} className={`tdc-caret ${open ? 'rot' : ''}`} />
   </span>
   <span className="tdc-strat-line" title={stratName(t)}>{stratName(t)}</span>
@@ -85,6 +91,7 @@ const TradeDetailCard = ({ t, stratName, getCoinName }) => {
             {closed && <div className="tdc-meta-item"><span>Geschlossen</span><b className="mono">{fmtTime(t.closed_at)}</b></div>}
             <div className="tdc-meta-item"><span>Dauer</span><b className="mono">{fmtDur(c.duration_seconds)}</b></div>
             <div className="tdc-meta-item"><span>R-Vielfaches</span><b className={`mono ${(c.r_multiple || 0) >= 0 ? 'text-long' : 'text-short'}`}>{c.r_multiple != null ? `${c.r_multiple}R` : '—'}</b></div>
+            <div className="tdc-meta-item"><span>PnL %</span><b className={`mono ${(c.pnl_pct || 0) >= 0 ? 'text-long' : 'text-short'}`} data-testid={`trade-meta-pnl-pct-${t.id}`}>{c.pnl_pct != null ? fmtPct(c.pnl_pct) : '—'}</b></div>
             <div className="tdc-meta-item"><span>PnL % Kapital</span><b className={`mono ${(c.pnl_pct_capital || 0) >= 0 ? 'text-long' : 'text-short'}`}>{c.pnl_pct_capital != null ? fmtPct(c.pnl_pct_capital) : '—'}</b></div>
             <div className="tdc-meta-item"><span>Risk</span><b className="mono">{c.risk_usd ? `${c.risk_usd} $` : '—'}</b></div>
             <div className="tdc-meta-item"><span>Hebel</span><b className="mono">{t.leverage ? `${t.leverage}x` : '—'}</b></div>
@@ -124,7 +131,6 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
   const [clearRange, setClearRange] = useState('24h');
   const [clearScope, setClearScope] = useState('all');
   const [clearing, setClearing] = useState(false);
-  const [tradeFilter, setTradeFilter] = useState('all');
   const [pnlFilter, setPnlFilter] = useState('all');
   const [aiLoading, setAiLoading] = useState(false);
   const [aiReview, setAiReview] = useState(null);
@@ -182,26 +188,19 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
     if (view === 'trades') { loadTrades(); const iv = setInterval(loadTrades, 15000); return () => clearInterval(iv); }
   }, [view, selectedCoin, loadTrades]);
 
-  const filterFn = (t) => tradeFilter === 'all' || t.mode === tradeFilter;
+  // Globaler Live/Paper-Filter (obere Auswahl) für den GESAMTEN Analyse-Bereich
+  const filterFn = (t) => pnlFilter === 'all' || (pnlFilter === 'live' ? t.mode === 'live' : t.mode !== 'live');
   const openTrades = trades.filter(t => t.status === 'open' && filterFn(t));
   const closedTrades = trades.filter(t => t.status === 'closed' && filterFn(t));
-
-  const paperCount = trades.filter(t => t.mode !== 'live').length;
-  const liveCount = trades.filter(t => t.mode === 'live').length;
 
   // Coin-specific slices (for currently selected coin)
   const coinClosedTrades = closedTrades.filter(t => t.symbol === selectedCoin);
   const coinOpenTrades = openTrades.filter(t => t.symbol === selectedCoin);
 
-  // PnL-Filter (Alle | Live | Paper) – wirkt nur auf die beiden PnL-Karten
-  const pnlFilterFn = (t) => pnlFilter === 'all' || (pnlFilter === 'live' ? t.mode === 'live' : t.mode !== 'live');
-  const pnlClosedTrades = trades.filter(t => t.status === 'closed' && pnlFilterFn(t));
   const pnlTotal = pnlFilter === 'all'
     ? (balance?.realized_pnl || 0)
-    : pnlClosedTrades.reduce((a, t) => a + (t.realized_pnl || 0), 0);
-  const coinPnl = pnlClosedTrades
-    .filter(t => t.symbol === selectedCoin)
-    .reduce((a, t) => a + (t.realized_pnl || 0), 0);
+    : closedTrades.reduce((a, t) => a + (t.realized_pnl || 0), 0);
+  const coinPnl = coinClosedTrades.reduce((a, t) => a + (t.realized_pnl || 0), 0);
 
   // Performance per ACTIVE strategy for the SELECTED COIN
   // Show every active strategy, even without trades yet.
@@ -447,15 +446,9 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
             </div>
           </div>
 
-          <div className="trade-filter" data-testid="trade-filter">
-            <button className={`trade-filter-btn ${tradeFilter === 'all' ? 'active' : ''}`} onClick={() => setTradeFilter('all')} data-testid="trade-filter-all">Alle <span className="tf-count">{trades.length}</span></button>
-            <button className={`trade-filter-btn paper ${tradeFilter === 'paper' ? 'active' : ''}`} onClick={() => setTradeFilter('paper')} data-testid="trade-filter-paper">Paper <span className="tf-count">{paperCount}</span></button>
-            <button className={`trade-filter-btn live ${tradeFilter === 'live' ? 'active' : ''}`} onClick={() => setTradeFilter('live')} data-testid="trade-filter-live">Live <span className="tf-count">{liveCount}</span></button>
-          </div>
-
           <div className="analytics-section">
             <div className="section-title">
-              PERFORMANCE JE STRATEGIE · {getCoinName(selectedCoin)}
+              PERFORMANCE JE STRATEGIE · {getCoinName(selectedCoin)}{pnlFilter !== 'all' ? ` · ${pnlFilter === 'live' ? 'LIVE' : 'PAPER'}` : ''}
             </div>
             {stratRows.length === 0 && <div className="no-data">Keine aktiven Strategien</div>}
             {stratRows.map(s => {

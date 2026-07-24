@@ -1,40 +1,57 @@
 {
-  "summary": "Full backend + frontend E2E test of new Backtester per-strategy configs (incl. per-strategy timeframe), CSV export (trades+candles), 4 new strategies (macd_rsi_momentum, bollinger_squeeze, vwap_reversion, stoch_reversal), Optimizer (params + discovery modes), optimizer-apply (params -> settings, strategy -> custom), and strategy_timeframes settings. 15/15 pytest tests pass. UI end-to-end passes for optimizer modal, backtester modal with gear/config panel, per-strategy 5m timeframe, CSV export buttons, and settings-panel strategy-timeframe-select (Toast 'Gespeichert' verified).",
+  "summary": "Tested 3 new features: capital allocation modal + API, trades %-PnL + unified filter, optimizer scope=coins + override markers. Backend: 12/12 pytest passed. Frontend: all UI flows validated (capital modal, save, bw-alloc, pnl-filter replacement, optimizer override dot+legend).",
   "backend_issues": {
     "critical": [],
-    "minor": []
+    "minor": [
+      {"endpoint": "GET /api/optimizer/overrides/{sid}", "issue": "Reads override state from in-memory autotrader.config.strategy_coin_configs which persists after DB delete_one, causing stale symbols in results until backend restart. Consider re-reading from DB or invalidating cache on delete."}
+    ]
   },
   "frontend_issues": {
-    "ui_bugs": [],
+    "ui_bugs": [
+      {"component": "CapitalModal.js", "issue": "Save button uses data-testid='capital-save-btn' but review request specifies 'capital-save-button'. Naming inconsistency — either doc or code should be aligned.", "selector": "[data-testid='capital-save-btn']", "priority": "LOW"}
+    ],
     "integration_issues": [],
     "design_issues": [
-      {"screen": "Header Settings modal (mode=general)", "issues": ["Header settings-button opens SettingsPanel with mode='general' which only shows Steuerung + Telegram tabs. The 'strategy-timeframe-select' lives in the 'strategy' tab which is only reachable via the tab strip button 'edit-strategy-params-btn' (Zahnrad neben aktiver Strategie). Nicht ein Bug, aber die Reviewpunkte-Formulierung 'Einstellungen (settings-button) -> Strategie-Tab' ist irreführend – der korrekte Einstiegspunkt für den Timeframe-Select ist edit-strategy-params-btn. Ggf. Doku/Testpunkte anpassen."]}
+      {"screen": "Optimizer modal", "issues": ["React hydration warning in console: '<span> cannot be a child of <option>'. Non-blocking but should be fixed."]}
     ]
   },
   "test_report_links": [
-    "/app/backend/tests/test_backtest_optimizer.py",
-    "/app/test_reports/pytest/backtest_optimizer.xml"
+    "/app/backend/tests/test_capital_and_optimizer.py",
+    "/app/test_reports/pytest/pytest_results.xml"
   ],
   "action_items": [
-    "Keine Backend-Fixes nötig. Alle Endpoints (strategies, backtest run/status/export/strategy-configs, optimizer run/status/apply, settings) liefern erwartete Payloads.",
-    "Optional: Review-Doku präzisieren, dass strategy-timeframe-select über den 'edit-strategy-params-btn' (Zahnrad in Strategy-Tabs) erreichbar ist, nicht über den globalen settings-button.",
-    "Optional (nur bei Bedarf): React-Hydration-Warnung 'span cannot be a child of option' im DevTool-Instrumentation-Overlay – tritt durch Editor-Instrumentierung von <option>-Kindern auf, nicht durch echten App-Code. Kein Runtime-Bug."
+    "OPTIONAL: Align data-testid naming — either rename 'capital-save-btn' to 'capital-save-button' in code, or update the spec.",
+    "OPTIONAL: Fix optimizer_overrides endpoint to reflect DB state (avoid stale in-memory cache after cleanup/deletions).",
+    "OPTIONAL: Fix hydration warning '<span> child of <option>' in optimizer dropdowns."
   ],
   "critical_code_review_comments": [
-    "server.py ist mit 1919 Zeilen sehr groß – langfristig in Module (auth/backtest/optimizer/settings) splitten (Code-Quality, kein Bug).",
-    "GET /api/backtest/strategy-configs ist NICHT admin-geschützt – akzeptabel, da nur Konfig-Read, aber ggf. konsistent zu POST machen falls sensibel.",
-    "backtester.py fetch_history hat keinen Retry bei Binance-Rate-Limits (nur Log-Warn); optional Retry/Backoff einbauen (Robustheit).",
-    "optimizer/apply mit type=params speichert Params in scanner.settings.strategy_params UND ggf. autotrade strategy_overrides – gutes Verhalten, aber die Response gibt trade_params zurück auch wenn leer ({}). Kleine Nettigkeit.",
-    "Optimizer Ergebnis: Best-Card zeigt keinen Apply-Button wenn baseline==best. Das ist im Frontend gewollt (kein Improvement -> nichts zu übernehmen). Sauber."
+    "server.py is 2262 lines — should be split by domain (autotrade, optimizer, analytics, strategies).",
+    "optimizer_overrides reads from in-memory config only for strategy_coin_configs. Since DB is source of truth after cleanup, cached view can drift. Suggest either invalidating the in-memory entry on delete, or querying DB in the endpoint.",
+    "AutoTradeManager.allocated_capital: for live+percent when total is None, returns None -> UI shows blank; acceptable but worth documenting.",
+    "Capital POST validation good (scope/mode/value); consider adding upper bound on base_balance."
   ],
-  "updated_files": [
-    "/app/backend/tests/test_backtest_optimizer.py (neu erstellt)"
-  ],
-  "success_rate": {"backend": "100% (15/15)", "frontend": "100% aller Review-Checks"},
-  "test_credentials": "Admin/admin (aus /app/memory/test_credentials.md – Datei war leer; Credentials aus review_request verwendet, funktionieren)",
-  "seed_data_creation": "Keine bleibenden Seed-Daten. Test erzeugt kurzzeitig eine custom_ Strategie via optimizer/apply type=strategy und löscht sie im selben Test wieder (verified via /api/strategies). strategy_timeframes wurden am Ende auf {} zurückgesetzt.",
+  "updated_files": ["/app/backend/tests/test_capital_and_optimizer.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "Admin/admin (JWT via /api/auth/login)",
+  "seed_data_creation": "Inserted TEST_TRADE_PNLPCT into auto_trades to verify computed.pnl_pct (=2.5) and pnl_pct_capital (=25.0), then removed. Applied scope=coins override for scalping_4_rules/BTCUSDT then cleaned up (Mongo + backend restart to flush in-memory cache).",
   "retest_needed": false,
-  "should_main_agent_self_test": false,
-  "context_for_next_testing_agent": "Backtests + Optimierungen laufen echte Binance-Fetches (Public API). Bei 409 kurz warten. pytest.ini fixiert -n 2 --dist loadscope; für sequenzielle Runs -n 0 verwenden (nicht -p no:xdist). Der strategy-timeframe-select ist in SettingsPanel mit mode='strategy' – erreichbar über edit-strategy-params-btn (nicht via globalem settings-button, der mode='general' setzt und diesen Tab ausblendet). per_strategy Result ist eine sortierte LISTE von dicts, kein Dict.",
-  "rca of the issue": "Keine offenen Bugs – alle Punkte der review_request bestätigt."
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend restart is needed to clear autotrader.config.strategy_coin_configs cache after DB cleanup for optimizer overrides. The test file test_capital_and_optimizer.py contains full regression suite; run with `pytest backend/tests/test_capital_and_optimizer.py -v -o addopts=''` to disable xdist (avoids race between parallel workers touching global paper allocation).",
+  "verified_features": [
+    "GET /api/autotrade/capital returns allocation with live+paper (mode/value/allocated/used_margin/free)",
+    "POST /api/autotrade/capital validates scope, mode, fixed>0, 0<percent<=100, requires admin JWT",
+    "Paper percent mode: base 1000 * 25% = allocated 250.0 (verified via both /capital and /balance)",
+    "GET /api/autotrade/balance includes 'allocation' object with live & paper",
+    "GET /api/autotrade/trades: _enrich_trade adds computed.pnl_pct (2.5) and computed.pnl_pct_capital (25.0)",
+    "POST /api/optimizer/apply scope=coins persists to strategy_coin_configs + coin_params; overrides endpoint returns BTCUSDT",
+    "POST /api/optimizer/apply scope=coins without symbols -> 400",
+    "POST /api/optimizer/apply scope=global (default) -> 200",
+    "Frontend: bitunix-balance-widget click opens capital-modal",
+    "Frontend: capital-tab-live/paper, capital-mode-full/fixed/percent, capital-percent-input, capital-preview all work",
+    "Frontend: validation at 150% shows capital-validation-error 'Prozentsatz muss zwischen 1 und 100 liegen' and disables save",
+    "Frontend: after saving 25% paper, bw-alloc shows 'Bot 250.00 · frei 250.00'",
+    "Frontend: view-trades tab uses ONLY pnl-filter (pnl-filter-all/live/paper); old trade-filter and trade-filter-* are removed",
+    "Frontend: Paper filter shows 'PERFORMANCE JE STRATEGIE · PAPER' title",
+    "Frontend: optimizer-button opens optimizer with opt-override-dot-BTCUSDT + opt-override-legend when override present"
+  ]
 }

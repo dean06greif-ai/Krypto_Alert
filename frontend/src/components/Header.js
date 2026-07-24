@@ -1,25 +1,27 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Clock, Gear, ChartLineUp, Wallet, TrendUp, TrendDown, Lock, LockOpen, Trophy, ClockCounterClockwise, MagicWand } from '@phosphor-icons/react';
 import { authHeaders } from '../auth';
+import CapitalModal from './CapitalModal';
 import './Header.css';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
 const BalanceWidget = () => {
   const [bal, setBal] = useState(null);
+  const [showCapital, setShowCapital] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const d = await fetch(`${API_URL}/api/autotrade/balance`).then(r => r.json());
+      setBal(d);
+    } catch (_) { /* ignore */ }
+  }, []);
 
   useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const d = await fetch(`${API_URL}/api/autotrade/balance`).then(r => r.json());
-        if (alive) setBal(d);
-      } catch (_) { /* ignore */ }
-    };
     load();
     const iv = setInterval(load, 15000);
-    return () => { alive = false; clearInterval(iv); };
-  }, []);
+    return () => clearInterval(iv);
+  }, [load]);
 
   if (!bal) return null;
   const isLive = bal.mode === 'live';
@@ -31,9 +33,13 @@ const BalanceWidget = () => {
   const hasPaperActivity = (paperPnl !== null && paperPnl !== 0);
   const paperPnlPos = (paperPnl || 0) >= 0;
 
+  const alloc = bal.allocation?.[isLive ? 'live' : 'paper'];
+
   return (
     <div className="balance-widget-wrapper">
-      <div className="balance-widget" data-testid="bitunix-balance-widget">
+      <div className="balance-widget bw-clickable" data-testid="bitunix-balance-widget"
+        onClick={() => setShowCapital(true)} title="Kapital-Zuweisung öffnen"
+        role="button" tabIndex={0}>
         <div className={`bw-mode ${isLive ? 'live' : 'paper'}`} data-testid="bw-mode">
           <Wallet size={14} weight="fill" />
           {isLive ? 'LIVE' : 'PAPER'}
@@ -45,10 +51,19 @@ const BalanceWidget = () => {
               <span className="bw-primary-value mono" data-testid="bw-total">
                 {bal.margin_balance != null ? Number(bal.margin_balance).toFixed(2) : (bal.bitunix_error ? 'API-Fehler' : '—')}
               </span>
-              <span className="bw-sub-line" data-testid="bw-free">
-                <span className="bw-sub-label">Kapital</span>
-                <span className="mono">{bal.available != null ? Number(bal.available).toFixed(2) : '—'}</span>
-              </span>
+              {alloc?.allocated != null ? (
+                <span className="bw-sub-line" data-testid="bw-alloc">
+                  <span className="bw-sub-label">Bot</span>
+                  <span className="mono">{Number(alloc.allocated).toFixed(2)}</span>
+                  <span className="bw-sub-label">· frei</span>
+                  <span className="mono">{alloc.free != null ? Number(alloc.free).toFixed(2) : '—'}</span>
+                </span>
+              ) : (
+                <span className="bw-sub-line" data-testid="bw-free">
+                  <span className="bw-sub-label">Kapital</span>
+                  <span className="mono">{bal.available != null ? Number(bal.available).toFixed(2) : '—'}</span>
+                </span>
+              )}
             </div>
           ) : (
             <div className="bw-item bw-warn" data-testid="bw-unconfigured">Bitunix nicht konfiguriert</div>
@@ -60,6 +75,14 @@ const BalanceWidget = () => {
               {pnlPos ? <TrendUp size={13} weight="bold" /> : <TrendDown size={13} weight="bold" />}
               {pnl.toFixed(2)}
             </span>
+            {alloc?.allocated != null && (
+              <span className="bw-sub-line" data-testid="bw-alloc">
+                <span className="bw-sub-label">Bot</span>
+                <span className="mono">{Number(alloc.allocated).toFixed(2)}</span>
+                <span className="bw-sub-label">· frei</span>
+                <span className="mono">{alloc.free != null ? Number(alloc.free).toFixed(2) : '—'}</span>
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -78,6 +101,14 @@ const BalanceWidget = () => {
             </span>
           </div>
         </div>
+      )}
+
+      {showCapital && (
+        <CapitalModal
+          initialScope={isLive ? 'live' : 'paper'}
+          onClose={() => setShowCapital(false)}
+          onSaved={load}
+        />
       )}
     </div>
   );

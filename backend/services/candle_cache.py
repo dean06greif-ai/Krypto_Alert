@@ -160,6 +160,31 @@ async def _fetch_range(session, symbol: str, start_ms: int, end_ms: int,
     return out
 
 
+async def _fetch_range_parallel(session, symbol: str, start_ms: int, end_ms: int,
+                                job: Dict = None, workers: int = 3) -> List[Dict]:
+    """Großen Zeitraum in Teilbereiche splitten und parallel laden (~3x schneller).
+    Bei kleinen Bereichen (<2 Tage) normaler sequenzieller Fetch."""
+    span = end_ms - start_ms
+    if span <= 2 * 86400 * 1000 or workers <= 1:
+        return await _fetch_range(session, symbol, start_ms, end_ms, job=job)
+    chunk = span // workers
+    bounds = [(start_ms + i * chunk,
+               end_ms if i == workers - 1 else start_ms + (i + 1) * chunk)
+              for i in range(workers)]
+    parts = await asyncio.gather(
+        *[_fetch_range(session, symbol, a, b, job=job if i == 0 else None)
+          for i, (a, b) in enumerate(bounds)])
+    merged: List[Dict] = []
+    seen = set()
+    for part in parts:
+        for c in part:
+            if c["timestamp"] not in seen:
+                seen.add(c["timestamp"])
+                merged.append(c)
+    merged.sort(key=lambda c: c["timestamp"])
+    return merged
+
+
 async def get_candles(session, symbol: str, days: int, job: Dict = None) -> List[Dict]:
     """Liefert 1-Minuten-Kerzen der letzten `days` Tage – nutzt Cache aggressiv."""
     end = int(time.time() * 1000)
@@ -175,9 +200,9 @@ async def get_candles(session, symbol: str, days: int, job: Dict = None) -> List
                 logger.info(f"candle_cache: hydrated {symbol} from disk ({len(disk)})")
 
     if entry is None:
-        # kompletter Fresh-Fetch
+        # kompletter Fresh-Fetch (parallelisiert bei großen Zeiträumen)
         logger.info(f"candle_cache MISS {symbol} days={days}")
-        candles = await _fetch_range(session, symbol, start, end, job=job)
+        candles = await _fetch_range_parallel(session, symbol, start, end, job=job)
         async with _LOCK:
             _MEM[symbol] = {"candles": candles, "last_refresh": time.time(),
                             "used_at": time.time()}
@@ -200,7 +225,7 @@ async def get_candles(session, symbol: str, days: int, job: Dict = None) -> List
 
     # Head prepend
     if needs_head:
-        head = await _fetch_range(session, symbol, start, cached_start, job=job)
+        head = await _fetch_range_parallel(session, symbol, start, cached_start, job=job)
         # letzten Wert absägen falls == cached_start
         if head and cached and head[-1]["timestamp"] >= cached[0]["timestamp"]:
             head = [c for c in head if c["timestamp"] < cached[0]["timestamp"]]

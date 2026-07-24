@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Plus, Trash, FloppyDisk, PencilSimple, ArrowCounterClockwise } from '@phosphor-icons/react';
+import { X, Plus, Trash, FloppyDisk, PencilSimple, ArrowCounterClockwise, DownloadSimple, UploadSimple } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import { authHeaders, isAdmin } from '../auth';
 import SafeOverlay from './SafeOverlay';
@@ -23,6 +23,7 @@ const jsonHeaders = () => ({ 'Content-Type': 'application/json', ...authHeaders(
 const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
   const [options, setOptions] = useState({ indicators: [], operators: [], indicator_meta: {}, period_fields: [] });
   const [enabled, setEnabled] = useState(enabledIds);
+  const importFileRef = React.useRef(null);
   const [editingId, setEditingId] = useState(null);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -158,6 +159,45 @@ const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
     else toast.error('Fehler');
   };
 
+  // ---- Komplettes Strategie-Backup: Download & Wiederherstellung ----
+  const exportStrategy = async (s) => {
+    try {
+      const res = await fetch(`${API_URL}/api/strategies/${s.id}/export`);
+      if (!res.ok) { toast.error('Export fehlgeschlagen'); return; }
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      const safe = (s.name || s.id).replace(/[^a-z0-9äöüß_-]+/gi, '_');
+      a.download = `strategie-backup-${safe}-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast.success(`"${s.name}" komplett exportiert (Regeln, Parameter, Trade- & Backtest-Einstellungen)`);
+    } catch { toast.error('Verbindungsfehler beim Export'); }
+  };
+
+  const importStrategyFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!isAdmin()) { toast.error('Admin-Login erforderlich'); e.target.value = ''; return; }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const d = JSON.parse(reader.result);
+        if (d.type !== 'strategy_backup') { toast.error('Keine gültige Strategie-Backup-Datei'); return; }
+        const res = await fetch(`${API_URL}/api/strategies/import`, {
+          method: 'POST', headers: jsonHeaders(), body: JSON.stringify(d),
+        });
+        const out = await res.json();
+        if (!res.ok) { toast.error(out.detail || 'Import fehlgeschlagen'); return; }
+        toast.success(`Strategie "${d.name || out.id}" 1:1 wiederhergestellt${out.coin_configs ? ` (inkl. ${out.coin_configs} Coin-Trade-Configs)` : ''}`);
+        onChanged && onChanged();
+      } catch { toast.error('Datei konnte nicht gelesen werden'); }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
   const IndicatorSelect = ({ value, onChange }) => (
     <select value={value} onChange={onChange}>
       {Object.entries(groupedIndicators()).map(([group, inds]) => (
@@ -218,6 +258,11 @@ const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
 
           <div className="sb-section">
             <h3>Alle Strategien
+              <button className="sb-restore-btn" onClick={() => importFileRef.current?.click()} data-testid="import-strategy-btn" title="Strategie-Backup-Datei laden – stellt eine gelöschte/verstellte Strategie 1:1 wieder her">
+                <UploadSimple size={13} weight="bold" /> Strategie importieren
+              </button>
+              <input ref={importFileRef} type="file" accept=".json,application/json"
+                style={{ display: 'none' }} onChange={importStrategyFile} data-testid="import-strategy-file" />
               <button className="sb-restore-btn" onClick={restoreDefaults} data-testid="restore-defaults-btn" title="Gelöschte voreingestellte Strategien wiederherstellen">
                 <ArrowCounterClockwise size={13} weight="bold" /> Voreingestellte wiederherstellen
               </button>
@@ -231,6 +276,9 @@ const StrategyBuilder = ({ strategies, enabledIds, onClose, onChanged }) => {
                   <span className="sb-custom-desc">{s.description}</span>
                 </div>
                 <div className="sb-item-actions">
+                  <button className="sb-edit" onClick={() => exportStrategy(s)} data-testid={`export-strategy-${s.id}`} title="Komplette Strategie als Backup-Datei herunterladen (Regeln, Parameter, Trade-Einstellungen)">
+                    <DownloadSimple size={15} />
+                  </button>
                   {s.is_custom && (
                     <button className="sb-edit" onClick={() => startEdit(s)} data-testid={`edit-strategy-${s.id}`} title="Bearbeiten">
                       <PencilSimple size={15} />

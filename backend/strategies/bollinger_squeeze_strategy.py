@@ -118,3 +118,49 @@ class BollingerSqueezeStrategy(BaseStrategy):
         return {"entry": round(entry, 6), "stop_loss": round(sl, 6),
                 "take_profit_1": round(tp1, 6), "take_profit_full": round(tpf, 6),
                 "crv": round(ti.calculate_crv(entry, sl, tpf), 2)}
+
+    # ----------------------- Vectorized Fast-Path -----------------------
+    @staticmethod
+    def vectorized_signals(fs, params: Dict) -> Optional[Dict]:
+        """Squeeze (Perzentil der Bandbreite) + Band-Ausbruch + Volumen -- vektorisiert."""
+        import numpy as np
+        import pandas as pd
+        bb_p = int(params["bb_period"])
+        lookback = int(params["squeeze_lookback"])
+        need = bb_p + lookback + 10
+
+        d = {"bb_period": bb_p, "bb_std": float(params["bb_std"]),
+             "volume_sma_period": 20}
+        close = fs.close
+        u = fs.get("bb_upper", d)
+        m = fs.get("bb_middle", d)
+        lo_b = fs.get("bb_lower", d)
+        rel_vol = fs.get("rel_volume", d)
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            w = (u - lo_b) / m  # Bandbreite (Anteil, wie Legacy)
+            # Schwelle: k-t-kleinster Wert der letzten `lookback` Breiten (bis t-1)
+            k = max(0, int(lookback * float(params["squeeze_pct"]) / 100) - 1)
+            q = k / (lookback - 1) if lookback > 1 else 0.0
+            thr = (pd.Series(w).rolling(lookback, min_periods=lookback)
+                   .quantile(q, interpolation="lower").shift(1).to_numpy())
+            w_prev = np.concatenate([[np.nan], w[:-1]])
+            squeeze = w_prev <= thr
+
+            close_prev = np.concatenate([[np.nan], close[:-1]])
+            u_prev = np.concatenate([[np.nan], u[:-1]])
+            l_prev = np.concatenate([[np.nan], lo_b[:-1]])
+            brk_up = (close > u) & (close_prev <= u_prev)
+            brk_dn = (close < lo_b) & (close_prev >= l_prev)
+            green = close > fs.open
+            vol_ok = rel_vol >= float(params["rel_vol_min"])
+
+            long_ok = squeeze & brk_up & vol_ok & green
+            short_ok = squeeze & brk_dn & vol_ok & ~green
+
+        valid = (~np.isnan(u) & ~np.isnan(m) & (m != 0) & ~np.isnan(thr)
+                 & ~np.isnan(u_prev) & ~np.isnan(close_prev) & ~np.isnan(rel_vol))
+        long_ok &= valid
+        short_ok &= valid
+        return {"long": long_ok, "short": short_ok,
+                "warmup": need, "rules_total": 4, "rsi": None}

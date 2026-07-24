@@ -62,3 +62,9 @@
 .bt-eta, .opt-eta { color: #ffa502; font-weight: 600; }
 .bt-session-field input { min-width: 190px; }
 .opt-apply-bt { margin-left: 8px; background: rgba(0, 168, 255, 0.15); border-color: rgba(0, 168, 255, 0.4); color: #00A8FF; }
+
+/* Tools-Leiste: RAM / Cache / Einstellungen speichern-laden */
+.bt-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 0 4px; border-top: 1px dashed rgba(255,255,255,0.08); margin-top: 6px; }
+.bt-ram { font-size: 11px; color: #8b93a7; font-family: 'JetBrains Mono', monospace; margin-right: auto; }
+.bt-tool-btn { display: inline-flex; align-items: center; gap: 4px; background: rgba(0,168,255,0.12); border: 1px solid rgba(0,168,255,0.35); color: #00A8FF; border-radius: 6px; padding: 4px 9px; font-size: 11px; cursor: pointer; }
+.bt-tool-btn:hover { background: rgba(0,168,255,0.25); }
