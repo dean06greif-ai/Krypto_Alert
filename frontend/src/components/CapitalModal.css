@@ -36,9 +36,32 @@
   font-weight: 800;
   letter-spacing: 0.05em;
   color: #fff;
+  margin: 0;
 }
 
 .cap-header h3 svg { color: #00FF66; }
+
+.cap-scope-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 3px 8px;
+  border-radius: 6px;
+  margin-left: 4px;
+  line-height: 1;
+}
+.cap-scope-badge.live {
+  color: #FF4D4D;
+  background: rgba(255, 77, 77, 0.14);
+  border: 1px solid rgba(255, 77, 77, 0.4);
+}
+.cap-scope-badge.paper {
+  color: #00C8FF;
+  background: rgba(0, 200, 255, 0.12);
+  border: 1px solid rgba(0, 200, 255, 0.4);
+}
 
 .cap-close {
   background: none;

@@ -12,13 +12,28 @@ const MODES = [
   { id: 'percent', title: 'Prozentsatz', desc: 'Der Bot darf einen Anteil des Gesamtguthabens nutzen' },
 ];
 
-export default function CapitalModal({ initialScope = 'live', onClose, onSaved }) {
-  const [scope, setScope] = useState(initialScope);
+/**
+ * CapitalModal
+ * Props:
+ *  - initialScope: 'live' | 'paper'  (Fallback, wenn kein lockedScope gesetzt ist)
+ *  - lockedScope: 'live' | 'paper'   (wenn gesetzt: Tabs werden ausgeblendet,
+ *                                     Scope kann nicht mehr gewechselt werden)
+ *  - onClose(): schließt Modal
+ *  - onSaved(): callback nach erfolgreichem Speichern
+ */
+export default function CapitalModal({ initialScope = 'live', lockedScope, onClose, onSaved }) {
+  const effectiveInitial = lockedScope || initialScope;
+  const [scope, setScope] = useState(effectiveInitial);
   const [data, setData] = useState(null);
   const [mode, setMode] = useState('full');
   const [value, setValue] = useState('');
   const [baseBalance, setBaseBalance] = useState('1000');
   const [saving, setSaving] = useState(false);
+
+  // Wenn lockedScope sich ändert, Scope hart synchronisieren
+  useEffect(() => {
+    if (lockedScope) setScope(lockedScope);
+  }, [lockedScope]);
 
   useEffect(() => {
     fetch(`${API_URL}/api/autotrade/capital`).then(r => r.json()).then(setData).catch(() => {});
@@ -79,20 +94,40 @@ export default function CapitalModal({ initialScope = 'live', onClose, onSaved }
   };
 
   const cur = data?.allocation?.[scope];
+  const isLocked = !!lockedScope;
+  const scopeLabel = scope === 'live' ? 'LIVE' : 'PAPER';
 
   return (
     <div className="cap-overlay" onClick={onClose}>
       <div className="cap-modal" onClick={e => e.stopPropagation()} data-testid="capital-modal">
         <div className="cap-header">
-          <h3><Wallet size={18} weight="fill" /> KAPITAL-ZUWEISUNG</h3>
+          <h3>
+            <Wallet size={18} weight="fill" />
+            KAPITAL-ZUWEISUNG
+            {isLocked && (
+              <span className={`cap-scope-badge ${scope}`} data-testid="capital-scope-badge">
+                {scopeLabel}
+              </span>
+            )}
+          </h3>
           <button className="cap-close" onClick={onClose} data-testid="capital-modal-close"><X size={20} weight="bold" /></button>
         </div>
         <p className="cap-sub">Lege fest, auf wie viel Guthaben der Bot Zugriff hat. Offene Positionen bleiben bei Änderungen unberührt – das Limit gilt nur für neue Trades.</p>
 
-        <div className="cap-tabs">
-          <button className={`cap-tab live ${scope === 'live' ? 'on' : ''}`} onClick={() => setScope('live')} data-testid="capital-tab-live">LIVE</button>
-          <button className={`cap-tab paper ${scope === 'paper' ? 'on' : ''}`} onClick={() => setScope('paper')} data-testid="capital-tab-paper">PAPER</button>
-        </div>
+        {!isLocked && (
+          <div className="cap-tabs">
+            <button
+              className={`cap-tab live ${scope === 'live' ? 'on' : ''}`}
+              onClick={() => setScope('live')}
+              data-testid="capital-tab-live"
+            >LIVE</button>
+            <button
+              className={`cap-tab paper ${scope === 'paper' ? 'on' : ''}`}
+              onClick={() => setScope('paper')}
+              data-testid="capital-tab-paper"
+            >PAPER</button>
+          </div>
+        )}
 
         {scope === 'live' ? (
           <div className="cap-info-row" data-testid="capital-live-total">

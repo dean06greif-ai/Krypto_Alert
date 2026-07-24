@@ -8,7 +8,9 @@ const API_URL = process.env.REACT_APP_BACKEND_URL;
 
 const BalanceWidget = () => {
   const [bal, setBal] = useState(null);
-  const [showCapital, setShowCapital] = useState(false);
+  // Statt eines gemeinsamen Modal-States pflegen wir den Scope-Lock explizit.
+  // null = geschlossen, 'live' oder 'paper' = geöffnet mit fixem Scope.
+  const [capitalScope, setCapitalScope] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -30,16 +32,24 @@ const BalanceWidget = () => {
 
   // Paper overlay data
   const paperPnl = bal.paper_pnl ?? null;
-  const hasPaperActivity = (paperPnl !== null && paperPnl !== 0);
   const paperPnlPos = (paperPnl || 0) >= 0;
 
   const alloc = bal.allocation?.[isLive ? 'live' : 'paper'];
 
+  // Hauptwidget öffnet immer mit dem aktuellen Modus als gesperrtem Scope.
+  const openMainCapital = () => setCapitalScope(isLive ? 'live' : 'paper');
+  const openPaperCapital = (e) => {
+    e.stopPropagation();
+    setCapitalScope('paper');
+  };
+
   return (
     <div className="balance-widget-wrapper">
       <div className="balance-widget bw-clickable" data-testid="bitunix-balance-widget"
-        onClick={() => setShowCapital(true)} title="Kapital-Zuweisung öffnen"
-        role="button" tabIndex={0}>
+        onClick={openMainCapital}
+        title={isLive ? 'Live-Kapital anpassen' : 'Paper-Kapital anpassen'}
+        role="button" tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openMainCapital(); }}>
         <div className={`bw-mode ${isLive ? 'live' : 'paper'}`} data-testid="bw-mode">
           <Wallet size={14} weight="fill" />
           {isLive ? 'LIVE' : 'PAPER'}
@@ -55,7 +65,8 @@ const BalanceWidget = () => {
                 <span className="bw-sub-line" data-testid="bw-alloc">
                   <span className="bw-sub-label">Bot</span>
                   <span className="mono">{Number(alloc.allocated).toFixed(2)}</span>
-                  <span className="bw-sub-label">· frei</span>
+                  <span className="bw-sub-sep">·</span>
+                  <span className="bw-sub-label">frei</span>
                   <span className="mono">{alloc.free != null ? Number(alloc.free).toFixed(2) : '—'}</span>
                 </span>
               ) : (
@@ -79,7 +90,8 @@ const BalanceWidget = () => {
               <span className="bw-sub-line" data-testid="bw-alloc">
                 <span className="bw-sub-label">Bot</span>
                 <span className="mono">{Number(alloc.allocated).toFixed(2)}</span>
-                <span className="bw-sub-label">· frei</span>
+                <span className="bw-sub-sep">·</span>
+                <span className="bw-sub-label">frei</span>
                 <span className="mono">{alloc.free != null ? Number(alloc.free).toFixed(2) : '—'}</span>
               </span>
             )}
@@ -87,26 +99,34 @@ const BalanceWidget = () => {
         )}
       </div>
 
-      {/* Paper Overlay - erscheint neben Live wenn Paper-Trades aktiv */}
-      {isLive && hasPaperActivity && (
-        <div className="paper-overlay" data-testid="paper-overlay">
+      {/* Paper Overlay - im Live-Modus immer sichtbar, klickbar für Paper-Kapital. */}
+      {isLive && (
+        <div className="paper-overlay bw-clickable" data-testid="paper-overlay"
+          onClick={openPaperCapital}
+          title="Paper-Kapital anpassen"
+          role="button" tabIndex={0}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openPaperCapital(e); }}>
           <div className="paper-overlay-mode">
             <Wallet size={12} weight="fill" />
             PAPER
           </div>
           <div className="paper-overlay-pnl">
-            <span className={`bw-value mono ${paperPnlPos ? 'pos' : 'neg'}`}>
-              {paperPnlPos ? <TrendUp size={11} weight="bold" /> : <TrendDown size={11} weight="bold" />}
-              {(paperPnl || 0).toFixed(2)}
-            </span>
+            {paperPnl != null && paperPnl !== 0 ? (
+              <span className={`bw-value mono ${paperPnlPos ? 'pos' : 'neg'}`}>
+                {paperPnlPos ? <TrendUp size={11} weight="bold" /> : <TrendDown size={11} weight="bold" />}
+                {(paperPnl || 0).toFixed(2)}
+              </span>
+            ) : (
+              <span className="bw-value bw-value-muted mono">—</span>
+            )}
           </div>
         </div>
       )}
 
-      {showCapital && (
+      {capitalScope && (
         <CapitalModal
-          initialScope={isLive ? 'live' : 'paper'}
-          onClose={() => setShowCapital(false)}
+          lockedScope={capitalScope}
+          onClose={() => setCapitalScope(null)}
           onSaved={load}
         />
       )}
@@ -139,7 +159,7 @@ const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions
       <div className="header-left">
         <div className="header-brand">
           <ChartLineUp size={28} weight="bold" className="brand-icon" />
-          <div>
+          <div className="header-brand-text">
             <h1 className="header-title">CRYPTO SCANNER</h1>
             {activeStrategy && (
               <div className="header-strategy" data-testid="active-strategy-display">
@@ -149,13 +169,13 @@ const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions
           </div>
         </div>
       </div>
-      
+
       <div className="header-center">
         <div className="session-status">
           <Clock size={20} weight="bold" />
           <span className="mono">{formatTime(currentTime)}</span>
           <span className={`badge ${sessionActive ? 'badge-active' : 'badge-inactive'}`} data-testid="session-status-badge">
-            {sessionActive 
+            {sessionActive
               ? (currentSession ? `${currentSession.toUpperCase()} · ACTIVE` : 'TRADING ACTIVE')
               : 'OUTSIDE SESSIONS'}
           </span>
@@ -166,14 +186,14 @@ const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions
           ) : (
             enabledSessions.map((s, i) => (
               <span key={i} className="text-muted">
-                {i > 0 && <span style={{margin: '0 4px'}}>|</span>}
+                {i > 0 && <span style={{ margin: '0 4px' }}>|</span>}
                 {s.name}: {s.start}-{s.end}
               </span>
             ))
           )}
         </div>
       </div>
-      
+
       <div className="header-right">
         <BalanceWidget />
         <button className="btn" onClick={onCompareClick} title="Strategie-Vergleich" data-testid="compare-strategies-button">

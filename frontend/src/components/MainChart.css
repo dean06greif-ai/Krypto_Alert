@@ -53,7 +53,42 @@
   border-radius: 50%;
 }
 
-.chart-container {
-  flex: 1;
+/* Wrapper: eigener stacking- und resize-Kontext, damit der Chart
+   nicht in einer Feedback-Schleife mit dem Flex-Parent immer kleiner wird.
+   - min-height: 0 ist Pflicht in Flex-Column-Layouts, sonst kollabiert der Chart
+   - overflow: hidden isoliert die ResizeObserver-Messung von lightweight-charts */
+.chart-wrap {
+  flex: 1 1 auto;
   position: relative;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+  contain: strict;
+}
+
+.chart-container {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.chart-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(18, 18, 18, 0.85);
+  color: #A1A4B0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.chart-overlay.chart-error {
+  color: #FF4D4D;
 }

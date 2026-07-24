@@ -168,6 +168,21 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
   const decided = wins + losses;
   const winRate = decided ? Math.round(wins / decided * 100) : 0;
 
+  // Trades heute (opened_at seit Mitternacht Europe/Berlin, optional nach aktiver Strategie gefiltert)
+  const startOfTodayMs = (() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  })();
+  const tradesToday = trades.filter(t => {
+    const raw = t.opened_at || t.created_at || t.entry_time || t.timestamp;
+    if (!raw) return false;
+    const ts = typeof raw === 'number' ? raw : new Date(raw).getTime();
+    if (!Number.isFinite(ts) || ts < startOfTodayMs) return false;
+    if (selectedStrategy && t.strategy_id && t.strategy_id !== selectedStrategy) return false;
+    return true;
+  }).length;
+
   const totalWins = performance.reduce((a, p) => a + (p.wins || 0), 0);
   const totalLosses = performance.reduce((a, p) => a + (p.losses || 0), 0);
   const globalDecided = totalWins + totalLosses;
@@ -186,6 +201,8 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
       fetch(`${API_URL}/api/analytics/time-based/${selectedCoin}`).then(r => r.json()).then(setTimeAnalytics).catch(() => {});
     }
     if (view === 'trades') { loadTrades(); const iv = setInterval(loadTrades, 15000); return () => clearInterval(iv); }
+    // Trades werden auch in der Übersicht benötigt (für "Trades heute"-Zähler)
+    if (view === 'overview') { loadTrades(); const iv = setInterval(loadTrades, 15000); return () => clearInterval(iv); }
   }, [view, selectedCoin, loadTrades]);
 
   // Globaler Live/Paper-Filter (obere Auswahl) für den GESAMTEN Analyse-Bereich
@@ -330,6 +347,7 @@ const PerformanceAnalytics = ({ performance, strategies = [], enabledIds = [], s
               <div className="stat-card"><div className="stat-icon"><Target size={20} className="text-warning" /></div><div className="stat-content"><div className="stat-value mono">{totalSignals}</div><div className="stat-label">Signale</div></div></div>
               <div className="stat-card"><div className="stat-icon"><TrendUp size={20} className="text-long" /></div><div className="stat-content"><div className="stat-value mono text-long">{longSignals}</div><div className="stat-label">Long</div></div></div>
               <div className="stat-card"><div className="stat-icon"><TrendDown size={20} className="text-short" /></div><div className="stat-content"><div className="stat-value mono text-short">{shortSignals}</div><div className="stat-label">Short</div></div></div>
+              <div className="stat-card" data-testid="stat-trades-today"><div className="stat-icon"><Lightning size={20} className="text-warning" /></div><div className="stat-content"><div className="stat-value mono">{tradesToday}</div><div className="stat-label">Trades</div></div></div>
               <div className="stat-card"><div className="stat-icon"><CheckCircle size={20} className="text-long" /></div><div className="stat-content"><div className="stat-value mono">{winRate}%</div><div className="stat-label">Win-Rate ({decided})</div></div></div>
             </div>
           </div>

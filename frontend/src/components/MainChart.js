@@ -26,6 +26,8 @@ const MainChart = ({ symbol, candleData }) => {
   const ema9Ref = useRef(null);
   const ema50Ref = useRef(null);
   const lastTimeRef = useRef(0);
+  const resizeObserverRef = useRef(null);
+  const resizeRafRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [bars, setBars] = useState(0);
@@ -39,7 +41,10 @@ const MainChart = ({ symbol, candleData }) => {
     const berlinTime = (ts, opts) => new Intl.DateTimeFormat('de-DE', {
       timeZone: 'Europe/Berlin', hour12: false, ...opts,
     }).format(new Date(ts * 1000));
-    const chart = createChart(chartContainerRef.current, {
+    const container = chartContainerRef.current;
+    const initialWidth = Math.max(container.clientWidth || 0, 1);
+    const initialHeight = Math.max(container.clientHeight || 0, 1);
+    const chart = createChart(container, {
       layout: { background: { color: '#121212' }, textColor: '#A1A4B0' },
       grid: { vertLines: { color: '#1E2028' }, horzLines: { color: '#1E2028' } },
       timeScale: {
@@ -59,7 +64,12 @@ const MainChart = ({ symbol, candleData }) => {
           hour: '2-digit', minute: '2-digit',
         }),
       },
-      autoSize: true,
+      // WICHTIG: kein autoSize:true - das erzeugt in bestimmten Flex-Layouts
+      // eine Feedback-Schleife (Chart -> Parent -> ResizeObserver -> Chart),
+      // wodurch das Chart-Fenster immer kleiner wird. Wir messen selbst.
+      autoSize: false,
+      width: initialWidth,
+      height: initialHeight,
     });
     chartRef.current = chart;
     candleSeriesRef.current = chart.addSeries(CandlestickSeries, {
@@ -69,14 +79,45 @@ const MainChart = ({ symbol, candleData }) => {
     ema9Ref.current = chart.addSeries(LineSeries, { color: '#FFD700', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
     ema50Ref.current = chart.addSeries(LineSeries, { color: '#00A8FF', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
 
-    const handleResize = () => {
-      if (chartContainerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth });
-      }
+    // Manuelles Resize per ResizeObserver + rAF-Throttle, mit
+    // "letzter angewendeter Größe"-Guard - so triggern wir keine Endlos-Loop.
+    let lastAppliedW = initialWidth;
+    let lastAppliedH = initialHeight;
+    const applySize = () => {
+      resizeRafRef.current = null;
+      const el = chartContainerRef.current;
+      const c = chartRef.current;
+      if (!el || !c) return;
+      const w = Math.max(Math.floor(el.clientWidth), 1);
+      const h = Math.max(Math.floor(el.clientHeight), 1);
+      if (w === lastAppliedW && h === lastAppliedH) return; // guard
+      lastAppliedW = w;
+      lastAppliedH = h;
+      try { c.resize(w, h, false); } catch (_) { /* noop */ }
     };
-    window.addEventListener('resize', handleResize);
+    const scheduleResize = () => {
+      if (resizeRafRef.current != null) return;
+      resizeRafRef.current = window.requestAnimationFrame(applySize);
+    };
+
+    // ResizeObserver auf dem Container (der ist absolute innerhalb .chart-wrap,
+    // dadurch beeinflusst seine Größe den Parent nicht -> keine Loop).
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserverRef.current = new ResizeObserver(scheduleResize);
+      resizeObserverRef.current.observe(container);
+    }
+    window.addEventListener('resize', scheduleResize);
+
     return () => {
-      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('resize', scheduleResize);
+      if (resizeRafRef.current != null) {
+        window.cancelAnimationFrame(resizeRafRef.current);
+        resizeRafRef.current = null;
+      }
+      if (resizeObserverRef.current) {
+        try { resizeObserverRef.current.disconnect(); } catch (_) { /* noop */ }
+        resizeObserverRef.current = null;
+      }
       try { chart.remove(); } catch (e) { /* noop */ }
       chartRef.current = null;
       candleSeriesRef.current = null;
