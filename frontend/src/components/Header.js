@@ -25,7 +25,44 @@ const BalanceWidget = () => {
     return () => clearInterval(iv);
   }, [load]);
 
-  if (!bal) return null;
+  if (!bal) {
+    // Skeleton während des initialen Loads: identisches Layout, damit der
+    // Header nicht "nachspringt", sobald die Balance-Daten eintreffen.
+    return (
+      <div className="balance-widget-wrapper" data-testid="bitunix-balance-skeleton">
+        <div className="balance-widget bw-skeleton" aria-busy="true">
+          <div className="bw-mode live">
+            <Wallet size={14} weight="fill" />
+            LIVE
+          </div>
+          <div className="bw-stack">
+            <span className="bw-usdt-label">USDT</span>
+            <span className="bw-primary-value mono">—</span>
+            <span className="bw-sub-line">
+              <span className="bw-sub-label">frei</span>
+              <span className="mono">—</span>
+            </span>
+          </div>
+        </div>
+        <div className="paper-overlay bw-skeleton" aria-busy="true">
+          <div className="paper-overlay-mode">
+            <Wallet size={12} weight="fill" />
+            PAPER
+          </div>
+          <div className="overlay-stack">
+            <span className="bw-usdt-label">PnL</span>
+            <div className="paper-overlay-pnl">
+              <span className="bw-primary-value bw-value-muted mono">—</span>
+            </div>
+            <span className="bw-sub-line">
+              <span className="bw-sub-label">frei</span>
+              <span className="mono">—</span>
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
   const isLive = bal.mode === 'live';
   const pnl = bal.realized_pnl || 0;
   const pnlPos = pnl >= 0;
