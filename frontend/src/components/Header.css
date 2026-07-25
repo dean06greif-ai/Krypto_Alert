@@ -2,9 +2,9 @@
   min-height: 70px;
   background: #121212;
   border-bottom: 1px solid #2A2D3A;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 10px 24px;
   gap: 24px;
 }
@@ -13,6 +13,7 @@
   display: flex;
   align-items: center;
   min-width: 0;
+  flex-shrink: 1;
 }
 
 .header-brand {
@@ -63,37 +64,41 @@
   text-overflow: ellipsis;
 }
 
-.header-center {
+/* ---- Uhrzeit + Session-Badge: eigener Block NEBEN den Labels, keine Überlagerung ---- */
+.header-session {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
 .session-status {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   color: #A1A4B0;
+  font-size: 13px;
   white-space: nowrap;
 }
 
 .session-times {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
+  gap: 6px;
+  font-size: 11px;
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: flex-end;
 }
 
 .header-right {
   display: flex;
   justify-content: flex-end;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
+  flex-shrink: 0;
 }
 
 /* ---- Balance Widget Wrapper (Live + Paper side by side) ---- */
@@ -101,6 +106,7 @@
   display: flex;
   align-items: stretch;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .balance-widget {
@@ -239,7 +245,18 @@
   white-space: nowrap;
 }
 
-/* ---- Paper Overlay Badge ---- */
+/* ---- Gemeinsamer Stack für Overlay-Badges (Wert + frei untereinander) ---- */
+.overlay-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  line-height: 1.2;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* ---- Paper Badge ---- */
 .paper-overlay {
   display: flex;
   align-items: center;
@@ -283,9 +300,43 @@
   font-size: 12px;
 }
 
-/* ---- Clickable variants (Live-Widget + Paper-Overlay) ---- */
+/* ---- Live Badge (im Paper-Modus dauerhaft sichtbar) ---- */
+.live-overlay {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #0A0A0A;
+  border: 1px solid rgba(255, 77, 77, 0.3);
+  border-radius: 10px;
+  padding: 6px 12px;
+  min-height: 52px;
+  box-sizing: border-box;
+}
+
+.live-overlay-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: #FF4D4D;
+  background: rgba(255, 77, 77, 0.14);
+  white-space: nowrap;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.live-overlay .bw-value {
+  font-size: 12px;
+}
+
+/* ---- Clickable variants ---- */
 .balance-widget.bw-clickable,
-.paper-overlay.bw-clickable {
+.paper-overlay.bw-clickable,
+.live-overlay.bw-clickable {
   cursor: pointer;
   transition: border-color 0.15s, background-color 0.15s, box-shadow 0.15s;
 }
@@ -301,13 +352,19 @@
   animation: none;
 }
 
+.live-overlay.bw-clickable:hover {
+  border-color: #FF6B6B;
+  background: rgba(255, 77, 77, 0.06);
+}
+
 .balance-widget.bw-clickable:focus-visible,
-.paper-overlay.bw-clickable:focus-visible {
+.paper-overlay.bw-clickable:focus-visible,
+.live-overlay.bw-clickable:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px rgba(0, 255, 102, 0.4);
 }
 
-@media (max-width: 1180px) {
+@media (max-width: 1380px) {
   .header {
     padding: 10px 16px;
     gap: 16px;
@@ -315,21 +372,30 @@
   .header-right {
     gap: 8px;
   }
+  .session-status {
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 1180px) {
+  .header {
+    flex-wrap: wrap;
+  }
+  .header-right {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    width: 100%;
+    row-gap: 8px;
+  }
+  .header-session {
+    align-items: flex-start;
+  }
 }
 
 @media (max-width: 968px) {
   .header {
-    grid-template-columns: 1fr auto;
-    height: auto;
     padding: 12px 16px;
   }
-
-  .header-center {
-    grid-column: 1 / -1;
-    order: 3;
-    margin-top: 8px;
-  }
-
   .balance-widget-wrapper {
     flex-wrap: wrap;
   }
