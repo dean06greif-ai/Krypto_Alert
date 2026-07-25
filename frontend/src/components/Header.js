@@ -34,13 +34,19 @@ const BalanceWidget = () => {
   const paperPnl = bal.paper_pnl ?? null;
   const paperPnlPos = (paperPnl || 0) >= 0;
 
-  const alloc = bal.allocation?.[isLive ? 'live' : 'paper'];
+  const liveAlloc = bal.allocation?.live;
+  const paperAlloc = bal.allocation?.paper;
+  const alloc = isLive ? liveAlloc : paperAlloc;
 
   // Hauptwidget öffnet immer mit dem aktuellen Modus als gesperrtem Scope.
   const openMainCapital = () => setCapitalScope(isLive ? 'live' : 'paper');
   const openPaperCapital = (e) => {
     e.stopPropagation();
     setCapitalScope('paper');
+  };
+  const openLiveCapital = (e) => {
+    e.stopPropagation();
+    setCapitalScope('live');
   };
 
   return (
@@ -61,13 +67,10 @@ const BalanceWidget = () => {
               <span className="bw-primary-value mono" data-testid="bw-total">
                 {bal.margin_balance != null ? Number(bal.margin_balance).toFixed(2) : (bal.bitunix_error ? 'API-Fehler' : '—')}
               </span>
-              {alloc?.allocated != null ? (
+              {alloc?.free != null ? (
                 <span className="bw-sub-line" data-testid="bw-alloc">
-                  <span className="bw-sub-label">Bot</span>
-                  <span className="mono">{Number(alloc.allocated).toFixed(2)}</span>
-                  <span className="bw-sub-sep">·</span>
                   <span className="bw-sub-label">frei</span>
-                  <span className="mono">{alloc.free != null ? Number(alloc.free).toFixed(2) : '—'}</span>
+                  <span className="mono">{Number(alloc.free).toFixed(2)}</span>
                 </span>
               ) : (
                 <span className="bw-sub-line" data-testid="bw-free">
@@ -86,20 +89,17 @@ const BalanceWidget = () => {
               {pnlPos ? <TrendUp size={13} weight="bold" /> : <TrendDown size={13} weight="bold" />}
               {pnl.toFixed(2)}
             </span>
-            {alloc?.allocated != null && (
+            {alloc?.free != null && (
               <span className="bw-sub-line" data-testid="bw-alloc">
-                <span className="bw-sub-label">Bot</span>
-                <span className="mono">{Number(alloc.allocated).toFixed(2)}</span>
-                <span className="bw-sub-sep">·</span>
                 <span className="bw-sub-label">frei</span>
-                <span className="mono">{alloc.free != null ? Number(alloc.free).toFixed(2) : '—'}</span>
+                <span className="mono">{Number(alloc.free).toFixed(2)}</span>
               </span>
             )}
           </div>
         )}
       </div>
 
-      {/* Paper Overlay - im Live-Modus immer sichtbar, klickbar für Paper-Kapital. */}
+      {/* Paper Badge - im Live-Modus sichtbar, klickbar für Paper-Kapital. */}
       {isLive && (
         <div className="paper-overlay bw-clickable" data-testid="paper-overlay"
           onClick={openPaperCapital}
@@ -110,14 +110,47 @@ const BalanceWidget = () => {
             <Wallet size={12} weight="fill" />
             PAPER
           </div>
-          <div className="paper-overlay-pnl">
-            {paperPnl != null && paperPnl !== 0 ? (
-              <span className={`bw-value mono ${paperPnlPos ? 'pos' : 'neg'}`}>
-                {paperPnlPos ? <TrendUp size={11} weight="bold" /> : <TrendDown size={11} weight="bold" />}
-                {(paperPnl || 0).toFixed(2)}
+          <div className="overlay-stack">
+            <div className="paper-overlay-pnl">
+              {paperPnl != null && paperPnl !== 0 ? (
+                <span className={`bw-value mono ${paperPnlPos ? 'pos' : 'neg'}`}>
+                  {paperPnlPos ? <TrendUp size={11} weight="bold" /> : <TrendDown size={11} weight="bold" />}
+                  {(paperPnl || 0).toFixed(2)}
+                </span>
+              ) : (
+                <span className="bw-value bw-value-muted mono">—</span>
+              )}
+            </div>
+            {paperAlloc?.free != null && (
+              <span className="bw-sub-line" data-testid="paper-overlay-free">
+                <span className="bw-sub-label">frei</span>
+                <span className="mono">{Number(paperAlloc.free).toFixed(2)}</span>
               </span>
-            ) : (
-              <span className="bw-value bw-value-muted mono">—</span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Live Badge - im Paper-Modus sichtbar, klickbar für Live-Kapital. */}
+      {!isLive && (
+        <div className="live-overlay bw-clickable" data-testid="live-overlay"
+          onClick={openLiveCapital}
+          title="Live-Kapital anpassen"
+          role="button" tabIndex={0}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openLiveCapital(e); }}>
+          <div className="live-overlay-mode">
+            <Wallet size={12} weight="fill" />
+            LIVE
+          </div>
+          <div className="overlay-stack">
+            <span className="bw-value mono" data-testid="live-overlay-balance">
+              {bal.margin_balance != null ? Number(bal.margin_balance).toFixed(2) : '—'}
+            </span>
+            {liveAlloc?.free != null && (
+              <span className="bw-sub-line" data-testid="live-overlay-free">
+                <span className="bw-sub-label">frei</span>
+                <span className="mono">{Number(liveAlloc.free).toFixed(2)}</span>
+              </span>
             )}
           </div>
         </div>
@@ -170,31 +203,33 @@ const Header = ({ sessionActive, onSettingsClick, currentSession, customSessions
         </div>
       </div>
 
-      <div className="header-center">
-        <div className="session-status">
-          <Clock size={20} weight="bold" />
-          <span className="mono">{formatTime(currentTime)}</span>
-          <span className={`badge ${sessionActive ? 'badge-active' : 'badge-inactive'}`} data-testid="session-status-badge">
-            {sessionActive
-              ? (currentSession ? `${currentSession.toUpperCase()} · ACTIVE` : 'TRADING ACTIVE')
-              : 'OUTSIDE SESSIONS'}
-          </span>
-        </div>
-        <div className="session-times">
-          {is24_7 ? null : enabledSessions.length === 0 ? (
-            <span className="text-muted">Keine aktiven Sessions</span>
-          ) : (
-            enabledSessions.map((s, i) => (
-              <span key={i} className="text-muted">
-                {i > 0 && <span style={{ margin: '0 4px' }}>|</span>}
-                {s.name}: {s.start}-{s.end}
-              </span>
-            ))
+      <div className="header-right">
+        {/* Uhrzeit + Session-Badge als eigener Block NEBEN den Labels (keine Überlagerung mehr) */}
+        <div className="header-session" data-testid="header-session">
+          <div className="session-status">
+            <Clock size={18} weight="bold" />
+            <span className="mono">{formatTime(currentTime)}</span>
+            <span className={`badge ${sessionActive ? 'badge-active' : 'badge-inactive'}`} data-testid="session-status-badge">
+              {sessionActive
+                ? (currentSession ? `${currentSession.toUpperCase()} · ACTIVE` : 'TRADING ACTIVE')
+                : 'OUTSIDE SESSIONS'}
+            </span>
+          </div>
+          {!is24_7 && (
+            <div className="session-times">
+              {enabledSessions.length === 0 ? (
+                <span className="text-muted">Keine aktiven Sessions</span>
+              ) : (
+                enabledSessions.map((s, i) => (
+                  <span key={i} className="text-muted">
+                    {i > 0 && <span style={{ margin: '0 4px' }}>|</span>}
+                    {s.name}: {s.start}-{s.end}
+                  </span>
+                ))
+              )}
+            </div>
           )}
         </div>
-      </div>
-
-      <div className="header-right">
         <BalanceWidget />
         <button className="btn" onClick={onCompareClick} title="Strategie-Vergleich" data-testid="compare-strategies-button">
           <Trophy size={20} weight="bold" />
