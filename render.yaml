@@ -23,8 +23,8 @@ services:
         sync: false
       - key: PYTHONUNBUFFERED
         value: "1"
-      - key: EMERGENT_LLM_KEY
-        sync: false           # Universal Key für den KI Trader (Profil -> Universal Key)
+      - key: GEMINI_API_KEY
+        sync: false           # Google AI Studio Key für den KI Trader – https://aistudio.google.com/apikey (kostenlos)
       # Numpy/OpenBLAS auf 1 Thread begrenzen (0.1 CPU -> mehrere Threads = teure Context-Switches)
       - key: OMP_NUM_THREADS
         value: "1"
