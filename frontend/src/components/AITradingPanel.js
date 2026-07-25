@@ -612,7 +612,15 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
 
         {/* Decision chips */}
         {Object.keys(decisions).length > 0 && (
-          <div className="ai-decisions-strip" data-testid="ai-decisions-strip">
+          <div
+            className="ai-decisions-strip"
+            data-testid="ai-decisions-strip"
+            ref={stripRef}
+            onMouseDown={onStripMouseDown}
+            onMouseMove={onStripMouseMove}
+            onMouseUp={endStripDrag}
+            onMouseLeave={endStripDrag}
+          >
             {Object.values(decisions).map(d => (
               <div key={d.symbol} className={`ai-chip ${actionClass(d.action)}`} title={d.reasoning}>
                 <span className="ai-chip-sym">{d.symbol.replace('USDT', '')}</span>

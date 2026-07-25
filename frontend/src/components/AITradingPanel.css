@@ -13,7 +13,8 @@
 .ai-panel {
   width: 720px;
   max-width: 96vw;
-  height: 84vh;
+  height: 92vh;
+  max-height: calc(100vh - 32px);
   background: #10131b;
   border: 1px solid #262b3d;
   border-radius: 14px;
@@ -121,8 +122,17 @@
 .ai-decisions-strip {
   display: flex; gap: 6px; overflow-x: auto;
   padding: 10px 18px; border-bottom: 1px solid #1d2233;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  touch-action: pan-x;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-overflow-scrolling: touch;
 }
+.ai-decisions-strip::-webkit-scrollbar { display: none; }
+.ai-decisions-strip.dragging { cursor: grabbing; scroll-behavior: auto; }
+.ai-decisions-strip.dragging .ai-chip { pointer-events: none; }
 .ai-chip {
   display: flex; align-items: center; gap: 6px; flex-shrink: 0;
   background: #161a27; border: 1px solid #262b3d; border-radius: 999px;
@@ -343,7 +353,7 @@
 }
 
 @media (max-width: 640px) {
-  .ai-panel { height: 92vh; }
+  .ai-panel { height: 95vh; }
   .ai-msg { max-width: 94%; }
   .ai-dec-reason { display: none; }
 }
