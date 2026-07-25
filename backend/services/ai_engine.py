@@ -1,15 +1,20 @@
 """
 AI Trading Engine ("KI Trader")
 - Periodically sends multi-timeframe market snapshots + crypto news + user chat
-  directives to Google Gemini (via the public `google-genai` SDK).
+  directives to a configurable LLM (Gemini, Groq, OpenRouter/Grok, Mistral).
 - The LLM returns structured trade decisions (LONG/SHORT/HOLD + confidence +
   SL/TP suggestions + reasoning). Actionable decisions are emitted as signals
   through the normal signal/auto-trade pipeline (strategy_id "ai_trader").
 - Provides a multi-turn chat so the user can give the AI instructions
   ("achte auf BTC-Support bei 60k") that flow into the next analysis.
 
-LLM: Google Gemini 2.5 (Pro als Default, automatischer Fallback auf Flash bei
-Rate-Limit / Quota). Kein internes Emergent-Package mehr -> deploybar auf Render.
+Provider (alle kostenlos in ihren Free-Tiers, deploybar auf Render):
+  - Google Gemini      -> GEMINI_API_KEY  (google-genai SDK)
+  - Groq (Llama, Qwen) -> GROQ_API_KEY    (OpenAI-kompatibel)
+  - OpenRouter (Grok, DeepSeek, Llama Free) -> OPENROUTER_API_KEY
+  - Mistral            -> MISTRAL_API_KEY (OpenAI-kompatibel)
+
+Der Fallback bei Rate-Limit bleibt innerhalb des ausgewählten Providers.
 """
 import os
 import json
@@ -40,20 +45,64 @@ DEFAULT_AI_CONFIG = {
     "cooldown_min": 45,
 }
 
-# Nur noch Gemini-Modelle. Pro = beste Qualität, Flash = automatischer Fallback
-# bei Rate-Limit / 429. Flash-Lite kann als extra günstige Option gewählt werden.
+# Erlaubte Modelle je Provider. Alle folgenden Provider bieten großzügige
+# kostenlose Free-Tiers, die für den KI-Trader ausreichen.
 ALLOWED_MODELS = {
     "gemini": [
         "gemini-3.1-pro-preview",
         "gemini-3.5-flash",
         "gemini-3.1-flash-lite",
     ],
+    "groq": [
+        # Groq Free Tier – extrem schnelle Inferenz
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "qwen/qwen3-32b",
+    ],
+    "openrouter": [
+        # OpenRouter Free Tier – hier lebt u.a. Grok kostenlos
+        "x-ai/grok-4-fast:free",
+        "deepseek/deepseek-r1:free",
+        "deepseek/deepseek-chat-v3.1:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+    ],
+    "mistral": [
+        # Mistral Free Tier (La Plateforme)
+        "mistral-small-latest",
+        "open-mistral-7b",
+    ],
 }
 
-# Reihenfolge der Fallbacks bei Rate-Limit/Quota. Sobald ein Modell 429 liefert,
-# wird das nächste probiert. Dadurch bleibt der KI Trader auch nach dem
-# Pro-Tageslimit lauffähig.
-FALLBACK_ORDER = ["gemini-3.1-pro-preview", "gemini-3.5-flash", "gemini-3.1-flash-lite"]
+# Provider-Metadaten für OpenAI-kompatible Backends (Groq, OpenRouter, Mistral).
+# base_url + Env-Variable, die den API-Key enthält.
+OPENAI_COMPAT_PROVIDERS = {
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "env_keys": ["GROQ_API_KEY"],
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "env_keys": ["OPENROUTER_API_KEY"],
+    },
+    "mistral": {
+        "base_url": "https://api.mistral.ai/v1",
+        "env_keys": ["MISTRAL_API_KEY"],
+    },
+}
+
+# Fallback-Reihenfolge je Provider (bei 429/Rate-Limit wird das nächste Modell
+# desselben Providers probiert).
+FALLBACK_ORDER = {
+    "gemini": ["gemini-3.1-pro-preview", "gemini-3.5-flash", "gemini-3.1-flash-lite"],
+    "groq": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"],
+    "openrouter": [
+        "x-ai/grok-4-fast:free",
+        "deepseek/deepseek-chat-v3.1:free",
+        "deepseek/deepseek-r1:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+    ],
+    "mistral": ["mistral-small-latest", "open-mistral-7b"],
+}
 
 ANALYSIS_SYSTEM = (
     "Du bist ein erfahrener Krypto-Daytrading-Analyst und triffst eigenständige "
@@ -109,19 +158,43 @@ class AIEngine:
         self._analyzing = False
         self._next_due = 0.0
         self._last_signal_ts: Dict[str, float] = {}
-        self._client = None  # lazy-initialisierter google-genai Client
+        # Gemini
+        self._client = None
         self._client_key: Optional[str] = None
-        # Modell, das aktuell benutzt wird (kann nach 429 vom Fallback überschrieben werden)
+        # OpenAI-kompatible Clients (Groq / OpenRouter / Mistral) – pro Provider gecached.
+        self._oai_clients: Dict[str, tuple] = {}  # provider -> (client, key)
+        # Modell, das aktuell benutzt wird (nach Fallback ggf. abweichend von cfg.model)
         self._effective_model: Optional[str] = None
 
     @property
     def key(self) -> Optional[str]:
-        # Primär GEMINI_API_KEY, GOOGLE_API_KEY als Alias (Google-SDK-Konvention).
-        return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        """API-Key des aktuell konfigurierten Providers."""
+        return self._provider_key(self.config.get("provider", "gemini"))
+
+    @staticmethod
+    def _provider_key(provider: str) -> Optional[str]:
+        if provider == "gemini":
+            # Primär GEMINI_API_KEY, GOOGLE_API_KEY als Alias (Google-SDK-Konvention).
+            return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        meta = OPENAI_COMPAT_PROVIDERS.get(provider)
+        if not meta:
+            return None
+        for env_name in meta["env_keys"]:
+            v = os.environ.get(env_name)
+            if v:
+                return v
+        return None
+
+    def _available_providers(self) -> Dict[str, bool]:
+        """True, wenn für den Provider ein API-Key gesetzt ist."""
+        out = {"gemini": bool(self._provider_key("gemini"))}
+        for p in OPENAI_COMPAT_PROVIDERS:
+            out[p] = bool(self._provider_key(p))
+        return out
 
     def _get_client(self):
         """Google-GenAI-Client cachen – bei Key-Wechsel neu bauen."""
-        key = self.key
+        key = self._provider_key("gemini")
         if not key:
             return None
         if self._client is None or self._client_key != key:
@@ -129,6 +202,29 @@ class AIEngine:
             self._client = genai.Client(api_key=key)
             self._client_key = key
         return self._client
+
+    def _get_openai_client(self, provider: str):
+        """AsyncOpenAI-Client für Groq/OpenRouter/Mistral cachen."""
+        meta = OPENAI_COMPAT_PROVIDERS.get(provider)
+        if not meta:
+            return None
+        key = self._provider_key(provider)
+        if not key:
+            return None
+        cached = self._oai_clients.get(provider)
+        if cached and cached[1] == key:
+            return cached[0]
+        from openai import AsyncOpenAI  # lokaler Import
+        default_headers = None
+        if provider == "openrouter":
+            # OpenRouter empfiehlt diese Headers zur besseren Ranking-Sichtbarkeit
+            default_headers = {
+                "HTTP-Referer": os.environ.get("OPENROUTER_REFERER", "https://krypto-alert.local"),
+                "X-Title": os.environ.get("OPENROUTER_TITLE", "Krypto Alert KI Trader"),
+            }
+        client = AsyncOpenAI(base_url=meta["base_url"], api_key=key, default_headers=default_headers)
+        self._oai_clients[provider] = (client, key)
+        return client
 
     def setup(self, db, scanner, signal_cb, toggle_check, symbols: List[str]):
         self.db = db
@@ -145,8 +241,10 @@ class AIEngine:
             for k in DEFAULT_AI_CONFIG:
                 if k in doc:
                     self.config[k] = doc[k]
-            # Migration von alten Providern (openai/anthropic) -> Gemini
-            if self.config.get("provider") != "gemini" or self.config.get("model") not in ALLOWED_MODELS["gemini"]:
+            # Migration: unbekannten Provider oder ungültiges Modell -> Default (Gemini Flash)
+            prov = self.config.get("provider")
+            mod = self.config.get("model")
+            if prov not in ALLOWED_MODELS or mod not in ALLOWED_MODELS.get(prov, []):
                 self.config["provider"] = "gemini"
                 self.config["model"] = "gemini-3.5-flash"
                 await self.db.settings.update_one(
@@ -187,10 +285,13 @@ class AIEngine:
                 self._effective_model = None
         elif "model" in updates:
             mod = updates["model"]
-            if mod in ALLOWED_MODELS["gemini"]:
-                self.config["model"] = mod
-                self.config["provider"] = "gemini"
-                self._effective_model = None
+            # Finde Provider automatisch anhand des Modells
+            for prov, models in ALLOWED_MODELS.items():
+                if mod in models:
+                    self.config["model"] = mod
+                    self.config["provider"] = prov
+                    self._effective_model = None
+                    break
         await self.db.settings.update_one({"_id": "ai_trader_config"},
                                           {"$set": dict(self.config)}, upsert=True)
         if self.config.get("enabled") and not was_enabled:
@@ -293,14 +394,17 @@ class AIEngine:
             return False
 
     def _fallback_chain(self) -> List[str]:
-        """Reihenfolge der Modelle: bevorzugtes Modell zuerst, dann Rest."""
-        preferred = self.config.get("model") or "gemini-3.5-flash"
-        chain = [preferred] + [m for m in FALLBACK_ORDER if m != preferred]
-        return chain
+        """Reihenfolge der Modelle innerhalb des aktuellen Providers: bevorzugtes
+        Modell zuerst, danach die restlichen des Providers."""
+        provider = self.config.get("provider", "gemini")
+        preferred = self.config.get("model") or (ALLOWED_MODELS.get(provider) or [""])[0]
+        order = FALLBACK_ORDER.get(provider, [preferred])
+        chain = [preferred] + [m for m in order if m != preferred]
+        # Nur Modelle behalten, die zu diesem Provider gehören
+        allowed = set(ALLOWED_MODELS.get(provider, []))
+        return [m for m in chain if m in allowed]
 
-    async def _generate_json(self, prompt: str, system: str) -> tuple[str, str]:
-        """Ruft Gemini mit JSON-Response auf. Bei 429 wird auf Flash / Flash-Lite
-        umgeschaltet. Gibt (raw_text, effektives_model) zurück."""
+    async def _gemini_generate_json(self, prompt: str, system: str) -> tuple[str, str]:
         from google.genai import types  # local import
         client = self._get_client()
         if client is None:
@@ -330,16 +434,68 @@ class AIEngine:
                 if _is_rate_limit_error(e):
                     logger.warning(f"Gemini {model} rate-limited, versuche nächstes Modell…")
                     continue
-                # Nicht-Rate-Limit -> nicht weiter probieren, hochreichen.
                 raise
-        # Alle Modelle rate-limited
         raise last_err or RuntimeError("Alle Gemini-Modelle rate-limited")
+
+    async def _openai_compat_generate_json(self, prompt: str, system: str) -> tuple[str, str]:
+        """Ruft Groq / OpenRouter / Mistral via OpenAI-kompatibler API auf.
+        JSON-Mode wird per response_format erzwungen (wo verfügbar)."""
+        provider = self.config.get("provider")
+        client = self._get_openai_client(provider)
+        if client is None:
+            raise RuntimeError(f"API-Key für Provider '{provider}' fehlt (Render EnvVars setzen)")
+
+        last_err: Optional[Exception] = None
+        for model in self._fallback_chain():
+            try:
+                kwargs = dict(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.4,
+                )
+                # JSON-Mode aktivieren (unterstützt von Groq, Mistral, OpenRouter für viele Modelle)
+                kwargs["response_format"] = {"type": "json_object"}
+                try:
+                    resp = await client.chat.completions.create(**kwargs)
+                except Exception as inner:
+                    # Manche Modelle akzeptieren response_format nicht -> ohne noch mal versuchen
+                    if "response_format" in str(inner).lower() or "json_object" in str(inner).lower():
+                        kwargs.pop("response_format", None)
+                        resp = await client.chat.completions.create(**kwargs)
+                    else:
+                        raise
+                text = (resp.choices[0].message.content or "").strip()
+                if not text:
+                    raise RuntimeError(f"Leere Antwort von {provider}/{model}")
+                self._effective_model = model
+                if model != self.config.get("model"):
+                    logger.warning(f"AI analysis: Fallback auf {model} (Pref war {self.config.get('model')})")
+                return text, model
+            except Exception as e:
+                last_err = e
+                if _is_rate_limit_error(e):
+                    logger.warning(f"{provider} {model} rate-limited, versuche nächstes Modell…")
+                    continue
+                raise
+        raise last_err or RuntimeError(f"Alle Modelle von {provider} rate-limited")
+
+    async def _generate_json(self, prompt: str, system: str) -> tuple[str, str]:
+        """Provider-Dispatcher für JSON-Analyse. Gibt (raw_text, effektives_model) zurück."""
+        provider = self.config.get("provider", "gemini")
+        if provider == "gemini":
+            return await self._gemini_generate_json(prompt, system)
+        if provider in OPENAI_COMPAT_PROVIDERS:
+            return await self._openai_compat_generate_json(prompt, system)
+        raise RuntimeError(f"Unbekannter Provider: {provider}")
 
     async def run_analysis(self, manual: bool = False) -> Dict:
         if self._analyzing:
             return {"status": "busy", "detail": "Analyse läuft bereits"}
         if not self.key:
-            self.last_error = "GEMINI_API_KEY fehlt (Render EnvVars setzen)"
+            self.last_error = f"API-Key für Provider '{self.config.get('provider')}' fehlt (Render EnvVars setzen)"
             return {"status": "error", "detail": self.last_error}
         self._analyzing = True
         try:
@@ -492,7 +648,7 @@ class AIEngine:
     # ---------------- background loop ----------------
     async def run_loop(self):
         self.running = True
-        logger.info("AI Trader engine loop started (Gemini)")
+        logger.info("AI Trader engine loop started (multi-provider: gemini/groq/openrouter/mistral)")
         while self.running:
             await asyncio.sleep(5)
             try:
@@ -518,13 +674,13 @@ class AIEngine:
         return rows
 
     async def chat_stream(self, text: str):
-        """SSE-Streaming der Gemini-Antwort. Wechselt bei 429 automatisch das Modell."""
+        """SSE-Streaming der KI-Antwort. Wechselt bei 429 automatisch das Modell
+        innerhalb desselben Providers. Unterstützt Gemini + OpenAI-kompatible
+        Provider (Groq, OpenRouter, Mistral)."""
+        provider = self.config.get("provider", "gemini")
         if not self.key:
-            yield "⚠️ GEMINI_API_KEY fehlt – bitte in Render EnvVars setzen."
+            yield f"⚠️ API-Key für Provider '{provider}' fehlt – bitte in Render EnvVars setzen."
             return
-
-        from google.genai import types  # local import
-        client = self._get_client()
 
         hist_rows = await self.db.ai_chat.find({"role": {"$in": ["user", "assistant"]}}) \
             .sort("ts", -1).limit(14).to_list(14)
@@ -542,40 +698,81 @@ class AIEngine:
         acc = ""
         last_err: Optional[Exception] = None
         streamed_any = False
-        for model in self._fallback_chain():
-            try:
-                stream = await client.aio.models.generate_content_stream(
-                    model=model,
-                    contents=text,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system,
+
+        if provider == "gemini":
+            from google.genai import types  # local import
+            client = self._get_client()
+            for model in self._fallback_chain():
+                try:
+                    stream = await client.aio.models.generate_content_stream(
+                        model=model,
+                        contents=text,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system,
+                            temperature=0.6,
+                        ),
+                    )
+                    async for chunk in stream:
+                        part = getattr(chunk, "text", None)
+                        if part:
+                            acc += part
+                            streamed_any = True
+                            yield part
+                    self._effective_model = model
+                    if model != self.config.get("model"):
+                        logger.warning(f"AI chat: Fallback auf {model}")
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    if _is_rate_limit_error(e) and not streamed_any:
+                        logger.warning(f"Gemini chat {model} rate-limited, versuche nächstes Modell…")
+                        continue
+                    err = f"\n⚠️ KI-Fehler: {str(e)[:200]}"
+                    acc += err
+                    yield err
+                    last_err = None
+                    break
+        else:
+            client = self._get_openai_client(provider)
+            for model in self._fallback_chain():
+                try:
+                    stream = await client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": text},
+                        ],
                         temperature=0.6,
-                    ),
-                )
-                async for chunk in stream:
-                    part = getattr(chunk, "text", None)
-                    if part:
-                        acc += part
-                        streamed_any = True
-                        yield part
-                self._effective_model = model
-                if model != self.config.get("model"):
-                    logger.warning(f"AI chat: Fallback auf {model}")
-                last_err = None
-                break
-            except Exception as e:
-                last_err = e
-                if _is_rate_limit_error(e) and not streamed_any:
-                    logger.warning(f"Gemini chat {model} rate-limited, versuche nächstes Modell…")
-                    continue
-                err = f"\n⚠️ KI-Fehler: {str(e)[:200]}"
-                acc += err
-                yield err
-                last_err = None
-                break
+                        stream=True,
+                    )
+                    async for chunk in stream:
+                        try:
+                            part = chunk.choices[0].delta.content
+                        except Exception:
+                            part = None
+                        if part:
+                            acc += part
+                            streamed_any = True
+                            yield part
+                    self._effective_model = model
+                    if model != self.config.get("model"):
+                        logger.warning(f"AI chat: Fallback auf {model}")
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    if _is_rate_limit_error(e) and not streamed_any:
+                        logger.warning(f"{provider} chat {model} rate-limited, versuche nächstes Modell…")
+                        continue
+                    err = f"\n⚠️ KI-Fehler: {str(e)[:200]}"
+                    acc += err
+                    yield err
+                    last_err = None
+                    break
 
         if last_err is not None:
-            err = f"\n⚠️ KI-Fehler: Alle Gemini-Modelle rate-limited. {str(last_err)[:150]}"
+            err = f"\n⚠️ KI-Fehler: Alle Modelle von {provider} rate-limited. {str(last_err)[:150]}"
             acc += err
             yield err
 
@@ -591,6 +788,7 @@ class AIEngine:
         return {
             "config": dict(self.config),
             "has_key": bool(self.key),
+            "provider_keys": self._available_providers(),
             "analyzing": self._analyzing,
             "last_run": self.last_run,
             "next_run": self.next_run,
