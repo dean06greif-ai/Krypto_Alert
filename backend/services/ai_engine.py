@@ -35,7 +35,7 @@ DEFAULT_AI_CONFIG = {
     "interval_min": 10,
     "min_confidence": 65,
     "provider": "gemini",
-    "model": "gemini-2.5-pro",
+    "model": "gemini-3.5-flash",
     "news_enabled": True,
     "cooldown_min": 45,
 }
@@ -44,16 +44,16 @@ DEFAULT_AI_CONFIG = {
 # bei Rate-Limit / 429. Flash-Lite kann als extra günstige Option gewählt werden.
 ALLOWED_MODELS = {
     "gemini": [
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
+        "gemini-3.1-pro-preview",
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite",
     ],
 }
 
 # Reihenfolge der Fallbacks bei Rate-Limit/Quota. Sobald ein Modell 429 liefert,
 # wird das nächste probiert. Dadurch bleibt der KI Trader auch nach dem
 # Pro-Tageslimit lauffähig.
-FALLBACK_ORDER = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+FALLBACK_ORDER = ["gemini-3.1-pro-preview", "gemini-3.5-flash", "gemini-3.1-flash-lite"]
 
 ANALYSIS_SYSTEM = (
     "Du bist ein erfahrener Krypto-Daytrading-Analyst und triffst eigenständige "
@@ -148,10 +148,10 @@ class AIEngine:
             # Migration von alten Providern (openai/anthropic) -> Gemini
             if self.config.get("provider") != "gemini" or self.config.get("model") not in ALLOWED_MODELS["gemini"]:
                 self.config["provider"] = "gemini"
-                self.config["model"] = "gemini-2.5-pro"
+                self.config["model"] = "gemini-3.5-flash"
                 await self.db.settings.update_one(
                     {"_id": "ai_trader_config"},
-                    {"$set": {"provider": "gemini", "model": "gemini-2.5-pro"}},
+                    {"$set": {"provider": "gemini", "model": "gemini-3.5-flash"}},
                     upsert=True,
                 )
         else:
@@ -294,7 +294,7 @@ class AIEngine:
 
     def _fallback_chain(self) -> List[str]:
         """Reihenfolge der Modelle: bevorzugtes Modell zuerst, dann Rest."""
-        preferred = self.config.get("model") or "gemini-2.5-pro"
+        preferred = self.config.get("model") or "gemini-3.5-flash"
         chain = [preferred] + [m for m in FALLBACK_ORDER if m != preferred]
         return chain
 
