@@ -99,6 +99,7 @@
   gap: 12px;
   min-width: 0;
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 /* ---- Balance Widget Wrapper (Live + Paper side by side) ---- */
@@ -296,8 +297,8 @@
   align-items: center;
 }
 
-.paper-overlay-pnl .bw-value {
-  font-size: 12px;
+.paper-overlay-pnl .bw-primary-value {
+  font-size: 14px;
 }
 
 /* ---- Live Badge (im Paper-Modus dauerhaft sichtbar) ---- */
@@ -329,8 +330,8 @@
   flex-shrink: 0;
 }
 
-.live-overlay .bw-value {
-  font-size: 12px;
+.live-overlay .bw-primary-value {
+  font-size: 14px;
 }
 
 /* ---- Clickable variants ---- */
