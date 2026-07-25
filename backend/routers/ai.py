@@ -40,9 +40,17 @@ async def ai_chat(body: Dict, _: bool = Depends(require_admin)):
     if not text:
         raise HTTPException(status_code=400, detail="Nachricht fehlt")
 
+    # Coin-Filter für den Chat-Kontext (Feature: Coin-Auswahl im KI-Chat).
+    # Erlaubt eine Liste von Symbolen; leer / "ALL" => alle Coins.
+    coins = body.get("coins")
+    if isinstance(coins, str):
+        coins = [coins]
+    elif not isinstance(coins, list):
+        coins = None
+
     async def gen():
         try:
-            async for token in ai_engine.chat_stream(text):
+            async for token in ai_engine.chat_stream(text, coins=coins):
                 yield f"data: {json.dumps({'t': token})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)[:200]})}\n\n"
