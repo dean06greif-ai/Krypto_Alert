@@ -46,6 +46,7 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
   const [showSetup, setShowSetup] = useState(false);
   // Coin-Auswahl für den Chat-Kontext (Feature: Coin-spezifischer KI-Chat)
   const [chatCoins, setChatCoins] = useState([selectedCoin]);
+  const [coinsOpen, setCoinsOpen] = useState(false);
   const chatEndRef = useRef(null);
   const streamingRef = useRef(false);
 
@@ -384,9 +385,17 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
         {/* Coin-Auswahl für den Chat-Kontext */}
         <div className="ai-coin-selector" data-testid="ai-coin-selector">
           <div className="ai-coin-selector-head">
-            <span className="ai-coin-selector-title">
-              KI-Chat Fokus{allSelected ? ' · alle Coins' : ` · ${chatCoins.map(coinLabel).join(', ')}`}
-            </span>
+            <button
+              className="ai-coin-selector-toggle"
+              onClick={() => setCoinsOpen(o => !o)}
+              data-testid="ai-coin-selector-toggle"
+              aria-expanded={coinsOpen}
+            >
+              {coinsOpen ? <CaretUp size={12} weight="bold" /> : <CaretDown size={12} weight="bold" />}
+              <span className="ai-coin-selector-title">
+                KI-Chat Fokus{allSelected ? ' · alle Coins' : ` · ${chatCoins.map(coinLabel).join(', ')}`}
+              </span>
+            </button>
             <button
               className={`ai-coin-all-toggle ${allSelected ? 'on' : ''}`}
               onClick={toggleAll}
@@ -395,23 +404,25 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
               {allSelected ? 'Nur aktueller Coin' : 'Alle Coins'}
             </button>
           </div>
-          <div className="ai-coin-chips">
-            {orderedCoins.map(coin => {
-              const active = allSelected || chatCoins.includes(coin);
-              const isCurrent = coin === selectedCoin;
-              return (
-                <button
-                  key={coin}
-                  className={`ai-coin-chip ${active ? 'active' : ''} ${isCurrent ? 'current' : ''}`}
-                  onClick={() => toggleCoin(coin)}
-                  title={isCurrent ? 'Aktuell geöffneter Coin' : ''}
-                  data-testid={`ai-coin-chip-${coin}`}
-                >
-                  {coinLabel(coin)}
-                </button>
-              );
-            })}
-          </div>
+          {coinsOpen && (
+            <div className="ai-coin-chips" data-testid="ai-coin-chips">
+              {orderedCoins.map(coin => {
+                const active = allSelected || chatCoins.includes(coin);
+                const isCurrent = coin === selectedCoin;
+                return (
+                  <button
+                    key={coin}
+                    className={`ai-coin-chip ${active ? 'active' : ''} ${isCurrent ? 'current' : ''}`}
+                    onClick={() => toggleCoin(coin)}
+                    title={isCurrent ? 'Aktuell geöffneter Coin' : ''}
+                    data-testid={`ai-coin-chip-${coin}`}
+                  >
+                    {coinLabel(coin)}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Input */}
