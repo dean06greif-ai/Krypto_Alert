@@ -342,6 +342,17 @@
   transition: border-color 0.15s, background-color 0.15s, box-shadow 0.15s;
 }
 
+/* ---- Skeleton (initialer Load) ---- */
+.bw-skeleton {
+  opacity: 0.55;
+  animation: bwSkeletonPulse 1.4s ease-in-out infinite;
+}
+
+@keyframes bwSkeletonPulse {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 0.75; }
+}
+
 .balance-widget.bw-clickable:hover {
   border-color: #00FF66;
   background: rgba(0, 255, 102, 0.05);
