@@ -7,10 +7,9 @@ import './AITradingPanel.css';
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
 const MODEL_OPTIONS = [
-  { provider: 'openai', model: 'gpt-5.4', label: 'GPT-5.4 (stark)' },
-  { provider: 'openai', model: 'gpt-5.4-mini', label: 'GPT-5.4 Mini (günstig)' },
-  { provider: 'anthropic', model: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-  { provider: 'gemini', model: 'gemini-3-flash-preview', label: 'Gemini 3 Flash' },
+  { provider: 'gemini', model: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (Standard, beste Qualität)' },
+  { provider: 'gemini', model: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (schnell, hoher Free-Tier)' },
+  { provider: 'gemini', model: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite (günstig)' },
 ];
 
 const actionClass = (a) => (a === 'LONG' ? 'ai-long' : a === 'SHORT' ? 'ai-short' : 'ai-hold');
@@ -211,7 +210,7 @@ const AITradingPanel = ({ onClose }) => {
 
         {!status?.has_key && (
           <div className="ai-warning" data-testid="ai-key-warning">
-            ⚠ EMERGENT_LLM_KEY fehlt in backend/.env – ohne Key kann die KI nicht arbeiten.
+            ⚠ GEMINI_API_KEY fehlt in den Render EnvVars – ohne Key kann die KI nicht arbeiten. Kostenlosen Key auf https://aistudio.google.com/apikey holen.
           </div>
         )}
         {status?.last_error && (
