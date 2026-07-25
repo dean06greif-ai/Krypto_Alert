@@ -341,8 +341,25 @@ class AIEngine:
             return "(keine)"
         return "\n".join(f"- [{r.get('ts', '')[:16]}] {r.get('text', '')}" for r in rows)
 
-    async def _open_trades_text(self) -> str:
+    def _resolve_coins(self, coins) -> List[str]:
+        """Normalisiert den Coin-Filter aus dem Chat.
+
+        Leer / None / enthält "ALL" => alle bekannten Symbole. Sonst nur die
+        angeforderten Symbole (Reihenfolge von self.symbols beibehalten,
+        unbekannte ignorieren)."""
+        if not coins:
+            return list(self.symbols)
+        wanted = {str(c).upper() for c in coins}
+        if "ALL" in wanted or "ALLE" in wanted:
+            return list(self.symbols)
+        filtered = [s for s in self.symbols if s.upper() in wanted]
+        return filtered or list(self.symbols)
+
+    async def _open_trades_text(self, allowed: Optional[List[str]] = None) -> str:
         rows = await self.db.auto_trades.find({"status": "open"}).to_list(50)
+        if allowed is not None:
+            allow = {s.upper() for s in allowed}
+            rows = [t for t in rows if str(t.get("symbol", "")).upper() in allow]
         if not rows:
             return "(keine offenen Positionen)"
         out = []
@@ -351,10 +368,22 @@ class AIEngine:
                        f"(SL {t.get('sl')}, TP1 {t.get('tp1')}, Modus {t.get('mode')})")
         return "\n".join(out)
 
-    async def _context_brief(self) -> str:
+    async def _context_brief(self, coins=None) -> str:
         parts = []
+        selected = self._resolve_coins(coins)
+        is_all = len(selected) == len(self.symbols)
+        allow = {s.upper() for s in selected}
+
+        focus = "ALLE COINS" if is_all else ", ".join(s.replace("USDT", "") for s in selected)
+        parts.append(
+            "FOKUS-COINS: " + focus + "\n"
+            "(Der Nutzer hat den Chat auf diese Coins eingegrenzt – beziehe dich "
+            "ausschließlich auf ihre Marktdaten, KI-Strategien, Signale und Trades. "
+            "Ignoriere alle anderen Assets, außer der Nutzer fragt ausdrücklich danach.)"
+        )
+
         snaps = []
-        for s in self.symbols:
+        for s in selected:
             snap = self._snapshot(s)
             if snap:
                 snaps.append(snap["text"])
@@ -365,9 +394,10 @@ class AIEngine:
                 parts.append("NEWS:\n" + "\n".join(f"- {n['title']} ({n['source']})" for n in news))
         if self.decisions:
             dec = [f"- {s}: {d.get('action')} ({d.get('confidence')}%) – {d.get('reasoning', '')[:120]}"
-                   for s, d in self.decisions.items()]
-            parts.append("LETZTE KI-ENTSCHEIDUNGEN:\n" + "\n".join(dec))
-        parts.append("OFFENE POSITIONEN:\n" + await self._open_trades_text())
+                   for s, d in self.decisions.items() if s.upper() in allow]
+            if dec:
+                parts.append("LETZTE KI-ENTSCHEIDUNGEN:\n" + "\n".join(dec))
+        parts.append("OFFENE POSITIONEN:\n" + await self._open_trades_text(selected))
         cfg = self.config
         parts.append(f"ENGINE: {'AKTIV' if cfg['enabled'] else 'AUS'} | Analyse alle {cfg['interval_min']} min | "
                      f"Min. Konfidenz {cfg['min_confidence']}% | Modell {cfg['provider']}/{cfg['model']} | "
@@ -673,10 +703,13 @@ class AIEngine:
             r.pop("_id", None)
         return rows
 
-    async def chat_stream(self, text: str):
+    async def chat_stream(self, text: str, coins=None):
         """SSE-Streaming der KI-Antwort. Wechselt bei 429 automatisch das Modell
         innerhalb desselben Providers. Unterstützt Gemini + OpenAI-kompatible
-        Provider (Groq, OpenRouter, Mistral)."""
+        Provider (Groq, OpenRouter, Mistral).
+
+        `coins`: optionale Liste der Symbole, auf die der Chat-Kontext
+        eingegrenzt wird (leer / None / "ALL" => alle Coins)."""
         provider = self.config.get("provider", "gemini")
         if not self.key:
             yield f"⚠️ API-Key für Provider '{provider}' fehlt – bitte in Render EnvVars setzen."
@@ -688,7 +721,7 @@ class AIEngine:
         history = "\n".join(
             f"{'Nutzer' if r['role'] == 'user' else 'KI'}: {r.get('text', '')}" for r in hist_rows
         ) or "(noch keine Nachrichten)"
-        context = await self._context_brief()
+        context = await self._context_brief(coins=coins)
         system = CHAT_SYSTEM_TEMPLATE.format(context=context, history=history)
 
         await self.db.ai_chat.insert_one({
