@@ -1,12 +1,15 @@
 """
 AI Trading Engine ("KI Trader")
 - Periodically sends multi-timeframe market snapshots + crypto news + user chat
-  directives to an external LLM (via Emergent Universal Key).
+  directives to Google Gemini (via the public `google-genai` SDK).
 - The LLM returns structured trade decisions (LONG/SHORT/HOLD + confidence +
   SL/TP suggestions + reasoning). Actionable decisions are emitted as signals
   through the normal signal/auto-trade pipeline (strategy_id "ai_trader").
 - Provides a multi-turn chat so the user can give the AI instructions
   ("achte auf BTC-Support bei 60k") that flow into the next analysis.
+
+LLM: Google Gemini 2.5 (Pro als Default, automatischer Fallback auf Flash bei
+Rate-Limit / Quota). Kein internes Emergent-Package mehr -> deploybar auf Render.
 """
 import os
 import json
@@ -31,17 +34,26 @@ DEFAULT_AI_CONFIG = {
     "enabled": False,
     "interval_min": 10,
     "min_confidence": 65,
-    "provider": "openai",
-    "model": "gpt-5.4",
+    "provider": "gemini",
+    "model": "gemini-2.5-pro",
     "news_enabled": True,
     "cooldown_min": 45,
 }
 
+# Nur noch Gemini-Modelle. Pro = beste Qualität, Flash = automatischer Fallback
+# bei Rate-Limit / 429. Flash-Lite kann als extra günstige Option gewählt werden.
 ALLOWED_MODELS = {
-    "openai": ["gpt-5.4", "gpt-5.4-mini", "gpt-4o"],
-    "anthropic": ["claude-sonnet-4-6"],
-    "gemini": ["gemini-3-flash-preview", "gemini-2.5-flash"],
+    "gemini": [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+    ],
 }
+
+# Reihenfolge der Fallbacks bei Rate-Limit/Quota. Sobald ein Modell 429 liefert,
+# wird das nächste probiert. Dadurch bleibt der KI Trader auch nach dem
+# Pro-Tageslimit lauffähig.
+FALLBACK_ORDER = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
 
 ANALYSIS_SYSTEM = (
     "Du bist ein erfahrener Krypto-Daytrading-Analyst und triffst eigenständige "
@@ -75,6 +87,12 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _is_rate_limit_error(err: Exception) -> bool:
+    """True wenn Gemini 429 / RESOURCE_EXHAUSTED / Quota-Fehler wirft."""
+    s = str(err).lower()
+    return any(k in s for k in ("429", "resource_exhausted", "quota", "rate limit", "ratelimit"))
+
+
 class AIEngine:
     def __init__(self):
         self.config = dict(DEFAULT_AI_CONFIG)
@@ -91,10 +109,26 @@ class AIEngine:
         self._analyzing = False
         self._next_due = 0.0
         self._last_signal_ts: Dict[str, float] = {}
+        self._client = None  # lazy-initialisierter google-genai Client
+        self._client_key: Optional[str] = None
+        # Modell, das aktuell benutzt wird (kann nach 429 vom Fallback überschrieben werden)
+        self._effective_model: Optional[str] = None
 
     @property
     def key(self) -> Optional[str]:
-        return os.environ.get("EMERGENT_LLM_KEY")
+        # Primär GEMINI_API_KEY, GOOGLE_API_KEY als Alias (Google-SDK-Konvention).
+        return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+    def _get_client(self):
+        """Google-GenAI-Client cachen – bei Key-Wechsel neu bauen."""
+        key = self.key
+        if not key:
+            return None
+        if self._client is None or self._client_key != key:
+            from google import genai  # lokaler Import -> Server startet auch ohne Key
+            self._client = genai.Client(api_key=key)
+            self._client_key = key
+        return self._client
 
     def setup(self, db, scanner, signal_cb, toggle_check, symbols: List[str]):
         self.db = db
@@ -111,6 +145,15 @@ class AIEngine:
             for k in DEFAULT_AI_CONFIG:
                 if k in doc:
                     self.config[k] = doc[k]
+            # Migration von alten Providern (openai/anthropic) -> Gemini
+            if self.config.get("provider") != "gemini" or self.config.get("model") not in ALLOWED_MODELS["gemini"]:
+                self.config["provider"] = "gemini"
+                self.config["model"] = "gemini-2.5-pro"
+                await self.db.settings.update_one(
+                    {"_id": "ai_trader_config"},
+                    {"$set": {"provider": "gemini", "model": "gemini-2.5-pro"}},
+                    upsert=True,
+                )
         else:
             await self.db.settings.insert_one({"_id": "ai_trader_config", **self.config})
         # load last decisions for continuity after restart
@@ -140,6 +183,14 @@ class AIEngine:
             prov, mod = updates["provider"], updates["model"]
             if prov in ALLOWED_MODELS and mod in ALLOWED_MODELS[prov]:
                 self.config["provider"], self.config["model"] = prov, mod
+                # Wechselt der Nutzer das Modell manuell, reset des Fallback-States.
+                self._effective_model = None
+        elif "model" in updates:
+            mod = updates["model"]
+            if mod in ALLOWED_MODELS["gemini"]:
+                self.config["model"] = mod
+                self.config["provider"] = "gemini"
+                self._effective_model = None
         await self.db.settings.update_one({"_id": "ai_trader_config"},
                                           {"$set": dict(self.config)}, upsert=True)
         if self.config.get("enabled") and not was_enabled:
@@ -241,15 +292,57 @@ class AIEngine:
         except Exception:
             return False
 
+    def _fallback_chain(self) -> List[str]:
+        """Reihenfolge der Modelle: bevorzugtes Modell zuerst, dann Rest."""
+        preferred = self.config.get("model") or "gemini-2.5-pro"
+        chain = [preferred] + [m for m in FALLBACK_ORDER if m != preferred]
+        return chain
+
+    async def _generate_json(self, prompt: str, system: str) -> tuple[str, str]:
+        """Ruft Gemini mit JSON-Response auf. Bei 429 wird auf Flash / Flash-Lite
+        umgeschaltet. Gibt (raw_text, effektives_model) zurück."""
+        from google.genai import types  # local import
+        client = self._get_client()
+        if client is None:
+            raise RuntimeError("GEMINI_API_KEY fehlt")
+
+        last_err: Optional[Exception] = None
+        for model in self._fallback_chain():
+            try:
+                resp = await client.aio.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        response_mime_type="application/json",
+                        temperature=0.4,
+                    ),
+                )
+                text = (resp.text or "").strip()
+                if not text:
+                    raise RuntimeError("Leere Antwort von Gemini")
+                self._effective_model = model
+                if model != self.config.get("model"):
+                    logger.warning(f"AI analysis: Fallback auf {model} (Pref war {self.config.get('model')})")
+                return text, model
+            except Exception as e:
+                last_err = e
+                if _is_rate_limit_error(e):
+                    logger.warning(f"Gemini {model} rate-limited, versuche nächstes Modell…")
+                    continue
+                # Nicht-Rate-Limit -> nicht weiter probieren, hochreichen.
+                raise
+        # Alle Modelle rate-limited
+        raise last_err or RuntimeError("Alle Gemini-Modelle rate-limited")
+
     async def run_analysis(self, manual: bool = False) -> Dict:
         if self._analyzing:
             return {"status": "busy", "detail": "Analyse läuft bereits"}
         if not self.key:
-            self.last_error = "EMERGENT_LLM_KEY fehlt in backend/.env"
+            self.last_error = "GEMINI_API_KEY fehlt (Render EnvVars setzen)"
             return {"status": "error", "detail": self.last_error}
         self._analyzing = True
         try:
-            from emergentintegrations.llm.chat import LlmChat, UserMessage
             symbols = [s for s in self.symbols
                        if (not self.toggle_check or self.toggle_check("ai_trader", s))
                        and len(self.scanner.candle_buffer.get(s, [])) >= 60]
@@ -277,13 +370,8 @@ class AIEngine:
                 f"Analysiere jedes Symbol ({', '.join(snaps.keys())}) und gib deine Entscheidungen als JSON zurück."
             )
 
-            chat = LlmChat(
-                api_key=self.key,
-                session_id=f"ai-analysis-{uuid.uuid4()}",
-                system_message=ANALYSIS_SYSTEM,
-            ).with_model(self.config["provider"], self.config["model"])
-            response = await chat.send_message(UserMessage(text=prompt))
-            data = self._parse_json(str(response))
+            raw, model_used = await self._generate_json(prompt, ANALYSIS_SYSTEM)
+            data = self._parse_json(raw)
 
             now = _now_iso()
             emitted = []
@@ -309,6 +397,7 @@ class AIEngine:
                     "rsi": snaps[sym]["rsi"],
                     "ts": now,
                     "signaled": False,
+                    "model": model_used,
                 }
                 self.decisions[sym] = dec
                 stored.append(dec)
@@ -331,14 +420,15 @@ class AIEngine:
                                "signaled": x["signaled"]} for x in stored],
                 "emitted": emitted,
                 "manual": manual,
+                "model": model_used,
                 "ts": now,
             }
             await self.db.ai_chat.insert_one(dict(feed_entry))
             self.last_run = now
             self.last_error = None
-            logger.info(f"AI analysis done: {len(stored)} decisions, {len(emitted)} signals ({emitted})")
+            logger.info(f"AI analysis done ({model_used}): {len(stored)} decisions, {len(emitted)} signals ({emitted})")
             return {"status": "ok", "decisions": len(stored), "signals": emitted,
-                    "overview": feed_entry["text"]}
+                    "overview": feed_entry["text"], "model": model_used}
         except Exception as e:
             self.last_error = str(e)[:300]
             logger.error(f"AI analysis failed: {e}")
@@ -402,7 +492,7 @@ class AIEngine:
     # ---------------- background loop ----------------
     async def run_loop(self):
         self.running = True
-        logger.info("AI Trader engine loop started")
+        logger.info("AI Trader engine loop started (Gemini)")
         while self.running:
             await asyncio.sleep(5)
             try:
@@ -428,10 +518,14 @@ class AIEngine:
         return rows
 
     async def chat_stream(self, text: str):
+        """SSE-Streaming der Gemini-Antwort. Wechselt bei 429 automatisch das Modell."""
         if not self.key:
-            yield "⚠️ EMERGENT_LLM_KEY fehlt in backend/.env – bitte Key eintragen."
+            yield "⚠️ GEMINI_API_KEY fehlt – bitte in Render EnvVars setzen."
             return
-        from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
+
+        from google.genai import types  # local import
+        client = self._get_client()
+
         hist_rows = await self.db.ai_chat.find({"role": {"$in": ["user", "assistant"]}}) \
             .sort("ts", -1).limit(14).to_list(14)
         hist_rows.reverse()
@@ -444,23 +538,47 @@ class AIEngine:
         await self.db.ai_chat.insert_one({
             "id": str(uuid.uuid4()), "role": "user", "text": text, "ts": _now_iso(),
         })
-        chat = LlmChat(
-            api_key=self.key,
-            session_id=f"ai-chat-{uuid.uuid4()}",
-            system_message=system,
-        ).with_model(self.config["provider"], self.config["model"])
+
         acc = ""
-        try:
-            async for ev in chat.stream_message(UserMessage(text=text)):
-                if isinstance(ev, TextDelta):
-                    acc += ev.content
-                    yield ev.content
-                elif isinstance(ev, StreamDone):
-                    break
-        except Exception as e:
-            err = f"\n⚠️ KI-Fehler: {str(e)[:200]}"
+        last_err: Optional[Exception] = None
+        streamed_any = False
+        for model in self._fallback_chain():
+            try:
+                stream = await client.aio.models.generate_content_stream(
+                    model=model,
+                    contents=text,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        temperature=0.6,
+                    ),
+                )
+                async for chunk in stream:
+                    part = getattr(chunk, "text", None)
+                    if part:
+                        acc += part
+                        streamed_any = True
+                        yield part
+                self._effective_model = model
+                if model != self.config.get("model"):
+                    logger.warning(f"AI chat: Fallback auf {model}")
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                if _is_rate_limit_error(e) and not streamed_any:
+                    logger.warning(f"Gemini chat {model} rate-limited, versuche nächstes Modell…")
+                    continue
+                err = f"\n⚠️ KI-Fehler: {str(e)[:200]}"
+                acc += err
+                yield err
+                last_err = None
+                break
+
+        if last_err is not None:
+            err = f"\n⚠️ KI-Fehler: Alle Gemini-Modelle rate-limited. {str(last_err)[:150]}"
             acc += err
             yield err
+
         if acc:
             await self.db.ai_chat.insert_one({
                 "id": str(uuid.uuid4()), "role": "assistant", "text": acc, "ts": _now_iso(),
@@ -479,6 +597,7 @@ class AIEngine:
             "last_error": self.last_error,
             "decisions": self.decisions,
             "allowed_models": ALLOWED_MODELS,
+            "effective_model": self._effective_model,
         }
 
 
