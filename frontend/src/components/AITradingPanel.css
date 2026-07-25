@@ -119,9 +119,14 @@
 .ai-setup-check input { accent-color: #00e5a0; width: 15px; height: 15px; }
 
 /* Decisions strip */
+.ai-decisions-wrap { border-bottom: 1px solid #1d2233; background: #0d1017; }
+.ai-decisions-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 10px 18px 0;
+}
 .ai-decisions-strip {
   display: flex; gap: 6px; overflow-x: auto;
-  padding: 10px 18px; border-bottom: 1px solid #1d2233;
+  padding: 8px 18px 10px;
   scrollbar-width: none;
   -ms-overflow-style: none;
   touch-action: pan-x;
@@ -136,8 +141,15 @@
 .ai-chip {
   display: flex; align-items: center; gap: 6px; flex-shrink: 0;
   background: #161a27; border: 1px solid #262b3d; border-radius: 999px;
-  padding: 4px 10px; font-size: 11px; cursor: default;
+  padding: 4px 10px; font-size: 11px; font-family: inherit;
+  cursor: pointer; opacity: 0.45;
+  transition: background-color 0.15s, border-color 0.15s, opacity 0.15s, transform 0.1s;
 }
+.ai-chip:hover { opacity: 0.85; }
+.ai-chip:active { transform: scale(0.96); }
+.ai-chip.selected { opacity: 1; background: rgba(0, 168, 255, 0.1); }
+.ai-chip.current { box-shadow: 0 0 0 1px rgba(0, 229, 160, 0.45) inset; }
+.ai-chip.current.selected { background: rgba(0, 229, 160, 0.1); }
 .ai-chip-sym { color: #c8cde0; font-weight: 700; }
 .ai-chip-action { font-weight: 700; }
 .ai-chip-conf { color: #7c839c; }
@@ -274,23 +286,7 @@
 }
 .ai-summary-config b { color: #c8cde0; font-weight: 700; }
 
-/* Coin-Selector für den Chat-Kontext */
-.ai-coin-selector {
-  padding: 10px 18px 12px;
-  border-top: 1px solid #1d2233;
-  background: #0b0e15;
-}
-.ai-coin-selector-head {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 10px;
-}
-.ai-coin-selector-toggle {
-  display: flex; align-items: center; gap: 6px;
-  background: transparent; border: none; padding: 0; cursor: pointer;
-  color: #7c839c; min-width: 0; flex: 1; text-align: left;
-  transition: color 0.15s;
-}
-.ai-coin-selector-toggle:hover { color: #c8cde0; }
+/* Coin-Selector für den Chat-Kontext (Titel/All-Toggle werden im Decisions-Strip oben genutzt) */
 .ai-coin-selector-title {
   font-size: 10.5px; letter-spacing: 0.6px; color: inherit;
   text-transform: uppercase; font-weight: 700;
@@ -306,24 +302,6 @@
 .ai-coin-all-toggle:hover { background: rgba(0, 168, 255, 0.18); }
 .ai-coin-all-toggle.on {
   background: rgba(0, 229, 160, 0.12); border-color: rgba(0, 229, 160, 0.5); color: #00e5a0;
-}
-.ai-coin-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.ai-coin-chip {
-  background: #161a27; border: 1px solid #262b3d; border-radius: 999px;
-  color: #7c839c; padding: 4px 11px; font-size: 11px; font-weight: 700;
-  letter-spacing: 0.3px; cursor: pointer;
-  transition: background-color 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
-}
-.ai-coin-chip:hover { border-color: #3a415e; color: #c8cde0; }
-.ai-coin-chip:active { transform: scale(0.95); }
-.ai-coin-chip.active {
-  background: rgba(0, 168, 255, 0.14); border-color: rgba(0, 168, 255, 0.5); color: #4dc3ff;
-}
-.ai-coin-chip.current {
-  box-shadow: 0 0 0 1px rgba(0, 229, 160, 0.45) inset;
-}
-.ai-coin-chip.current.active {
-  background: rgba(0, 229, 160, 0.16); border-color: rgba(0, 229, 160, 0.6); color: #00e5a0;
 }
 
 
