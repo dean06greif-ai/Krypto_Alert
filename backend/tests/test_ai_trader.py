@@ -74,7 +74,7 @@ class TestAIStatus:
         cfg = d.get("config", {})
         for k in ("enabled", "interval_min", "min_confidence", "provider", "model", "news_enabled", "cooldown_min"):
             assert k in cfg, f"config missing {k}"
-        assert d.get("has_key") is True, "EMERGENT_LLM_KEY not detected"
+        assert d.get("has_key") is True, "GEMINI_API_KEY not detected"
         assert "decisions" in d and isinstance(d["decisions"], dict)
 
 
