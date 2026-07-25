@@ -46,7 +46,10 @@ const ALL_COINS = [
   'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'POLUSDT',
   'GOLD', 'SILVER', 'OIL',
 ];
-const coinLabel = (s) => (['GOLD', 'SILVER', 'OIL'].includes(s) ? s : s.replace('USDT', ''));
+const coinLabel = (s) => {
+  const t = typeof s === 'string' ? s : String(s ?? '?');
+  return ['GOLD', 'SILVER', 'OIL'].includes(t) ? t : t.replace('USDT', '');
+};
 const COIN_STORE_KEY = (coin) => `krypto_ai_chat_coins::${coin || 'BTCUSDT'}`;
 
 const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
@@ -66,6 +69,20 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
   const [learning, setLearning] = useState(false);
   const chatEndRef = useRef(null);
   const streamingRef = useRef(false);
+  const stripRef = useRef(null);
+  const stripDrag = useRef({ active: false, startX: 0, scrollLeft: 0 });
+
+  const onStripMouseDown = (e) => {
+    const el = stripRef.current;
+    if (!el) return;
+    stripDrag.current = { active: true, startX: e.pageX, scrollLeft: el.scrollLeft };
+  };
+  const onStripMouseMove = (e) => {
+    const el = stripRef.current;
+    if (!el || !stripDrag.current.active) return;
+    el.scrollLeft = stripDrag.current.scrollLeft - (e.pageX - stripDrag.current.startX);
+  };
+  const endStripDrag = () => { stripDrag.current.active = false; };
 
   // Chip-Reihenfolge: aktueller Coin immer vorne, danach der Rest.
   const orderedCoins = React.useMemo(
@@ -110,7 +127,7 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
   const loadStatus = useCallback(async () => {
     try {
       const data = await fetch(`${API_URL}/api/ai/status`).then(r => r.json());
-      setStatus(data);
+      setStatus(data && typeof data === 'object' ? data : null);
     } catch (e) { /* silent */ }
   }, []);
 
@@ -132,7 +149,7 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
   const loadInsights = useCallback(async () => {
     try {
       const data = await fetch(`${API_URL}/api/ai/insights`).then(r => r.json());
-      setInsights(data);
+      setInsights(data && typeof data === 'object' ? data : null);
     } catch (e) { /* silent */ }
   }, []);
 
@@ -368,13 +385,13 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
           {m.text && <div className="ai-analysis-overview">{m.text}</div>}
           {(m.decisions || []).length > 0 && (
             <div className="ai-analysis-decisions">
-              {m.decisions.map((d, i) => (
-                <div key={i} className={`ai-decision-row ${actionClass(d.action)}`}>
-                  <span className="ai-dec-sym">{d.symbol.replace('USDT', '')}</span>
-                  <span className={`ai-dec-action ${actionClass(d.action)}`}>{d.action}</span>
-                  <span className="ai-dec-conf">{d.confidence}%</span>
-                  {d.signaled && <span className="ai-dec-signaled" title="Signal ausgelöst"><Lightning size={11} weight="fill" /></span>}
-                  <span className="ai-dec-reason">{d.reasoning}</span>
+              {(m.decisions || []).map((d, i) => (
+                <div key={i} className={`ai-decision-row ${actionClass(d?.action)}`}>
+                  <span className="ai-dec-sym">{coinLabel(d?.symbol)}</span>
+                  <span className={`ai-dec-action ${actionClass(d?.action)}`}>{d?.action || '–'}</span>
+                  <span className="ai-dec-conf">{d?.confidence ?? 0}%</span>
+                  {d?.signaled && <span className="ai-dec-signaled" title="Signal ausgelöst"><Lightning size={11} weight="fill" /></span>}
+                  <span className="ai-dec-reason">{d?.reasoning || ''}</span>
                 </div>
               ))}
             </div>
@@ -392,7 +409,9 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
     );
   };
 
-  const modelValue = `${cfg.provider}|${cfg.model}`;
+  const modelValue = (cfg.provider && cfg.model)
+    ? `${cfg.provider}|${cfg.model}`
+    : `${MODEL_OPTIONS[0].provider}|${MODEL_OPTIONS[0].model}`;
 
   return (
     <div className="ai-panel-overlay" onClick={onClose} data-testid="ai-trading-panel">
@@ -621,11 +640,11 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
             onMouseUp={endStripDrag}
             onMouseLeave={endStripDrag}
           >
-            {Object.values(decisions).map(d => (
-              <div key={d.symbol} className={`ai-chip ${actionClass(d.action)}`} title={d.reasoning}>
-                <span className="ai-chip-sym">{d.symbol.replace('USDT', '')}</span>
-                <span className="ai-chip-action">{d.action}</span>
-                <span className="ai-chip-conf">{d.confidence}%</span>
+            {Object.values(decisions).map((d, i) => (
+              <div key={d?.symbol || i} className={`ai-chip ${actionClass(d?.action)}`} title={d?.reasoning || ''}>
+                <span className="ai-chip-sym">{coinLabel(d?.symbol)}</span>
+                <span className="ai-chip-action">{d?.action || '–'}</span>
+                <span className="ai-chip-conf">{d?.confidence ?? 0}%</span>
               </div>
             ))}
           </div>
