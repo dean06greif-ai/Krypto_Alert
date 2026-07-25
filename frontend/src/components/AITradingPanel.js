@@ -7,9 +7,22 @@ import './AITradingPanel.css';
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
 const MODEL_OPTIONS = [
+  // Google Gemini (GEMINI_API_KEY)
   { provider: 'gemini', model: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (Standard, schnell & aktuell)' },
   { provider: 'gemini', model: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro (beste Qualität)' },
   { provider: 'gemini', model: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite (günstig)' },
+  // Groq (GROQ_API_KEY) – extrem schnelle Inferenz, großzügiger Free-Tier
+  { provider: 'groq', model: 'llama-3.3-70b-versatile', label: 'Groq · Llama 3.3 70B (kostenlos, sehr stark)' },
+  { provider: 'groq', model: 'llama-3.1-8b-instant', label: 'Groq · Llama 3.1 8B Instant (kostenlos, blitzschnell)' },
+  { provider: 'groq', model: 'qwen/qwen3-32b', label: 'Groq · Qwen3 32B (kostenlos)' },
+  // OpenRouter (OPENROUTER_API_KEY) – Zugriff auf Grok, DeepSeek u.a. Free-Modelle
+  { provider: 'openrouter', model: 'x-ai/grok-4-fast:free', label: 'OpenRouter · Grok 4 Fast (kostenlos, xAI)' },
+  { provider: 'openrouter', model: 'deepseek/deepseek-chat-v3.1:free', label: 'OpenRouter · DeepSeek V3.1 (kostenlos)' },
+  { provider: 'openrouter', model: 'deepseek/deepseek-r1:free', label: 'OpenRouter · DeepSeek R1 (kostenlos, Reasoning)' },
+  { provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct:free', label: 'OpenRouter · Llama 3.3 70B (kostenlos)' },
+  // Mistral (MISTRAL_API_KEY)
+  { provider: 'mistral', model: 'mistral-small-latest', label: 'Mistral Small (kostenloses Free-Tier)' },
+  { provider: 'mistral', model: 'open-mistral-7b', label: 'Mistral Open 7B (kostenlos)' },
 ];
 
 const actionClass = (a) => (a === 'LONG' ? 'ai-long' : a === 'SHORT' ? 'ai-short' : 'ai-hold');
