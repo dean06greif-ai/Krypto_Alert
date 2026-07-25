@@ -193,6 +193,77 @@
 .ai-dec-signaled { color: #ffd60a; display: flex; }
 .ai-dec-reason { color: #7c839c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Tages-Zusammenfassung – markiert & oben angepinnt */
+.ai-summary-pin-wrap {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin: -16px -18px 4px;
+  padding: 12px 18px 4px;
+  background: linear-gradient(180deg, #10131b 78%, rgba(16, 19, 27, 0) 100%);
+}
+.ai-msg-summary {
+  align-self: stretch;
+  max-width: 100%;
+  background: linear-gradient(140deg, rgba(255, 214, 10, 0.10) 0%, rgba(0, 168, 255, 0.08) 100%);
+  border: 1.5px solid rgba(255, 214, 10, 0.55);
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 0 0 1px rgba(255, 214, 10, 0.12) inset, 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+.ai-msg-summary-pinned {
+  box-shadow: 0 0 0 1px rgba(255, 214, 10, 0.2) inset, 0 8px 30px rgba(0, 0, 0, 0.45);
+}
+.ai-summary-head {
+  display: flex; align-items: center; gap: 8px;
+  color: #ffd60a; font-size: 10.5px; font-weight: 700; letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.ai-summary-badge {
+  background: rgba(255, 214, 10, 0.18);
+  border: 1px solid rgba(255, 214, 10, 0.55);
+  color: #ffd60a; padding: 2px 8px; border-radius: 999px;
+  font-size: 10.5px; letter-spacing: 0.6px;
+}
+.ai-summary-fallback {
+  background: rgba(124, 131, 156, 0.18);
+  border: 1px solid rgba(124, 131, 156, 0.5);
+  color: #b0b6cc; padding: 1px 7px; border-radius: 999px;
+  font-size: 9.5px; letter-spacing: 0.4px; text-transform: none; font-weight: 600;
+}
+.ai-summary-head .ai-msg-time { margin-left: auto; margin-top: 0; color: #b0b6cc; }
+.ai-summary-text {
+  margin-top: 8px; color: #eef1fa; font-size: 12.6px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word;
+}
+.ai-summary-metrics {
+  margin-top: 9px;
+  display: flex; flex-wrap: wrap; gap: 6px 10px;
+  font-size: 11px; color: #b0b6cc;
+}
+.ai-summary-metrics span {
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid #262b3d;
+  border-radius: 6px; padding: 3px 8px;
+}
+.ai-summary-metrics b { color: #ffd60a; font-weight: 700; margin-right: 3px; }
+.ai-summary-directives { margin-top: 9px; font-size: 11.5px; color: #d5d9e8; }
+.ai-summary-sub {
+  font-size: 10.5px; color: #9aa1ba; letter-spacing: 0.5px;
+  text-transform: uppercase; font-weight: 700; margin-bottom: 3px;
+}
+.ai-summary-directives ul {
+  margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px;
+}
+.ai-summary-directives li { line-height: 1.45; }
+.ai-summary-config {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px dashed #2a3049;
+  font-size: 11px; color: #9aa1ba;
+}
+.ai-summary-config b { color: #c8cde0; font-weight: 700; }
+
 /* Coin-Selector für den Chat-Kontext */
 .ai-coin-selector {
   padding: 10px 18px 12px;

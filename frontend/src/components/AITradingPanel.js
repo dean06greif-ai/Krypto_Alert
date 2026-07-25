@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Robot, PaperPlaneRight, X, Trash, ArrowsClockwise, Lightning, CaretDown, CaretUp, Newspaper } from '@phosphor-icons/react';
+import { Robot, PaperPlaneRight, X, Trash, ArrowsClockwise, Lightning, CaretDown, CaretUp, Newspaper, PushPin } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import { authHeaders } from '../auth';
 import './AITradingPanel.css';
@@ -207,6 +207,54 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
   };
 
   const renderMessage = (m) => {
+    if (m.role === 'summary') {
+      const cfg = m.active_config || {};
+      const counts = m.counts || {};
+      const directives = Array.isArray(m.directives) ? m.directives : [];
+      return (
+        <div
+          key={m.id}
+          className={`ai-msg ai-msg-summary${m.pinned ? ' ai-msg-summary-pinned' : ''}`}
+          data-testid="ai-summary-message"
+        >
+          <div className="ai-summary-head">
+            <PushPin size={13} weight="fill" />
+            <span className="ai-summary-badge" data-testid="ai-summary-badge">
+              Tages-Zusammenfassung{m.day ? ` · ${m.day}` : ''}
+            </span>
+            {m.fallback && (
+              <span className="ai-summary-fallback" title="LLM war nicht erreichbar – rein statistische Zusammenfassung">
+                statistisch
+              </span>
+            )}
+            <span className="ai-msg-time">{fmtTime(m.ts)}</span>
+          </div>
+          {m.text && <div className="ai-summary-text">{m.text}</div>}
+          {(counts && Object.keys(counts).length > 0) && (
+            <div className="ai-summary-metrics" data-testid="ai-summary-metrics">
+              <span><b>{counts.analyses ?? 0}</b> Analysen</span>
+              <span><b>{counts.signals ?? 0}</b> Signale</span>
+              <span><b>{counts.long ?? 0}</b> LONG</span>
+              <span><b>{counts.short ?? 0}</b> SHORT</span>
+              <span><b>{counts.hold ?? 0}</b> HOLD</span>
+            </div>
+          )}
+          {directives.length > 0 && (
+            <div className="ai-summary-directives">
+              <div className="ai-summary-sub">Deine Trader-Direktiven (aktuell aktiv):</div>
+              <ul>
+                {directives.slice(-6).map((d, i) => (<li key={i}>{d}</li>))}
+              </ul>
+            </div>
+          )}
+          {(cfg.provider || cfg.model) && (
+            <div className="ai-summary-config" title="Aktive Konfiguration wonach die KI gerade tradet">
+              KI tradet nach: <b>{cfg.provider}/{cfg.model}</b> · Intervall <b>{cfg.interval_min} min</b> · Min. Konfidenz <b>{cfg.min_confidence}%</b> · Cooldown <b>{cfg.cooldown_min} min</b> · News <b>{cfg.news_enabled ? 'an' : 'aus'}</b>
+            </div>
+          )}
+        </div>
+      );
+    }
     if (m.role === 'analysis') {
       return (
         <div key={m.id} className="ai-msg ai-msg-analysis" data-testid="ai-analysis-message">
@@ -365,15 +413,32 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
 
         {/* Chat */}
         <div className="ai-chat-area" data-testid="ai-chat-area">
-          {messages.length === 0 && !streaming && (
-            <div className="ai-chat-empty">
-              <Robot size={36} weight="light" />
-              <p>Sag der KI, worauf sie achten soll – z.B.<br />
-                <em>„Achte auf den BTC-Support bei 60k"</em> oder <em>„Sei heute defensiv, nur Longs".</em><br />
-                Jede Nachricht fließt in die nächste Analyse ein.</p>
-            </div>
-          )}
-          {messages.map(renderMessage)}
+          {(() => {
+            // Neueste angepinnte Summary ganz oben anzeigen, aus dem Haupt-Stream entfernen.
+            const pinnedSummary = [...messages]
+              .filter(m => m.role === 'summary' && m.pinned)
+              .sort((a, b) => new Date(b.ts) - new Date(a.ts))[0];
+            const pinnedId = pinnedSummary?.id;
+            const streamMessages = pinnedId ? messages.filter(m => m.id !== pinnedId) : messages;
+            return (
+              <>
+                {pinnedSummary && (
+                  <div className="ai-summary-pin-wrap" data-testid="ai-summary-pinned">
+                    {renderMessage(pinnedSummary)}
+                  </div>
+                )}
+                {streamMessages.length === 0 && !streaming && !pinnedSummary && (
+                  <div className="ai-chat-empty">
+                    <Robot size={36} weight="light" />
+                    <p>Sag der KI, worauf sie achten soll – z.B.<br />
+                      <em>„Achte auf den BTC-Support bei 60k"</em> oder <em>„Sei heute defensiv, nur Longs".</em><br />
+                      Jede Nachricht fließt in die nächste Analyse ein.</p>
+                  </div>
+                )}
+                {streamMessages.map(renderMessage)}
+              </>
+            );
+          })()}
           {streaming && (
             <div className="ai-msg ai-msg-assistant">
               <div className="ai-msg-bubble">{streamText || <span className="ai-typing">KI denkt nach…</span>}</div>
