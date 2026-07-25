@@ -388,7 +388,7 @@ function App() {
         />
       )}
       {showAIPanel && (
-        <AITradingPanel onClose={() => setShowAIPanel(false)} />
+        <AITradingPanel selectedCoin={selectedCoin} onClose={() => setShowAIPanel(false)} />
       )}
       {showBuilder && (
         <StrategyBuilder
