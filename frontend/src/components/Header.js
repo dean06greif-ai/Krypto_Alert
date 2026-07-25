@@ -111,14 +111,15 @@ const BalanceWidget = () => {
             PAPER
           </div>
           <div className="overlay-stack">
+            <span className="bw-usdt-label">PnL</span>
             <div className="paper-overlay-pnl">
               {paperPnl != null && paperPnl !== 0 ? (
-                <span className={`bw-value mono ${paperPnlPos ? 'pos' : 'neg'}`}>
-                  {paperPnlPos ? <TrendUp size={11} weight="bold" /> : <TrendDown size={11} weight="bold" />}
+                <span className={`bw-primary-value mono ${paperPnlPos ? 'pos' : 'neg'}`}>
+                  {paperPnlPos ? <TrendUp size={13} weight="bold" /> : <TrendDown size={13} weight="bold" />}
                   {(paperPnl || 0).toFixed(2)}
                 </span>
               ) : (
-                <span className="bw-value bw-value-muted mono">—</span>
+                <span className="bw-primary-value bw-value-muted mono">—</span>
               )}
             </div>
             {paperAlloc?.free != null && (
@@ -143,7 +144,8 @@ const BalanceWidget = () => {
             LIVE
           </div>
           <div className="overlay-stack">
-            <span className="bw-value mono" data-testid="live-overlay-balance">
+            <span className="bw-usdt-label">USDT</span>
+            <span className="bw-primary-value mono" data-testid="live-overlay-balance">
               {bal.margin_balance != null ? Number(bal.margin_balance).toFixed(2) : '—'}
             </span>
             {liveAlloc?.free != null && (
