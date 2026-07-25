@@ -214,7 +214,17 @@ const AITradingPanel = ({ onClose }) => {
           </div>
         )}
         {status?.last_error && (
-          <div className="ai-warning" data-testid="ai-error-banner">⚠ {status.last_error}</div>
+          <div className="ai-warning" data-testid="ai-error-banner">
+            ⚠ {status.last_error}
+            {/FAILED_PRECONDITION|User location is not supported|location is not supported/i.test(status.last_error) && (
+              <div style={{ marginTop: 6, fontSize: 12, opacity: 0.85 }}>
+                Google blockiert deinen Server-Standort für den Gemini Free-Tier. Lösungen:
+                <br />• Billing in <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">AI Studio</a> aktivieren (Free-Tier-Preise bleiben) – hebt Regional-Sperre auf
+                <br />• Render-Region auf US-West/Oregon umstellen
+                <br />• Vertex AI (EU-Endpoint) statt AI Studio verwenden
+              </div>
+            )}
+          </div>
         )}
 
         {/* Status row */}
