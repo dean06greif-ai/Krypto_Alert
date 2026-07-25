@@ -67,6 +67,14 @@ async def ai_chat_clear(_: bool = Depends(require_admin)):
     return {"status": "success"}
 
 
+@router.post("/api/ai/summary")
+async def ai_summary_now(_: bool = Depends(require_admin)):
+    """Erzwingt manuell einen Tages-Reset inkl. Archivierung und generiert eine
+    neue markierte Tages-Zusammenfassung (role='summary', pinned)."""
+    result = await ai_engine.force_daily_summary()
+    return {"status": "success", **result}
+
+
 @router.get("/api/ai/news")
 async def ai_news(limit: int = 20):
     return {"headlines": await news_feed.get_headlines(limit)}
