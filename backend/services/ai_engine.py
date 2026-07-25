@@ -25,6 +25,10 @@ import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Callable
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # Python <3.9 fallback (nicht relevant für Render, aber safe)
+    from backports.zoneinfo import ZoneInfo  # type: ignore
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -34,6 +38,19 @@ from services.technical_indicators import TechnicalIndicators
 from services.news_feed import news_feed
 
 logger = logging.getLogger(__name__)
+
+BERLIN_TZ = ZoneInfo("Europe/Berlin")
+
+SUMMARY_SYSTEM = (
+    "Du bist der 'KI Trader'. Fasse den abgelaufenen Trading-Tag prägnant auf Deutsch zusammen. "
+    "Antworte AUSSCHLIESSLICH mit reinem Text (kein JSON, kein Markdown-Codeblock). "
+    "Struktur (kompakt, max. 12 Zeilen):\n"
+    "• Tages-Marktüberblick (2-3 Sätze)\n"
+    "• Wichtigste Eckdaten: Anzahl Analysen, ausgelöste Signale, Trade-Entscheidungen (LONG/SHORT/HOLD)\n"
+    "• Trader-Direktiven (die vom Nutzer selbst definierten Anweisungen, die die Handelsentscheidungen aktuell steuern)\n"
+    "• Aktive Konfiguration (Provider/Modell, Intervall, Min. Konfidenz, Cooldown)\n"
+    "Sei nüchtern und ohne Floskeln. Nutze ausschließlich die übergebenen Fakten."
+)
 
 DEFAULT_AI_CONFIG = {
     "enabled": False,
@@ -165,6 +182,11 @@ class AIEngine:
         self._oai_clients: Dict[str, tuple] = {}  # provider -> (client, key)
         # Modell, das aktuell benutzt wird (nach Fallback ggf. abweichend von cfg.model)
         self._effective_model: Optional[str] = None
+        # Housekeeping-State (Europe/Berlin) – wird in settings/ai_trader_housekeeping persistiert.
+        # Hour-Key im Format "YYYYMMDDHH", Date-Key "YYYY-MM-DD".
+        self._last_cleanup_hour: Optional[str] = None
+        self._last_reset_date: Optional[str] = None
+        self._housekeeping_lock = asyncio.Lock()
 
     @property
     def key(self) -> Optional[str]:
@@ -264,6 +286,30 @@ class AIEngine:
                     self.decisions[sym] = r
         except Exception:
             pass
+        # Housekeeping-Marker laden. Beim allerersten Start werden sie mit dem
+        # aktuellen Berlin-Zeitstempel initialisiert, damit weder Cleanup noch
+        # Reset direkt nach dem Boot feuern (sondern erst zur nächsten vollen
+        # Stunde bzw. zum nächsten 00:00 Uhr Berlin).
+        try:
+            hk = await self.db.settings.find_one({"_id": "ai_trader_housekeeping"})
+            now_berlin = datetime.now(BERLIN_TZ)
+            if hk:
+                self._last_cleanup_hour = hk.get("last_cleanup_hour")
+                self._last_reset_date = hk.get("last_reset_date")
+            if not self._last_cleanup_hour:
+                self._last_cleanup_hour = now_berlin.strftime("%Y%m%d%H")
+            if not self._last_reset_date:
+                self._last_reset_date = now_berlin.strftime("%Y-%m-%d")
+            await self.db.settings.update_one(
+                {"_id": "ai_trader_housekeeping"},
+                {"$set": {
+                    "last_cleanup_hour": self._last_cleanup_hour,
+                    "last_reset_date": self._last_reset_date,
+                }},
+                upsert=True,
+            )
+        except Exception as e:
+            logger.warning(f"AI housekeeping init failed: {e}")
 
     async def update_config(self, updates: Dict) -> Dict:
         was_enabled = self.config.get("enabled")
@@ -370,6 +416,18 @@ class AIEngine:
 
     async def _context_brief(self, coins=None) -> str:
         parts = []
+        # Letzte Tages-Zusammenfassung als KI-Gedächtnis ganz oben einfügen.
+        try:
+            last_sum = await self.db.ai_chat.find_one(
+                {"role": "summary"}, sort=[("ts", -1)],
+            )
+            if last_sum and last_sum.get("text"):
+                parts.append(
+                    f"TAGES-ZUSAMMENFASSUNG ({last_sum.get('day', '')}) – merken & berücksichtigen:\n"
+                    + str(last_sum["text"])[:1500]
+                )
+        except Exception:
+            pass
         selected = self._resolve_coins(coins)
         is_all = len(selected) == len(self.symbols)
         allow = {s.upper() for s in selected}
@@ -675,6 +733,337 @@ class AIEngine:
             logger.error(f"AI signal emit failed for {sym}: {e}")
             return False
 
+    # ---------------- housekeeping (hourly cleanup + daily reset + summary) ----------------
+    async def _persist_housekeeping(self):
+        try:
+            await self.db.settings.update_one(
+                {"_id": "ai_trader_housekeeping"},
+                {"$set": {
+                    "last_cleanup_hour": self._last_cleanup_hour,
+                    "last_reset_date": self._last_reset_date,
+                }},
+                upsert=True,
+            )
+        except Exception as e:
+            logger.warning(f"AI housekeeping persist failed: {e}")
+
+    async def _cleanup_old_analyses(self) -> int:
+        """Löscht alle Nachrichten mit role='analysis' bis auf die neueste.
+        User-, Assistant- und Summary-Nachrichten bleiben unangetastet."""
+        try:
+            latest = await self.db.ai_chat.find_one(
+                {"role": "analysis"}, sort=[("ts", -1)],
+            )
+            if not latest:
+                return 0
+            query = {"role": "analysis"}
+            if latest.get("id"):
+                query["id"] = {"$ne": latest["id"]}
+            else:
+                query["_id"] = {"$ne": latest["_id"]}
+            result = await self.db.ai_chat.delete_many(query)
+            return result.deleted_count or 0
+        except Exception as e:
+            logger.error(f"AI hourly cleanup failed: {e}")
+            return 0
+
+    async def _collect_daily_facts(self, day_iso: str) -> Dict:
+        """Sammelt die Fakten des abgelaufenen Tages aus ai_chat (vor dem Löschen)
+        + ai_decisions. `day_iso` = YYYY-MM-DD (Berlin) des Tages, der zusammengefasst wird."""
+        # Alles was aktuell im Chat liegt = Tages-Nachrichten (Hourly-Cleanup hat alte
+        # analysis-Einträge bereits weg-geräumt, außerdem darf hier eine ältere Summary
+        # liegen – die kommt in den Archivierungs-Snapshot).
+        chat_docs = await self.db.ai_chat.find().sort("ts", 1).to_list(length=None)
+
+        # ai_decisions: filtere nach Berlin-Datum. ts ist ISO in UTC.
+        all_dec = await self.db.ai_decisions.find({"ts": {"$exists": True}}).sort("ts", 1).to_list(length=None)
+        day_dec = []
+        for d in all_dec:
+            try:
+                dt = datetime.fromisoformat(str(d.get("ts", "")).replace("Z", "+00:00"))
+                if dt.astimezone(BERLIN_TZ).strftime("%Y-%m-%d") == day_iso:
+                    day_dec.append(d)
+            except Exception:
+                continue
+
+        analyses = [c for c in chat_docs if c.get("role") == "analysis"]
+        directives = [c for c in chat_docs if c.get("role") == "user"]
+        assistants = [c for c in chat_docs if c.get("role") == "assistant"]
+        summaries_prev = [c for c in chat_docs if c.get("role") == "summary"]
+
+        signals = [d for d in day_dec if d.get("signaled")]
+        actions = {"LONG": 0, "SHORT": 0, "HOLD": 0}
+        for d in day_dec:
+            a = str(d.get("action", "HOLD")).upper()
+            if a in actions:
+                actions[a] += 1
+
+        overviews = [str(a.get("text") or "").strip() for a in analyses if a.get("text")]
+
+        return {
+            "day": day_iso,
+            "chat_docs": chat_docs,
+            "day_decisions": day_dec,
+            "counts": {
+                "analyses": len(analyses),
+                "decisions": len(day_dec),
+                "signals": len(signals),
+                "long": actions["LONG"],
+                "short": actions["SHORT"],
+                "hold": actions["HOLD"],
+                "directives": len(directives),
+                "assistant_msgs": len(assistants),
+                "prev_summaries": len(summaries_prev),
+            },
+            "signals": [f"{s.get('symbol')} {s.get('action')} ({s.get('confidence')}%)" for s in signals],
+            "directives": [str(d.get("text") or "").strip() for d in directives if d.get("text")],
+            "overviews": overviews,
+        }
+
+    def _statistical_summary(self, facts: Dict) -> str:
+        """Fallback-Zusammenfassung, wenn die LLM nicht erreichbar ist."""
+        c = facts["counts"]
+        cfg = self.config
+        parts = [
+            f"Tages-Zusammenfassung ({facts['day']}) – statistischer Fallback (LLM nicht erreichbar).",
+            f"• Analysen: {c['analyses']} · Entscheidungen: {c['decisions']} "
+            f"(LONG {c['long']} / SHORT {c['short']} / HOLD {c['hold']}) · "
+            f"Ausgelöste Signale: {c['signals']}",
+        ]
+        if facts["signals"]:
+            parts.append("• Signale: " + ", ".join(facts["signals"][:12]))
+        if facts["overviews"]:
+            latest_ov = facts["overviews"][-1][:220]
+            parts.append(f"• Letzter Marktüberblick: {latest_ov}")
+        if facts["directives"]:
+            dirs = " | ".join(d[:120] for d in facts["directives"][-6:])
+            parts.append(f"• Trader-Direktiven (aktuell aktiv): {dirs}")
+        else:
+            parts.append("• Trader-Direktiven: (keine vom Nutzer im Chat gesetzt)")
+        parts.append(
+            f"• Aktive Konfiguration: Provider {cfg.get('provider')} / Modell {cfg.get('model')} · "
+            f"Intervall {cfg.get('interval_min')} min · Min. Konfidenz {cfg.get('min_confidence')}% · "
+            f"Cooldown {cfg.get('cooldown_min')} min · News {'an' if cfg.get('news_enabled') else 'aus'}"
+        )
+        return "\n".join(parts)
+
+    async def _llm_daily_summary(self, facts: Dict) -> Optional[str]:
+        """Generiert die Zusammenfassung via aktivem LLM-Provider. Gibt None bei Fehler."""
+        if not self.key:
+            return None
+        cfg = self.config
+        c = facts["counts"]
+        directives_block = "\n".join(f"- {d}" for d in facts["directives"][-15:]) or "(keine)"
+        signals_block = "\n".join(f"- {s}" for s in facts["signals"][:20]) or "(keine)"
+        overviews_block = "\n".join(f"- {o[:220]}" for o in facts["overviews"][-6:]) or "(keine)"
+        prompt = (
+            f"Zusammenfassung für Tag: {facts['day']} (Europe/Berlin)\n\n"
+            f"KENNZAHLEN:\n"
+            f"- Analysen: {c['analyses']}\n"
+            f"- Entscheidungen: {c['decisions']} (LONG {c['long']} / SHORT {c['short']} / HOLD {c['hold']})\n"
+            f"- Ausgelöste Signale: {c['signals']}\n\n"
+            f"SIGNALE:\n{signals_block}\n\n"
+            f"MARKTÜBERBLICKE (chronologisch, ältester zuerst):\n{overviews_block}\n\n"
+            f"TRADER-DIREKTIVEN (vom Nutzer im Chat gesetzt, definieren wonach gerade getradet wird):\n{directives_block}\n\n"
+            f"AKTIVE KONFIGURATION:\n"
+            f"- Provider/Modell: {cfg.get('provider')} / {cfg.get('model')}\n"
+            f"- Analyse-Intervall: {cfg.get('interval_min')} min\n"
+            f"- Min. Konfidenz: {cfg.get('min_confidence')}%\n"
+            f"- Trade-Cooldown: {cfg.get('cooldown_min')} min\n"
+            f"- News-Feed: {'an' if cfg.get('news_enabled') else 'aus'}\n\n"
+            f"Erstelle nun die kompakte deutsche Tages-Zusammenfassung wie im System-Prompt beschrieben."
+        )
+        provider = cfg.get("provider", "gemini")
+        try:
+            if provider == "gemini":
+                from google.genai import types
+                client = self._get_client()
+                if client is None:
+                    return None
+                last_err: Optional[Exception] = None
+                for model in self._fallback_chain():
+                    try:
+                        resp = await client.aio.models.generate_content(
+                            model=model,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                system_instruction=SUMMARY_SYSTEM,
+                                temperature=0.4,
+                            ),
+                        )
+                        text = (resp.text or "").strip()
+                        if text:
+                            return text
+                    except Exception as e:
+                        last_err = e
+                        if _is_rate_limit_error(e):
+                            continue
+                        logger.warning(f"Daily summary LLM error ({model}): {e}")
+                        break
+                if last_err:
+                    logger.warning(f"Daily summary Gemini failed: {last_err}")
+                return None
+            if provider in OPENAI_COMPAT_PROVIDERS:
+                client = self._get_openai_client(provider)
+                if client is None:
+                    return None
+                last_err = None
+                for model in self._fallback_chain():
+                    try:
+                        resp = await client.chat.completions.create(
+                            model=model,
+                            messages=[
+                                {"role": "system", "content": SUMMARY_SYSTEM},
+                                {"role": "user", "content": prompt},
+                            ],
+                            temperature=0.4,
+                        )
+                        text = (resp.choices[0].message.content or "").strip()
+                        if text:
+                            return text
+                    except Exception as e:
+                        last_err = e
+                        if _is_rate_limit_error(e):
+                            continue
+                        logger.warning(f"Daily summary LLM error ({provider}/{model}): {e}")
+                        break
+                if last_err:
+                    logger.warning(f"Daily summary {provider} failed: {last_err}")
+                return None
+        except Exception as e:
+            logger.error(f"Daily summary generation crashed: {e}")
+            return None
+        return None
+
+    async def _daily_reset(self, prev_day_iso: str) -> Dict:
+        """Archiviert Tages-Chat + Entscheidungen, leert ai_chat, generiert eine
+        markierte Tages-Zusammenfassung und pinnt sie oben im Chat."""
+        facts = await self._collect_daily_facts(prev_day_iso)
+
+        # 1) Archivieren – KI vergisst nichts.
+        archive_batch = str(uuid.uuid4())
+        archive_ts = _now_iso()
+        try:
+            if facts["chat_docs"]:
+                docs = []
+                for c in facts["chat_docs"]:
+                    d = dict(c)
+                    d.pop("_id", None)
+                    d["archive_batch"] = archive_batch
+                    d["archive_day"] = prev_day_iso
+                    d["archived_at"] = archive_ts
+                    d["source"] = "ai_chat"
+                    docs.append(d)
+                await self.db.ai_chat_archive.insert_many(docs)
+            if facts["day_decisions"]:
+                docs = []
+                for c in facts["day_decisions"]:
+                    d = dict(c)
+                    d.pop("_id", None)
+                    d["archive_batch"] = archive_batch
+                    d["archive_day"] = prev_day_iso
+                    d["archived_at"] = archive_ts
+                    d["source"] = "ai_decisions"
+                    docs.append(d)
+                await self.db.ai_chat_archive.insert_many(docs)
+        except Exception as e:
+            logger.error(f"AI daily archive failed: {e}")
+
+        # 2) ai_chat leeren.
+        try:
+            await self.db.ai_chat.delete_many({})
+        except Exception as e:
+            logger.error(f"AI daily chat clear failed: {e}")
+
+        # 3) Zusammenfassung generieren (LLM + Fallback).
+        text = await self._llm_daily_summary(facts)
+        used_fallback = False
+        if not text:
+            text = self._statistical_summary(facts)
+            used_fallback = True
+
+        cfg = self.config
+        summary_doc = {
+            "id": str(uuid.uuid4()),
+            "role": "summary",
+            "pinned": True,
+            "text": text,
+            "day": prev_day_iso,
+            "counts": facts["counts"],
+            "directives": facts["directives"][-15:],
+            "active_config": {
+                "provider": cfg.get("provider"),
+                "model": cfg.get("model"),
+                "interval_min": cfg.get("interval_min"),
+                "min_confidence": cfg.get("min_confidence"),
+                "cooldown_min": cfg.get("cooldown_min"),
+                "news_enabled": cfg.get("news_enabled"),
+            },
+            "fallback": used_fallback,
+            "archive_batch": archive_batch,
+            "ts": _now_iso(),
+        }
+        try:
+            await self.db.ai_chat.insert_one(dict(summary_doc))
+        except Exception as e:
+            logger.error(f"AI daily summary insert failed: {e}")
+
+        logger.info(
+            f"AI daily reset done for {prev_day_iso}: archived {len(facts['chat_docs'])} chat + "
+            f"{len(facts['day_decisions'])} decisions, summary via {'FALLBACK' if used_fallback else 'LLM'}"
+        )
+        return {
+            "day": prev_day_iso,
+            "archived_chat": len(facts["chat_docs"]),
+            "archived_decisions": len(facts["day_decisions"]),
+            "fallback": used_fallback,
+            "summary_id": summary_doc["id"],
+        }
+
+    async def _run_housekeeping(self):
+        """Wird vom run_loop jede Iteration angetriggert. Führt bei Bedarf
+        (1) stündliches Analyse-Cleanup und (2) 00:00-Berlin Tages-Reset aus."""
+        async with self._housekeeping_lock:
+            now_berlin = datetime.now(BERLIN_TZ)
+            hour_key = now_berlin.strftime("%Y%m%d%H")
+            date_key = now_berlin.strftime("%Y-%m-%d")
+
+            # (A) Tages-Reset zuerst: neuer Kalendertag Berlin?
+            if self._last_reset_date and date_key != self._last_reset_date:
+                prev_day = self._last_reset_date
+                try:
+                    await self._daily_reset(prev_day)
+                except Exception as e:
+                    logger.error(f"Daily reset error: {e}")
+                self._last_reset_date = date_key
+                # Nach Reset ist auch die aktuelle Stunde als 'gecleant' zu markieren
+                # (der Chat ist ohnehin leer bis auf die Summary).
+                self._last_cleanup_hour = hour_key
+                await self._persist_housekeeping()
+                return
+
+            # (B) Stündliches Cleanup – exakt zur vollen Stunde einmal pro Stunde.
+            if self._last_cleanup_hour and hour_key != self._last_cleanup_hour:
+                try:
+                    removed = await self._cleanup_old_analyses()
+                    if removed:
+                        logger.info(f"AI hourly cleanup: {removed} alte Analyse-Nachricht(en) entfernt.")
+                except Exception as e:
+                    logger.error(f"Hourly cleanup error: {e}")
+                self._last_cleanup_hour = hour_key
+                await self._persist_housekeeping()
+
+    async def force_daily_summary(self) -> Dict:
+        """Manueller Trigger (Endpoint): erzwingt Reset + Summary für den 'aktuellen
+        Berlin-Tag' (bzw. dem Marker `_last_reset_date`)."""
+        prev_day = self._last_reset_date or datetime.now(BERLIN_TZ).strftime("%Y-%m-%d")
+        result = await self._daily_reset(prev_day)
+        # Reset-Marker aktualisieren auf heute, damit der reguläre Loop nicht doppelt feuert.
+        self._last_reset_date = datetime.now(BERLIN_TZ).strftime("%Y-%m-%d")
+        self._last_cleanup_hour = datetime.now(BERLIN_TZ).strftime("%Y%m%d%H")
+        await self._persist_housekeeping()
+        return result
+
     # ---------------- background loop ----------------
     async def run_loop(self):
         self.running = True
@@ -682,6 +1071,13 @@ class AIEngine:
         while self.running:
             await asyncio.sleep(5)
             try:
+                # Housekeeping läuft IMMER (auch wenn Engine aus ist / kein Key), damit
+                # stündliches Analyse-Cleanup und der 00:00-Berlin-Reset zuverlässig feuern.
+                try:
+                    await self._run_housekeeping()
+                except Exception as hk_err:
+                    logger.error(f"AI housekeeping loop error: {hk_err}")
+
                 if not self.config.get("enabled") or not self.key:
                     self.next_run = None
                     continue
@@ -715,11 +1111,18 @@ class AIEngine:
             yield f"⚠️ API-Key für Provider '{provider}' fehlt – bitte in Render EnvVars setzen."
             return
 
-        hist_rows = await self.db.ai_chat.find({"role": {"$in": ["user", "assistant"]}}) \
+        hist_rows = await self.db.ai_chat.find({"role": {"$in": ["user", "assistant", "summary"]}}) \
             .sort("ts", -1).limit(14).to_list(14)
         hist_rows.reverse()
+        def _role_label(r):
+            role = r.get("role")
+            if role == "user":
+                return "Nutzer"
+            if role == "summary":
+                return f"KI-Tageszusammenfassung ({r.get('day', '')})"
+            return "KI"
         history = "\n".join(
-            f"{'Nutzer' if r['role'] == 'user' else 'KI'}: {r.get('text', '')}" for r in hist_rows
+            f"{_role_label(r)}: {r.get('text', '')}" for r in hist_rows
         ) or "(noch keine Nachrichten)"
         context = await self._context_brief(coins=coins)
         system = CHAT_SYSTEM_TEMPLATE.format(context=context, history=history)
