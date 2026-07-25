@@ -27,7 +27,16 @@ const MODEL_OPTIONS = [
 
 const actionClass = (a) => (a === 'LONG' ? 'ai-long' : a === 'SHORT' ? 'ai-short' : 'ai-hold');
 
-const AITradingPanel = ({ onClose }) => {
+// Alle handelbaren Assets (deckungsgleich mit backend core/config.py ALL_SYMBOLS)
+const ALL_COINS = [
+  'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
+  'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'POLUSDT',
+  'GOLD', 'SILVER', 'OIL',
+];
+const coinLabel = (s) => (['GOLD', 'SILVER', 'OIL'].includes(s) ? s : s.replace('USDT', ''));
+const COIN_STORE_KEY = (coin) => `krypto_ai_chat_coins::${coin || 'BTCUSDT'}`;
+
+const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
   const [status, setStatus] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
@@ -35,8 +44,50 @@ const AITradingPanel = ({ onClose }) => {
   const [streamText, setStreamText] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
+  // Coin-Auswahl für den Chat-Kontext (Feature: Coin-spezifischer KI-Chat)
+  const [chatCoins, setChatCoins] = useState([selectedCoin]);
   const chatEndRef = useRef(null);
   const streamingRef = useRef(false);
+
+  // Chip-Reihenfolge: aktueller Coin immer vorne, danach der Rest.
+  const orderedCoins = React.useMemo(
+    () => [selectedCoin, ...ALL_COINS.filter(c => c !== selectedCoin)],
+    [selectedCoin],
+  );
+  const allSelected = chatCoins.length >= ALL_COINS.length;
+
+  // Beim Öffnen / Coin-Wechsel: gespeicherte Auswahl je Coin-Ansicht laden,
+  // sonst standardmäßig nur den aktuell geöffneten Coin vorwählen.
+  useEffect(() => {
+    let next = [selectedCoin];
+    try {
+      const raw = localStorage.getItem(COIN_STORE_KEY(selectedCoin));
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length) {
+          next = parsed.filter(c => ALL_COINS.includes(c));
+          if (!next.length) next = [selectedCoin];
+        }
+      }
+    } catch (e) { /* ignore */ }
+    setChatCoins(next);
+  }, [selectedCoin]);
+
+  const persistCoins = (coins) => {
+    setChatCoins(coins);
+    try { localStorage.setItem(COIN_STORE_KEY(selectedCoin), JSON.stringify(coins)); } catch (e) { /* ignore */ }
+  };
+
+  const toggleCoin = (coin) => {
+    const has = chatCoins.includes(coin);
+    let next = has ? chatCoins.filter(c => c !== coin) : [...chatCoins, coin];
+    if (!next.length) next = [selectedCoin]; // mind. ein Coin bleibt aktiv
+    persistCoins(next);
+  };
+
+  const toggleAll = () => {
+    persistCoins(allSelected ? [selectedCoin] : [...ALL_COINS]);
+  };
 
   const loadStatus = useCallback(async () => {
     try {
@@ -114,7 +165,7 @@ const AITradingPanel = ({ onClose }) => {
       const res = await fetch(`${API_URL}/api/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, coins: allSelected ? ['ALL'] : chatCoins }),
       });
       if (!res.ok) {
         toast.error(res.status === 401 ? 'Admin-Login erforderlich' : 'Chat-Fehler');
@@ -328,6 +379,39 @@ const AITradingPanel = ({ onClose }) => {
             </div>
           )}
           <div ref={chatEndRef} />
+        </div>
+
+        {/* Coin-Auswahl für den Chat-Kontext */}
+        <div className="ai-coin-selector" data-testid="ai-coin-selector">
+          <div className="ai-coin-selector-head">
+            <span className="ai-coin-selector-title">
+              KI-Chat Fokus{allSelected ? ' · alle Coins' : ` · ${chatCoins.map(coinLabel).join(', ')}`}
+            </span>
+            <button
+              className={`ai-coin-all-toggle ${allSelected ? 'on' : ''}`}
+              onClick={toggleAll}
+              data-testid="ai-coin-select-all"
+            >
+              {allSelected ? 'Nur aktueller Coin' : 'Alle Coins'}
+            </button>
+          </div>
+          <div className="ai-coin-chips">
+            {orderedCoins.map(coin => {
+              const active = allSelected || chatCoins.includes(coin);
+              const isCurrent = coin === selectedCoin;
+              return (
+                <button
+                  key={coin}
+                  className={`ai-coin-chip ${active ? 'active' : ''} ${isCurrent ? 'current' : ''}`}
+                  onClick={() => toggleCoin(coin)}
+                  title={isCurrent ? 'Aktuell geöffneter Coin' : ''}
+                  data-testid={`ai-coin-chip-${coin}`}
+                >
+                  {coinLabel(coin)}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* Input */}
