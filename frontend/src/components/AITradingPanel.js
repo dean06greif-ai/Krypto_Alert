@@ -7,9 +7,9 @@ import './AITradingPanel.css';
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
 const MODEL_OPTIONS = [
-  { provider: 'gemini', model: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (Standard, beste Qualität)' },
-  { provider: 'gemini', model: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (schnell, hoher Free-Tier)' },
-  { provider: 'gemini', model: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite (günstig)' },
+  { provider: 'gemini', model: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (Standard, schnell & aktuell)' },
+  { provider: 'gemini', model: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro (beste Qualität)' },
+  { provider: 'gemini', model: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite (günstig)' },
 ];
 
 const actionClass = (a) => (a === 'LONG' ? 'ai-long' : a === 'SHORT' ? 'ai-short' : 'ai-hold');
