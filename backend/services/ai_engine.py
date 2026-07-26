@@ -36,6 +36,7 @@ load_dotenv()
 from services.timeframes import aggregate_candles
 from services.technical_indicators import TechnicalIndicators
 from services.news_feed import news_feed
+from services import macro_context
 from services.ai_knowledge import PLATFORM_KNOWLEDGE, tunable_spec_text, validate_changes
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,11 @@ DEFAULT_AI_CONFIG = {
     "provider": "gemini",
     "model": "gemini-3.5-flash",
     "news_enabled": True,
+    # Externer Makro-Kontext (Key-Levels, Funding/OI, Makro-Kalender, DXY/Yield,
+    # BTC-Dominanz, Trump/Truth-Social) — pro Analyse-Zyklus über get_macro_context().
+    "macro_enabled": True,
+    # Coins, für die pro Zyklus Key-Levels + Funding/OI geholt werden (kompakt ~2 KB).
+    "macro_symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
     "cooldown_min": 45,
     # Einstellungs-Autonomie: darf die KI ihre Trade-Settings ändern?
     # off = nie | suggest = Vorschläge, Trader bestätigt | auto = sofort anwenden
@@ -348,6 +354,11 @@ class AIEngine:
             self.config["cooldown_min"] = max(0, min(720, int(updates["cooldown_min"])))
         if "news_enabled" in updates:
             self.config["news_enabled"] = bool(updates["news_enabled"])
+        if "macro_enabled" in updates:
+            self.config["macro_enabled"] = bool(updates["macro_enabled"])
+        if "macro_symbols" in updates and isinstance(updates["macro_symbols"], list):
+            syms = [str(s).upper() for s in updates["macro_symbols"] if str(s).strip()]
+            self.config["macro_symbols"] = syms[:6] or macro_context.DEFAULT_SYMBOLS
         if "autonomy" in updates and updates["autonomy"] in ("off", "suggest", "auto"):
             self.config["autonomy"] = updates["autonomy"]
         if "learning_enabled" in updates:
@@ -488,6 +499,12 @@ class AIEngine:
             news = await news_feed.get_headlines(8)
             if news:
                 parts.append("NEWS:\n" + "\n".join(f"- {n['title']} ({n['source']})" for n in news))
+        try:
+            macro = await self._macro_block()
+            if macro:
+                parts.append(macro)
+        except Exception:
+            pass
         if self.decisions:
             dec = [f"- {s}: {d.get('action')} ({d.get('confidence')}%) – {d.get('reasoning', '')[:120]}"
                    for s, d in self.decisions.items() if s.upper() in allow]
@@ -539,9 +556,89 @@ class AIEngine:
                 f"Profit-Secure {'an' if c.get('profit_secure_enabled') else 'aus'}")
         return "\n".join(lines)
 
+    async def _macro_block(self) -> str:
+        """Externer Makro-Kontext (get_macro_context) als kompakter Text-Block für die KI.
+
+        Deckt die 4 vom Trader gewünschten Quellen ab (Key-Levels, Funding/OI,
+        Makro-Kalender mit UTC-No-Trade-Fenstern, DXY/Yield/BTC-Dominanz) plus
+        Trump/Truth-Social. Fällt lautlos aus, wenn eine Quelle nicht erreichbar ist.
+        """
+        if not self.config.get("macro_enabled", True):
+            return ""
+        try:
+            syms = self.config.get("macro_symbols") or macro_context.DEFAULT_SYMBOLS
+            ctx = await macro_context.get_macro_context(symbols=list(syms))
+        except Exception as e:
+            logger.warning(f"macro context failed: {e}")
+            return ""
+
+        lines = ["=== EXTERNER MAKRO-KONTEXT (live, alle ~10 min · get_macro_context) ==="]
+
+        mr = ctx.get("market_regime") or {}
+        if mr:
+            dxy = mr.get("dxy") or {}
+            y10 = mr.get("us10y_yield") or {}
+            lines.append(
+                "MARKT-REGIME: "
+                f"BTC-Dominanz {mr.get('btc_dominance_pct', '?')}% | "
+                f"DXY {dxy.get('value', '?')} ({dxy.get('chg_pct', '?')}%) | "
+                f"US10Y {y10.get('value', '?')}% ({y10.get('chg_pct', '?')}%) | "
+                f"Bias: {mr.get('risk_bias', 'neutral')}"
+            )
+
+        cal = ctx.get("macro_calendar") or {}
+        ntw = cal.get("no_trade_windows_utc") or []
+        if ntw:
+            lines.append("⛔ NO-TRADE-FENSTER (UTC, High-Impact – NICHT traden, Lektion 16):")
+            for w in ntw[:5]:
+                lines.append(f"  - {w.get('event')}: {w.get('start_utc')} → {w.get('end_utc')}")
+        upcoming = cal.get("upcoming") or []
+        if upcoming:
+            nxt = [f"{u.get('event')} ({u.get('importance')}) {u.get('time_utc')}"
+                   for u in upcoming[:4]]
+            lines.append("MAKRO-TERMINE (UTC): " + " | ".join(nxt))
+
+        fo = ctx.get("funding_oi") or {}
+        for sym, f in fo.items():
+            lines.append(
+                f"FUNDING/OI {sym}: rate {f.get('funding_rate', '?')} "
+                f"(ann. {f.get('funding_annualized_pct', '?')}%), "
+                f"OI-Δ 15m {f.get('oi_delta_15m_pct', '?')}% / 1h {f.get('oi_delta_1h_pct', '?')}% / "
+                f"4h {f.get('oi_delta_4h_pct', '?')}% → {f.get('squeeze_bias', '?')}"
+            )
+
+        kl = ctx.get("key_levels") or {}
+        for sym, tfs in kl.items():
+            for tf, lv in tfs.items():
+                sup = ", ".join(str(x) for x in (lv.get("support") or [])[:3]) or "-"
+                res = ", ".join(str(x) for x in (lv.get("resistance") or [])[:3]) or "-"
+                lines.append(
+                    f"KEY-LEVELS {sym} {tf}: Support [{sup}] | Resistance [{res}] | "
+                    f"POC {lv.get('poc')} VAH {lv.get('vah')} VAL {lv.get('val')}"
+                )
+
+        trump = ctx.get("trump_truth_social") or {}
+        posts = trump.get("latest") or []
+        if posts:
+            flag = "⚠️ MARKTRELEVANT" if trump.get("market_relevant") else "keine klare Marktrelevanz"
+            lines.append(f"TRUMP / TRUTH SOCIAL ({flag}):")
+            for p in posts[:3]:
+                kw = f" [{', '.join(p.get('market_keywords', []))}]" if p.get("market_keywords") else ""
+                lines.append(f"  - [{p.get('time_utc', '')[:16]}]{kw} {p.get('text', '')[:160]}")
+
+        lines.append(
+            "NUTZUNG: Setze SL/TP an die Key-Levels (POC/VAH/VAL & Support/Resistance). "
+            "Beachte Funding/OI für Squeeze-/Trend-Nachhaltigkeit. Handle NICHT in No-Trade-Fenstern. "
+            "Berücksichtige DXY/Yield/Dominanz für Bias & Risiko-Budget."
+        )
+        return "\n".join(lines)
+
     async def _analysis_extra_blocks(self) -> str:
         """Plattform-Wissen, Performance, Lektionen, aktuelle Settings + Autonomie-Regeln."""
         parts = [f"=== PLATTFORM-WISSEN ===\n{PLATFORM_KNOWLEDGE}"]
+        macro = await self._macro_block()
+        if macro:
+            parts.append(macro)
         try:
             if self.learning:
                 parts.append("=== DEINE BISHERIGE PERFORMANCE (echte Ergebnisse) ===\n"
