@@ -109,7 +109,7 @@ export default function Optimizer({ onClose }) {
   const [execution, setExecution] = useState(saved.execution || 'cloud');
   // ---- Robustheit: Walk-Forward, Drawdown-Filter, Konstanz-Test ----
   const [wfEnabled, setWfEnabled] = useState(!!saved.wfEnabled);
-  const [wfMode, setWfMode] = useState(saved.wfMode === 'rolling' ? 'rolling' : 'single');
+  const [wfMode, setWfMode] = useState(['rolling', 'anchored'].includes(saved.wfMode) ? saved.wfMode : 'single');
   const [wfWindows, setWfWindows] = useState(saved.wfWindows ?? 4);
   const [wfTrainPct, setWfTrainPct] = useState(saved.wfTrainPct ?? 75);
   const [ddEnabled, setDdEnabled] = useState(!!saved.ddEnabled);
@@ -310,7 +310,7 @@ export default function Optimizer({ onClose }) {
           execution,
           walk_forward: wfEnabled
             ? { enabled: true, train_pct: wfTrainPct, mode: wfMode,
-              windows: wfMode === 'rolling' ? wfWindows : undefined }
+              windows: wfMode !== 'single' ? wfWindows : undefined }
             : undefined,
           dd_filter: ddEnabled ? { enabled: true, max_dd_pct: ddMaxPct } : undefined,
           constancy: ctEnabled
@@ -557,14 +557,23 @@ export default function Optimizer({ onClose }) {
                         title="Mehrere gleitende Trainings-/Test-Fenster über den Zeitraum – Goldstandard gegen Overfitting, dauert etwas länger">
                         Rolling (mehrere Fenster)
                       </button>
+                      <button type="button" className={`opt-chip ${wfMode === 'anchored' ? 'on' : ''}`}
+                        onClick={() => setWfMode('anchored')} data-testid="opt-wf-mode-anchored"
+                        title="Wie Rolling, aber das Training beginnt immer am Anfang und WÄCHST mit jedem Fenster – nutzt alle historischen Daten">
+                        Anchored (wachsendes Training)
+                      </button>
                     </div>
                   </label>
-                  {wfMode === 'rolling' && (
+                  {wfMode !== 'single' && (
                     <label className="opt-field">Anzahl Fenster
                       <input type="number" min={2} max={12} value={wfWindows}
                         onChange={e => setWfWindows(parseInt(e.target.value) || 4)}
                         data-testid="opt-wf-windows" />
-                      <span className="opt-inline-hint">Jedes Fenster: eigenes Training + Test auf den direkt folgenden, unbekannten Daten</span>
+                      <span className="opt-inline-hint">
+                        {wfMode === 'anchored'
+                          ? 'Training beginnt immer am Anfang und wächst je Fenster · Test auf den direkt folgenden, unbekannten Daten'
+                          : 'Jedes Fenster: eigenes Training + Test auf den direkt folgenden, unbekannten Daten'}
+                      </span>
                     </label>
                   )}
                   <label className="opt-field">Trainings-Anteil (%)
@@ -574,7 +583,9 @@ export default function Optimizer({ onClose }) {
                     <span className="opt-inline-hint" data-testid="opt-wf-split-info">
                       {wfMode === 'rolling'
                         ? `${Math.max(2, Math.min(12, wfWindows))} Fenster · Training je ${Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)} Tage · Test je ~${Math.max(Math.round((days - Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)) / Math.max(2, Math.min(12, wfWindows)) * 10) / 10, 0.1)} Tage`
-                        : `Training: ${Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)} Tage · Test: ${days - Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)} Tage`}
+                        : wfMode === 'anchored'
+                          ? `${Math.max(2, Math.min(12, wfWindows))} Fenster · Training wächst von ${Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)} auf ~${days - Math.max(Math.round((days - Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)) / Math.max(2, Math.min(12, wfWindows))), 1)} Tage · Test je ~${Math.max(Math.round((days - Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)) / Math.max(2, Math.min(12, wfWindows)) * 10) / 10, 0.1)} Tage`
+                          : `Training: ${Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)} Tage · Test: ${days - Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)} Tage`}
                     </span>
                   </label>
                 </>
@@ -743,7 +754,9 @@ export default function Optimizer({ onClose }) {
                     <span className="opt-wf-tag" data-testid="opt-wf-tag">
                       {result.walk_forward.mode === 'rolling'
                         ? `Rolling Walk-Forward: ${result.walk_forward.windows} Fenster · je ${result.walk_forward.train_days}d Training / ~${result.walk_forward.test_days}d Test`
-                        : `Walk-Forward: ${result.walk_forward.train_days}d Training / ${result.walk_forward.test_days}d Test`}
+                        : result.walk_forward.mode === 'anchored'
+                          ? `Anchored Walk-Forward: ${result.walk_forward.windows} Fenster · Training wächst ab ${result.walk_forward.train_days}d / ~${result.walk_forward.test_days}d Test je Fenster`
+                          : `Walk-Forward: ${result.walk_forward.train_days}d Training / ${result.walk_forward.test_days}d Test`}
                     </span>
                   )}
                 </div>

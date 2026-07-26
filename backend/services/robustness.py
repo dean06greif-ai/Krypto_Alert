@@ -42,9 +42,10 @@ def parse_config(body: Dict) -> Dict:
     wf = body.get("walk_forward") or {}
     dd = body.get("dd_filter") or {}
     ct = body.get("constancy") or {}
+    _wfm = str(wf.get("mode") or "").lower()
     cfg = {
         "wf_enabled": bool(wf.get("enabled")),
-        "wf_mode": "rolling" if str(wf.get("mode") or "").lower() == "rolling" else "single",
+        "wf_mode": _wfm if _wfm in ("rolling", "anchored") else "single",
         "wf_windows": int(_num(wf.get("windows"), 4, 2, 12)),
         "train_pct": _num(wf.get("train_pct"), DEFAULT_TRAIN_PCT, 50.0, 95.0),
         "dd_enabled": bool(dd.get("enabled")),
@@ -77,11 +78,14 @@ def _iso_date(ts_ms) -> Optional[str]:
 
 
 def rolling_windows(histories: Dict[str, List[Dict]], train_pct: float,
-                    n_windows: int) -> List[Dict]:
-    """Rolling Walk-Forward: gleitende Fenster über den Gesamtzeitraum.
-    Fenster i: Training = [i*test_len, i*test_len+train_len),
-               Test     = direkt anschließend (test_len Kerzen).
-    Zusammen decken die W Test-Segmente den kompletten Out-of-Sample-Anteil ab.
+                    n_windows: int, anchored: bool = False) -> List[Dict]:
+    """Walk-Forward-Fenster über den Gesamtzeitraum.
+    anchored=False (Rolling): Training gleitet mit konstanter Länge.
+      Fenster i: Training = [i*test_len, i*test_len+train_len)
+    anchored=True (Anchored): Training beginnt immer am Anfang und WÄCHST.
+      Fenster i: Training = [0, train_len+i*test_len)
+    Test = jeweils direkt anschließend (test_len Kerzen); die W Test-Segmente
+    decken zusammen den kompletten Out-of-Sample-Anteil ab.
     Rückgabe: [{"train": {sym: candles}, "test": {sym: candles}, "range": {...}}]"""
     wins = []
     for i in range(n_windows):
@@ -91,9 +95,11 @@ def rolling_windows(histories: Dict[str, List[Dict]], train_pct: float,
             n = len(candles)
             train_len = int(n * train_pct / 100.0)
             test_len = max(int((n - train_len) / n_windows), 1)
-            start = i * test_len
-            tr = candles[start: start + train_len]
-            te = candles[start + train_len: start + train_len + test_len]
+            if anchored:
+                tr = candles[0: train_len + i * test_len]
+            else:
+                tr = candles[i * test_len: i * test_len + train_len]
+            te = candles[train_len + i * test_len: train_len + (i + 1) * test_len]
             train[sym] = tr
             test[sym] = te
             if rng is None and tr and te:

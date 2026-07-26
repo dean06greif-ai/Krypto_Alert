@@ -235,6 +235,24 @@ class TestRollingWalkForward:
         assert cfg["wf_mode"] == "rolling"
         assert cfg["wf_windows"] == 12  # clamp
         assert robustness.parse_config({})["wf_mode"] == "single"
+        assert robustness.parse_config({"walk_forward": {"mode": "anchored"}})["wf_mode"] == "anchored"
+        assert robustness.parse_config({"walk_forward": {"mode": "xyz"}})["wf_mode"] == "single"
+
+    def test_anchored_windows_split(self):
+        candles = synth_candles(1000)
+        wins = robustness.rolling_windows({"BTCUSDT": candles}, 75.0, 4, anchored=True)
+        train_len, test_len = 750, 62
+        for i, w in enumerate(wins):
+            tr, te = w["train"]["BTCUSDT"], w["test"]["BTCUSDT"]
+            # Anchored: Training beginnt IMMER am Anfang und wächst je Fenster
+            assert tr[0]["timestamp"] == candles[0]["timestamp"]
+            assert len(tr) == train_len + i * test_len
+            assert len(te) == test_len
+            assert tr[-1]["timestamp"] < te[0]["timestamp"]
+        # Test-Segmente identisch zum Rolling-Modus (gleiche OOS-Abdeckung)
+        roll = robustness.rolling_windows({"BTCUSDT": candles}, 75.0, 4, anchored=False)
+        for w_a, w_r in zip(wins, roll):
+            assert w_a["test"]["BTCUSDT"][0]["timestamp"] == w_r["test"]["BTCUSDT"][0]["timestamp"]
 
     def test_rolling_windows_split(self):
         candles = synth_candles(1000)

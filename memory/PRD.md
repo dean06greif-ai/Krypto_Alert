@@ -57,6 +57,11 @@ sehr customizable. Konkret gefordert:
       Fenster). Suche läuft auf Fenster-1-Training; Top-Kandidaten werden über alle Fenster geprüft.
       UI: Umschalt-Buttons "Einfacher Split"/"Rolling" (opt-wf-mode-single/-rolling), Fenster-Anzahl
       (opt-wf-windows), Karten zeigen Fenster-Chips (opt-wf-windows-{i}) mit Test-PnL + Tooltip (Datum, Train-PnL, WF-Score).
+- [x] **Anchored Walk-Forward** (3. Variante, 26.07.2026): walk_forward.mode="anchored" –
+      Training beginnt immer am Anfang und wächst je Fenster (rolling_windows(anchored=True)),
+      Test-Segmente identisch zum Rolling (gleiche OOS-Abdeckung), zeitnormierte Bewertung
+      berücksichtigt die wachsende Trainingslänge. UI: 3. Umschalt-Button (opt-wf-mode-anchored),
+      eigene Split-Info + Ergebnis-Tag. Phase: "Anchored Walk-Forward: Kandidat i/n · Fenster w/W".
 - [x] **Phasen-Transparenz** (2. Session): Bei aktivem WF sind alle Such-Phasen mit "Training · " geprefixt;
       Finalize zeigt "Walk-Forward-Test: Kandidat i/n auf X Tagen unbekannter Testdaten",
       "Rolling Walk-Forward: Kandidat i/n · Fenster w/W" und "Konstanz-Test: Kandidat i/n (Xd-Abschnitte)".

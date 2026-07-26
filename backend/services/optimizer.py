@@ -531,7 +531,10 @@ async def _finalize_top5(job, mode, candidates, train_hist, test_hist, settings,
     aktivierte Checks ist es ein reines Top-5-Ranking."""
     if not candidates:
         return []
-    rolling = bool(robust["wf_enabled"] and robust.get("wf_mode") == "rolling" and wf_windows)
+    rolling = bool(robust["wf_enabled"]
+                   and robust.get("wf_mode") in ("rolling", "anchored") and wf_windows)
+    anchored = robust.get("wf_mode") == "anchored"
+    wf_label = "Anchored" if anchored else "Rolling"
     fs_test = None
     if robust["wf_enabled"] and test_hist and not rolling:
         fs_test = {s: fast_sim.FastSeries(c) for s, c in test_hist.items()}
@@ -577,8 +580,10 @@ async def _finalize_top5(job, mode, candidates, train_hist, test_hist, settings,
             for w_i, (win, wfs) in enumerate(zip(wf_windows, win_fs)):
                 if should_stop and should_stop():
                     raise JobCancelled()
-                job["phase"] = (f"Rolling Walk-Forward: Kandidat {i + 1}/{n} · "
+                job["phase"] = (f"{wf_label} Walk-Forward: Kandidat {i + 1}/{n} · "
                                 f"Fenster {w_i + 1}/{n_win} (Test auf unbekannten Daten)")
+                # Anchored: Trainingsfenster wächst je Fenster um die Test-Spanne
+                td = train_days + (w_i * test_days if anchored else 0.0)
                 if w_i == 0:
                     tr_m = entry["metrics"] or {}  # Fenster 1 = Suchdaten (schon bewertet)
                 else:
@@ -586,7 +591,7 @@ async def _finalize_top5(job, mode, candidates, train_hist, test_hist, settings,
                                                   win["train"], wfs["train"], should_stop))[0]
                 te_m = (await _evaluate_batch(job, None, [(st, s_eff, c_eff)],
                                               win["test"], wfs["test"], should_stop))[0]
-                ev = robustness.walk_forward_eval(tr_m, te_m, train_days, test_days)
+                ev = robustness.walk_forward_eval(tr_m, te_m, td, test_days)
                 win_results.append({"window": w_i + 1, "range": win.get("range") or {},
                                     "train_metrics": tr_m, "test_metrics": te_m, **ev})
             entry["wf_windows"] = win_results
@@ -719,9 +724,10 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
         if robust["wf_enabled"]:
             wf_prefix = "Training · "
             train_days = days * robust["train_pct"] / 100.0
-            if robust["wf_mode"] == "rolling":
-                wf_windows = robustness.rolling_windows(histories, robust["train_pct"],
-                                                        robust["wf_windows"])
+            if robust["wf_mode"] in ("rolling", "anchored"):
+                wf_windows = robustness.rolling_windows(
+                    histories, robust["train_pct"], robust["wf_windows"],
+                    anchored=robust["wf_mode"] == "anchored")
                 histories = {s: c for s, c in wf_windows[0]["train"].items() if len(c) > 100}
                 ok_windows = all(w["test"] and all(len(c) > 20 for c in w["test"].values())
                                  for w in wf_windows)
