@@ -682,11 +682,18 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
           <div className="ai-decisions-wrap" data-testid="ai-coin-selector">
             <div className="ai-chat-focus-bar">
               <span className="ai-coin-selector-title">
-                KI-Chat Fokus{allSelected ? ' · alle Coins' : ` · ${chatCoins.map(coinLabel).join(', ')}`}
+                KI-CHAT FOKUS
+                <span className="ai-coin-selector-sep">·</span>
+                <span className="ai-coin-selector-mode">
+                  {allSelected ? 'ALLE COINS' : `AUSGEWÄHLTE COINS (${chatCoins.length})`}
+                </span>
               </span>
               <button
-                className={`ai-coin-all-toggle ${allSelected ? 'on' : ''}`}
+                className="ai-coin-all-toggle"
                 onClick={toggleAll}
+                title={allSelected
+                  ? 'Nur den aktuell geöffneten Coin in den KI-Chat-Fokus nehmen'
+                  : 'Alle Coins in den KI-Chat-Fokus nehmen'}
                 data-testid="ai-coin-select-all"
               >
                 {allSelected ? 'Nur aktueller Coin' : 'Alle Coins'}

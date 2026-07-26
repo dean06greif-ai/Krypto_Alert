@@ -124,9 +124,45 @@
   display: flex; align-items: center; justify-content: space-between;
   gap: 10px; padding: 10px 18px 0;
 }
+
+/* ===== KI-Chat Fokus: Header-Bar + Quick-Switch ===== */
+.ai-chat-focus-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 13px 18px 5px;
+}
+.ai-coin-selector-title {
+  display: inline-flex; align-items: baseline; gap: 8px;
+  font-size: 12px; font-weight: 700; letter-spacing: 1.4px;
+  text-transform: uppercase; color: #c8cde0;
+  min-width: 0;
+}
+.ai-coin-selector-sep { color: #3a415e; font-weight: 700; }
+.ai-coin-selector-mode {
+  color: #8f96b3; font-weight: 600; letter-spacing: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ai-coin-all-toggle {
+  flex-shrink: 0;
+  display: inline-flex; align-items: center; gap: 6px;
+  background: rgba(0, 229, 160, 0.06);
+  border: 1px solid rgba(0, 229, 160, 0.5);
+  color: #00e5a0;
+  border-radius: 999px;
+  padding: 7px 18px;
+  font-size: 12px; font-weight: 700; letter-spacing: 0.3px;
+  font-family: inherit; cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.ai-coin-all-toggle:hover {
+  background: rgba(0, 229, 160, 0.15);
+  border-color: rgba(0, 229, 160, 0.8);
+  box-shadow: 0 0 16px rgba(0, 229, 160, 0.22);
+}
+.ai-coin-all-toggle:active { transform: scale(0.97); }
+
 .ai-decisions-strip {
-  display: flex; gap: 6px; overflow-x: auto;
-  padding: 8px 18px 10px;
+  display: flex; gap: 8px; overflow-x: auto;
+  padding: 8px 18px 12px;
   scrollbar-width: none;
   -ms-overflow-style: none;
   touch-action: pan-x;
@@ -139,25 +175,28 @@
 .ai-decisions-strip.dragging { cursor: grabbing; scroll-behavior: auto; }
 .ai-decisions-strip.dragging .ai-chip { pointer-events: none; }
 .ai-chip {
-  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
-  background: #161a27; border: 1px solid #262b3d; border-radius: 999px;
-  padding: 4px 10px; font-size: 11px; font-family: inherit;
-  cursor: pointer; opacity: 0.45;
-  transition: background-color 0.15s, border-color 0.15s, opacity 0.15s, transform 0.1s;
+  display: flex; align-items: center; gap: 7px; flex-shrink: 0;
+  background: #141824; border: 1px solid #2a3049; border-radius: 999px;
+  padding: 7px 14px; font-size: 12px; font-family: inherit;
+  cursor: pointer; opacity: 0.65;
+  transition: background-color 0.15s, border-color 0.15s, opacity 0.15s, transform 0.1s, box-shadow 0.15s;
 }
-.ai-chip:hover { opacity: 0.85; }
+.ai-chip:hover { opacity: 1; border-color: #3a415e; }
 .ai-chip:active { transform: scale(0.96); }
-.ai-chip.selected { opacity: 1; background: rgba(0, 168, 255, 0.1); }
-.ai-chip.current { box-shadow: 0 0 0 1px rgba(0, 229, 160, 0.45) inset; }
-.ai-chip.current.selected { background: rgba(0, 229, 160, 0.1); }
-.ai-chip-sym { color: #c8cde0; font-weight: 700; }
-.ai-chip-action { font-weight: 700; }
-.ai-chip-conf { color: #7c839c; }
-.ai-chip.ai-long { border-color: rgba(0, 229, 160, 0.35); }
+.ai-chip.selected { opacity: 1; background: #1a2030; }
+/* Aktueller / hervorgehobener Coin – grüner Rand wie in der Vorlage */
+.ai-chip.current {
+  opacity: 1;
+  border-color: rgba(0, 229, 160, 0.75);
+  box-shadow: 0 0 0 1px rgba(0, 229, 160, 0.3) inset, 0 0 12px rgba(0, 229, 160, 0.15);
+}
+.ai-chip.current.selected { background: rgba(0, 229, 160, 0.09); }
+.ai-chip-sym { color: #ffffff; font-weight: 700; letter-spacing: 0.4px; }
+.ai-chip-action { font-weight: 700; font-size: 11px; letter-spacing: 0.5px; }
+.ai-chip-conf { color: #7c839c; font-size: 11px; }
 .ai-chip.ai-long .ai-chip-action { color: #00e5a0; }
-.ai-chip.ai-short { border-color: rgba(255, 92, 92, 0.35); }
 .ai-chip.ai-short .ai-chip-action { color: #ff5c5c; }
-.ai-chip.ai-hold .ai-chip-action { color: #7c839c; }
+.ai-chip.ai-hold .ai-chip-action { color: #8f96b3; }
 
 /* Chat */
 .ai-chat-area {
