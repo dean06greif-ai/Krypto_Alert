@@ -324,5 +324,76 @@ class TestRollingWalkForward:
         assert "Fenster" in job["phase"] or "Konstanz" in job["phase"] or job["phase"]
 
 
+# ---------------- Stresstest / Stabilität / Monte-Carlo / Regime ----------------
+class TestNewRobustnessChecks:
+    def test_parse_new_config(self):
+        cfg = robustness.parse_config({
+            "stress_test": {"enabled": True, "cost_multiplier": 2.0},
+            "stability": {"enabled": True, "variation_pct": 15},
+            "monte_carlo": {"enabled": True, "runs": 10000},
+            "regime_analysis": {"enabled": True},
+        })
+        assert cfg["st_enabled"] and cfg["st_mult"] == 2.0
+        assert cfg["sb_enabled"] and cfg["sb_var_pct"] == 15.0
+        assert cfg["mc_enabled"] and cfg["mc_runs"] == 2000  # clamp
+        assert cfg["rg_enabled"] and cfg["any"]
+        off = robustness.parse_config({})
+        assert not (off["st_enabled"] or off["sb_enabled"] or off["mc_enabled"] or off["rg_enabled"])
+
+    def test_stressed_cfg(self):
+        c = robustness.stressed_cfg({"fee_percent": 0.06, "leverage": 5}, 1.5)
+        assert abs(c["fee_percent"] - 0.09) < 1e-9
+        assert c["leverage"] == 5
+
+    def test_perturb_definition_and_params(self):
+        d = {"long_rules": [{"indicator": "rsi", "op": "<", "value": 30}],
+             "short_rules": [{"indicator": "rsi", "op": ">", "value": 70.0}]}
+        p = robustness.perturb_definition(d, 0.1)
+        assert p["long_rules"][0]["value"] == 33          # int bleibt int
+        assert abs(p["short_rules"][0]["value"] - 77.0) < 1e-6
+        assert d["long_rules"][0]["value"] == 30          # Original unverändert
+        pp = robustness.perturb_params({"period": 20, "use_x": True, "name": "a"}, -0.1)
+        assert pp["period"] == 18 and pp["use_x"] is True and pp["name"] == "a"
+
+    def test_stability_eval(self):
+        ok = robustness.stability_eval(100.0, [90, 80, 110, 70], 10.0)
+        assert ok["passed"] and ok["positive_pct"] == 100.0
+        bad = robustness.stability_eval(100.0, [-5, -10, 3, -8], 10.0)
+        assert not bad["passed"]
+        assert not robustness.stability_eval(-10.0, [5, 5, 5, 5], 10.0)["passed"]
+
+    def test_monte_carlo(self):
+        pnls = [10, -5, 8, -3, 12, -6, 9, -4] * 5
+        mc = robustness.monte_carlo(pnls, 100, 100.0)
+        assert mc["runs"] == 100
+        assert mc["total_pnl"] == sum(pnls)
+        assert mc["dd_p50"] <= mc["dd_p95"] <= mc["dd_worst"]
+        assert mc["passed"] is True
+        # deterministisch (Seed 42)
+        assert robustness.monte_carlo(pnls, 100, 100.0)["dd_p95"] == mc["dd_p95"]
+        assert robustness.monte_carlo([1, 2], 100, 100.0)["passed"] is False
+        assert robustness.monte_carlo([-1, -2, -3, -4], 100, 100.0)["passed"] is False
+
+    def test_regime_breakdown(self):
+        up = synth_candles(600)
+        for i, c in enumerate(up):  # klarer Aufwärtstrend
+            c["close"] = 100 + i * 0.5
+        trades = [("BTCUSDT", up[500]["timestamp"], 5.0),
+                  ("BTCUSDT", up[550]["timestamp"], -2.0)]
+        agg = robustness.regime_breakdown(trades, {"BTCUSDT": up})
+        assert agg["bull"]["trades"] == 2
+        assert agg["bull"]["pnl"] == 3.0
+        assert agg["bear"]["trades"] == 0
+
+    def test_chunk_pnls_from_trades(self):
+        candles = synth_candles(4 * 1440, step_ms=60000)  # 4 Tage 1m
+        h = {"BTCUSDT": candles}
+        t0 = candles[0]["timestamp"]
+        trades = [("BTCUSDT", t0 + 1000, 5.0), ("BTCUSDT", t0 + 3 * 86400000, 7.0)]
+        pnls = robustness.chunk_pnls_from_trades(trades, h, 1)
+        assert len(pnls) == 4
+        assert pnls[0] == 5.0 and pnls[3] == 7.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-n", "0"])

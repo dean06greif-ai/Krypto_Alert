@@ -94,10 +94,21 @@ sehr customizable. Konkret gefordert:
 - P2: GPU-Beschleunigung für Batch-Regelauswertung (viele Kandidaten gleichzeitig auf GPU) evaluieren.
 - P2: Kosmetik: <option>-Warnung beheben; localworker/settings-Format vereinheitlichen.
 
-## Vorgeschlagene weitere Robustheits-Features (noch offen, User gefragt 26.07.)
-- P1: Monte-Carlo-Test (Trade-Reihenfolge mischen -> DD-Verteilung/Konfidenz statt Einzelwert)
-- P1: Fee-/Slippage-Stresstest (Kandidat muss auch mit 1.5-2x Kosten profitabel bleiben)
-- P1: Parameter-Stabilität (Nachbarschafts-Check: +/-10% auf Schwellen darf Ergebnis nicht kippen)
-- P2: Regime-Aufschlüsselung (Performance getrennt nach Bull/Bär/Seitwärts ausweisen)
+## Robustheits-Checks 2. Welle (erledigt 26.07.2026, 5. Session)
+Alle 4 als optionale Toggles im Optimizer integriert (Body-Felder / robustness.py / _finalize_top5):
+- [x] 1. Kosten-Stresstest: stress_test{enabled, cost_multiplier=1.5} -> Kandidat wird mit
+      vervielfachtem fee_percent erneut bewertet, muss profitabel bleiben. entry.stress, Badge "Stress x1.5".
+- [x] 3. Parameter-Stabilität: stability{enabled, variation_pct=10} -> 4 Varianten (alle numerischen
+      Schwellen/Params +-var, +-var/2), >=50% müssen profitabel bleiben. entry.stability (positive_pct,
+      retention_pct), Badge "Stabil X%".
+- [x] 2. Monte-Carlo: monte_carlo{enabled, runs=200, max_dd_p95_pct=100} -> Trade-Reihenfolge mischen
+      (Seed 42, deterministisch), DD-Verteilung p50/p95/worst; p95-DD <= 100% vom PnL. entry.monte_carlo,
+      Badge "MC-DD p95".
+- [x] 4. Regime-Analyse: regime_analysis{enabled} -> SMA-Steigungs-Klassifikation (bull/bear/sideways),
+      Trade-PnL je Regime. entry.regimes, Chips "Bull/Bär/Seitwärts" (nur Info, kein Filter).
+Technik: EINE gemeinsame Trade-Sammlung (collect_trades_list) versorgt Konstanz + MC + Regime;
+Konstanz nutzt jetzt chunk_pnls_from_trades. 39 Unit-Tests grün, E2E mit allen 7 Checks verifiziert.
+WICHTIG-Hinweis: optimizer.py wurde einmal durch Edit-Kollision beschädigt (duplizierter Block am
+Dateiende) -> bei künftigen Edits an _finalize_top5 Syntax mit ast.parse prüfen.
 - P2: Seed für Random Search (reproduzierbare Läufe)
 - P2: Datenlücken-Check bei sehr langen Zeiträumen (10-15 Jahre)

@@ -117,6 +117,13 @@ export default function Optimizer({ onClose }) {
   const [ctEnabled, setCtEnabled] = useState(!!saved.ctEnabled);
   const [ctChunkDays, setCtChunkDays] = useState(saved.ctChunkDays ?? 30);
   const [ctMaxDev, setCtMaxDev] = useState(saved.ctMaxDev ?? 20);
+  const [stEnabled, setStEnabled] = useState(!!saved.stEnabled);
+  const [stMult, setStMult] = useState(saved.stMult ?? 1.5);
+  const [sbEnabled, setSbEnabled] = useState(!!saved.sbEnabled);
+  const [sbVar, setSbVar] = useState(saved.sbVar ?? 10);
+  const [mcEnabled, setMcEnabled] = useState(!!saved.mcEnabled);
+  const [mcRuns, setMcRuns] = useState(saved.mcRuns ?? 200);
+  const [rgEnabled, setRgEnabled] = useState(!!saved.rgEnabled);
   const [selTop, setSelTop] = useState(0);
   // ---- Verlauf (Robustheit über alle Läufe) ----
   const [showHistory, setShowHistory] = useState(false);
@@ -133,12 +140,14 @@ export default function Optimizer({ onClose }) {
         minTrades, maxRules, indicators, optFlags, algorithm, baseStrategy, optSessions,
         execution, wfEnabled, wfTrainPct, wfMode, wfWindows,
         ddEnabled, ddMaxPct, ctEnabled, ctChunkDays, ctMaxDev,
+        stEnabled, stMult, sbEnabled, sbVar, mcEnabled, mcRuns, rgEnabled,
       }));
     } catch { /* ignore */ }
   }, [mode, selStrategy, selCoins, days, timeframe, objective, iterations,
     minTrades, maxRules, indicators, optFlags, algorithm, baseStrategy, optSessions,
     execution, wfEnabled, wfTrainPct, wfMode, wfWindows,
-    ddEnabled, ddMaxPct, ctEnabled, ctChunkDays, ctMaxDev]);
+    ddEnabled, ddMaxPct, ctEnabled, ctChunkDays, ctMaxDev,
+    stEnabled, stMult, sbEnabled, sbVar, mcEnabled, mcRuns, rgEnabled]);
 
   // ---- Lokaler Worker: Online-Status für die Ausführungs-Auswahl ----
   useEffect(() => {
@@ -319,6 +328,10 @@ export default function Optimizer({ onClose }) {
           constancy: ctEnabled
             ? { enabled: true, chunk_days: ctChunkDays, max_deviation_pct: ctMaxDev }
             : undefined,
+          stress_test: stEnabled ? { enabled: true, cost_multiplier: stMult } : undefined,
+          stability: sbEnabled ? { enabled: true, variation_pct: sbVar } : undefined,
+          monte_carlo: mcEnabled ? { enabled: true, runs: mcRuns } : undefined,
+          regime_analysis: rgEnabled ? { enabled: true } : undefined,
         }),
       });
       const d = await res.json();
@@ -570,8 +583,28 @@ export default function Optimizer({ onClose }) {
               title="Zeitraum in Abschnitte teilen und prüfen, ob der Gewinn gleichmäßig verteilt ist – oder nur aus wenigen Phasen stammt.">
               {ctEnabled ? '☑' : '☐'} Konstanz-Test
             </button>
+            <button className={`opt-chip ${stEnabled ? 'on' : ''}`} onClick={() => setStEnabled(v => !v)}
+              data-testid="opt-st-toggle"
+              title="Kandidat wird zusätzlich mit vervielfachten Gebühren/Slippage getestet und muss profitabel bleiben – deckt Strategien auf, die reale Kosten auffressen würden.">
+              {stEnabled ? '☑' : '☐'} Kosten-Stresstest
+            </button>
+            <button className={`opt-chip ${sbEnabled ? 'on' : ''}`} onClick={() => setSbEnabled(v => !v)}
+              data-testid="opt-sb-toggle"
+              title="Alle Schwellenwerte werden um ±X% variiert – bleibt das Ergebnis stabil (Plateau), ist die Strategie robust; kippt es, war es ein Zufalls-Spike.">
+              {sbEnabled ? '☑' : '☐'} Parameter-Stabilität
+            </button>
+            <button className={`opt-chip ${mcEnabled ? 'on' : ''}`} onClick={() => setMcEnabled(v => !v)}
+              data-testid="opt-mc-toggle"
+              title="Trade-Reihenfolge wird viele Male zufällig gemischt – statt einem Drawdown-Wert bekommst du eine Verteilung (p50/p95/worst). Deckt Glücks-Sequenzen auf.">
+              {mcEnabled ? '☑' : '☐'} Monte-Carlo
+            </button>
+            <button className={`opt-chip ${rgEnabled ? 'on' : ''}`} onClick={() => setRgEnabled(v => !v)}
+              data-testid="opt-rg-toggle"
+              title="PnL getrennt nach Marktphase (Bull/Bär/Seitwärts) ausweisen – nur Info, kein Filter.">
+              {rgEnabled ? '☑' : '☐'} Regime-Analyse
+            </button>
           </div>
-          {(wfEnabled || ddEnabled || ctEnabled) && (
+          {(wfEnabled || ddEnabled || ctEnabled || stEnabled || sbEnabled || mcEnabled) && (
             <div className="opt-setup" style={{ marginTop: 8 }} data-testid="opt-robust-settings">
               {wfEnabled && (
                 <>
@@ -872,6 +905,24 @@ export default function Optimizer({ onClose }) {
                           Konstanz {t.constancy.deviation_pct != null ? `${fmt(t.constancy.deviation_pct, 0)}%` : '–'}
                         </span>
                       )}
+                      {t.stress && (
+                        <span className={`opt-badge ${t.stress.passed ? 'ok' : 'bad'}`}
+                          title={`PnL bei ${t.stress.cost_multiplier}× Kosten: ${fmt(t.stress.pnl)} (${t.stress.trades ?? 0} Trades, ${fmt(t.stress.win_rate, 0)}% WR)`}>
+                          Stress ×{t.stress.cost_multiplier}: {fmt(t.stress.pnl, 1)}
+                        </span>
+                      )}
+                      {t.stability && (
+                        <span className={`opt-badge ${t.stability.passed ? 'ok' : 'bad'}`}
+                          title={`Schwellen ±${t.stability.variation_pct}%: ${fmt(t.stability.positive_pct, 0)}% der ${t.stability.variants} Varianten profitabel · Ø PnL-Erhalt ${fmt(t.stability.retention_pct, 0)}%`}>
+                          Stabil {fmt(t.stability.positive_pct, 0)}%
+                        </span>
+                      )}
+                      {t.monte_carlo && (
+                        <span className={`opt-badge ${t.monte_carlo.passed ? 'ok' : 'bad'}`}
+                          title={`${t.monte_carlo.runs} gemischte Läufe · DD median ${fmt(t.monte_carlo.dd_p50)} · p95 ${fmt(t.monte_carlo.dd_p95)} (${fmt(t.monte_carlo.dd_p95_pct, 0)}% vom PnL) · worst ${fmt(t.monte_carlo.dd_worst)}`}>
+                          MC-DD p95 {t.monte_carlo.dd_p95 != null ? fmt(t.monte_carlo.dd_p95, 1) : '–'}
+                        </span>
+                      )}
                       {t.passed === false && <span className="opt-badge bad">Filter nicht bestanden</span>}
                       {selTop === i && <span className="opt-badge sel">Ausgewählt ✓</span>}
                     </div>
@@ -895,6 +946,19 @@ export default function Optimizer({ onClose }) {
                           </span>
                         ))}
                         <span className="opt-small" style={{ alignSelf: 'center' }}>Test-PnL je Fenster (Details per Mouseover)</span>
+                      </div>
+                    )}
+                    {t.regimes && (
+                      <div className="opt-wf-windows" data-testid={`opt-regimes-${i}`}>
+                        {[['bull', 'Bull'], ['bear', 'Bär'], ['sideways', 'Seitwärts']].map(([k, label]) => (
+                          t.regimes[k] && (
+                            <span key={k} className={`opt-wf-win ${(t.regimes[k].pnl || 0) > 0 ? 'pos' : 'neg'}`}
+                              title={`${label}-Phase: ${t.regimes[k].trades} Trades`}>
+                              {label}: {fmt(t.regimes[k].pnl, 1)}
+                            </span>
+                          )
+                        ))}
+                        <span className="opt-small" style={{ alignSelf: 'center' }}>PnL je Marktphase (Training)</span>
                       </div>
                     )}
                     {t.per_symbol && (

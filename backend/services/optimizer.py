@@ -616,13 +616,59 @@ async def _finalize_top5(job, mode, candidates, train_hist, test_hist, settings,
                 entry["wf"]["test_dd_ratio_pct"] = ratio_t
                 entry["dd_pass"] = bool(entry.get("dd_pass")) and ok_t
                 passed = passed and ok_t
+        # Gemeinsame Trade-Sammlung (EINE Simulation für Konstanz/Monte-Carlo/Regime)
+        trades = None
+        if robust["ct_enabled"] or robust["mc_enabled"] or robust["rg_enabled"]:
+            job["phase"] = f"Trade-Analyse: Kandidat {i + 1}/{n}"
+            trades = await robustness.collect_trades_list(
+                st, train_hist, s_eff, c_eff, fs_map, should_stop)
         if robust["ct_enabled"]:
             job["phase"] = (f"Konstanz-Test: Kandidat {i + 1}/{n} "
                             f"({robust['ct_chunk_days']}-Tage-Abschnitte)")
-            pnls = await robustness.collect_chunk_pnls(
-                st, train_hist, s_eff, c_eff, robust["ct_chunk_days"], fs_map, should_stop)
+            pnls = robustness.chunk_pnls_from_trades(trades, train_hist,
+                                                     robust["ct_chunk_days"])
             entry["constancy"] = robustness.evaluate_chunks(pnls, robust["ct_max_dev_pct"])
             passed = passed and entry["constancy"]["passed"]
+        # 1. Fee-/Slippage-Stresstest: bleibt der Kandidat mit höheren Kosten profitabel?
+        if robust["st_enabled"]:
+            job["phase"] = f"Stresstest (Kosten ×{robust['st_mult']}): Kandidat {i + 1}/{n}"
+            m_st = (await _evaluate_batch(
+                job, None, [(st, s_eff, robustness.stressed_cfg(c_eff, robust["st_mult"]))],
+                train_hist, fs_map, should_stop))[0]
+            st_ok = float(m_st.get("pnl") or 0) > 0
+            entry["stress"] = {"cost_multiplier": robust["st_mult"],
+                               "pnl": m_st.get("pnl"), "trades": m_st.get("trades"),
+                               "win_rate": m_st.get("win_rate"), "passed": st_ok}
+            passed = passed and st_ok
+        # 3. Parameter-Stabilität: Schwellen ±X% -> Plateau (robust) oder Spike (Zufall)?
+        if robust["sb_enabled"]:
+            job["phase"] = f"Stabilitäts-Check (±{robust['sb_var_pct']}%): Kandidat {i + 1}/{n}"
+            v = robust["sb_var_pct"] / 100.0
+            items = []
+            for f in (-v, -v / 2, v / 2, v):
+                if mode == "params":
+                    p_var = robustness.perturb_params(entry["params"], f)
+                    sp2 = dict(s_eff.get("strategy_params", {}))
+                    sp2[sid] = {**sp2.get(sid, {}), **p_var}
+                    items.append((strategy, {**s_eff, "strategy_params": sp2}, c_eff))
+                else:
+                    d_var = robustness.perturb_definition(entry["definition"], f)
+                    items.append((_mk_strategy(d_var), s_eff, c_eff))
+            ms_var = await _evaluate_batch(job, None, items, train_hist, fs_map, should_stop)
+            entry["stability"] = robustness.stability_eval(
+                float((entry["metrics"] or {}).get("pnl") or 0),
+                [m.get("pnl") for m in ms_var], robust["sb_var_pct"])
+            passed = passed and entry["stability"]["passed"]
+        # 2. Monte-Carlo: Trade-Reihenfolge mischen -> Drawdown-Verteilung
+        if robust["mc_enabled"] and trades is not None:
+            job["phase"] = f"Monte-Carlo ({robust['mc_runs']} Läufe): Kandidat {i + 1}/{n}"
+            entry["monte_carlo"] = robustness.monte_carlo(
+                [p for _s, _t, p in trades], robust["mc_runs"], robust["mc_max_dd_pct"])
+            passed = passed and entry["monte_carlo"]["passed"]
+        # 4. Regime-Aufschlüsselung: PnL je Marktphase (nur Info, kein Filter)
+        if robust["rg_enabled"] and trades is not None:
+            job["phase"] = f"Regime-Analyse: Kandidat {i + 1}/{n}"
+            entry["regimes"] = robustness.regime_breakdown(trades, train_hist)
         if len(train_hist) > 1:
             # Multi-Coin-Check: funktioniert der Kandidat auf jedem Coin einzeln?
             job["phase"] = f"Multi-Coin-Check: Kandidat {i + 1}/{n}"
@@ -781,7 +827,9 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
         result["robustness"] = {k: robust[k] for k in
                                 ("wf_enabled", "wf_mode", "wf_windows", "train_pct",
                                  "dd_enabled", "dd_max_pct",
-                                 "ct_enabled", "ct_chunk_days", "ct_max_dev_pct")}
+                                 "ct_enabled", "ct_chunk_days", "ct_max_dev_pct",
+                                 "st_enabled", "st_mult", "sb_enabled", "sb_var_pct",
+                                 "mc_enabled", "mc_runs", "mc_max_dd_pct", "rg_enabled")}
         if robust["wf_enabled"]:
             result["walk_forward"] = {"mode": robust["wf_mode"],
                                       "train_pct": robust["train_pct"],
