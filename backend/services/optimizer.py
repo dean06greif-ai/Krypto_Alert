@@ -731,6 +731,12 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
             # Nur harte Min-Trades-Ausfälle (-1e9) ausschließen – Filter-Ausfälle
             # (DD/Konstanz) bleiben sichtbar und werden als 'nicht bestanden' markiert
             candidates = [t for t in top if t.get("score", -1e18) > -9e8][:10]
+            # Fallback: bestes Ergebnis immer zeigen (auch bei wenigen Trades)
+            if not candidates and best:
+                candidates = [{"params": best.get("params") or {},
+                               "trade_params": best.get("trade_params") or {},
+                               "metrics": best.get("metrics") or {},
+                               "score": best.get("score")}]
             strategy_obj = strategy
         else:
             tracker = robustness.TopTracker(12)
@@ -749,7 +755,7 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
             definition, best_m, best_sc, steps = await _discover(
                 job, histories, settings, cfg, objective, min_trades,
                 max_rules, allowed, prog_d, base_definition, fs_map, cancelled,
-                pool, workers)
+                pool, workers, dd_max, tracker)
             refine_log = []
             refine_end = span_end
             if do_refine and best_m:
@@ -779,6 +785,12 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
                            "trade_params": best_trade_params,
                            "base_strategy_id": bsid if base_definition else None})
             candidates = [t for t in tracker.top(10) if t.get("score", -1e18) > -9e8]
+            # Fallback: bestes Such-Ergebnis immer zeigen, auch wenn alle
+            # Kandidaten unter Min-Trades lagen (sonst wäre Top-5 leer)
+            if not candidates and best_m:
+                candidates = [{"definition": copy.deepcopy(definition),
+                               "trade_params": dict(best_trade_params or {}),
+                               "metrics": best_m, "score": round(best_sc, 3)}]
             strategy_obj = None
 
         # Top-5 + Robustheits-Checks (Walk-Forward-Test, DD-Filter, Konstanz-Test)

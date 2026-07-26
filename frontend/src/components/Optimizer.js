@@ -702,6 +702,66 @@ export default function Optimizer({ onClose }) {
               </div>
             )}
             {result.benchmark && <BenchmarkBar b={result.benchmark} testid="opt-benchmark" />}
+            {top5.length > 0 && (
+              <div className="opt-top5" data-testid="opt-top5">
+                <div className="opt-section-title">
+                  <Trophy size={15} weight="fill" style={{ color: '#FFD700' }} />
+                  TOP {top5.length} ERGEBNISSE – zum Auswählen anklicken
+                  {result.walk_forward && (
+                    <span className="opt-wf-tag" data-testid="opt-wf-tag">
+                      Walk-Forward: {result.walk_forward.train_days}d Training / {result.walk_forward.test_days}d Test
+                    </span>
+                  )}
+                </div>
+                {top5.map((t, i) => (
+                  <button key={i} type="button"
+                    className={`opt-top5-card ${selTop === i ? 'sel' : ''} ${t.passed === false ? 'failed' : ''}`}
+                    onClick={() => setSelTop(i)} data-testid={`opt-top5-${i}`}>
+                    <div className="opt-top5-head">
+                      <span className="opt-top5-rank">#{t.rank || i + 1}</span>
+                      {t.wf
+                        ? <span className="opt-top5-score">WF-Score {fmt(t.wf.wf_score, 2)} · Übereinstimmung {fmt(t.wf.consistency_pct, 0)}%</span>
+                        : <span className="opt-top5-score">Score {fmt(t.score, 1)}</span>}
+                      {t.dd_ratio_pct !== undefined && (
+                        <span className={`opt-badge ${t.dd_pass === false ? 'bad' : 'ok'}`}
+                          title="Max. Drawdown in % vom PnL (Training)">
+                          DD/PnL {t.dd_ratio_pct != null ? `${fmt(t.dd_ratio_pct, 0)}%` : '–'}
+                        </span>
+                      )}
+                      {t.constancy && (
+                        <span className={`opt-badge ${t.constancy.passed ? 'ok' : 'bad'}`}
+                          title={`${t.constancy.chunks} Abschnitte · ${fmt(t.constancy.profitable_chunks_pct, 0)}% davon profitabel · Ø ${fmt(t.constancy.mean_pnl)} PnL/Abschnitt`}>
+                          Konstanz {t.constancy.deviation_pct != null ? `${fmt(t.constancy.deviation_pct, 0)}%` : '–'}
+                        </span>
+                      )}
+                      {t.passed === false && <span className="opt-badge bad">Filter nicht bestanden</span>}
+                      {selTop === i && <span className="opt-badge sel">Ausgewählt ✓</span>}
+                    </div>
+                    <div className="opt-metrics">
+                      {t.test_metrics && <span className="opt-small">Training:</span>}
+                      {metricsRow(t.metrics)}
+                    </div>
+                    {t.test_metrics && (
+                      <div className="opt-metrics">
+                        <span className="opt-small">Test (unbekannte Daten):</span>
+                        {metricsRow(t.test_metrics)}
+                      </div>
+                    )}
+                    <div className="opt-params-list">
+                      {Object.entries(t.params || {}).map(([k, v]) => (
+                        <span key={k} className="opt-param-pill">{k}: <b>{String(v)}</b></span>
+                      ))}
+                      {tradeParamPills(t.trade_params)}
+                      {(t.rules?.long || []).map((r, ri) => <span key={`l${ri}`} className="opt-param-pill">L: {r}</span>)}
+                      {(t.rules?.short || []).map((r, ri) => <span key={`s${ri}`} className="opt-param-pill">S: {r}</span>)}
+                    </div>
+                  </button>
+                ))}
+                <div className="opt-override-legend">
+                  Die ausgewählte Strategie (#{(selEntry?.rank) || selTop + 1}) wird beim Übernehmen/Speichern verwendet.
+                </div>
+              </div>
+            )}
             {result.mode === 'params' ? (
               <>
                 <div className="opt-section-title">

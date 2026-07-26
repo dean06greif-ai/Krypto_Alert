@@ -1,118 +1,75 @@
-# PRD – Antons Daytrading Website (Crypto Scanner / Backtester / Optimizer / KI Trader)
+# PRD – Krypto Alert / Daytrading-Website (Fork von NEW25.07)
 
-## Original-Problemstellung
-Bestehende, funktionierende externe Daytrading-Website (GitHub: dean06greif-ai/Krypto_Alert,
-Branch bitunix-fix; React + FastAPI + MongoDB, Bitunix-Anbindung für Live/Paper-Trading).
-Die Seite bleibt extern/ausgelagert gehostet (Render.com, render.yaml vorhanden).
+## Original-Problemstellung (26.06.2026 / Session 26.07.2026)
+Bestehende, produktiv laufende Daytrading-Website (Repo dean06greif-ai/Krypto_Alert, Branch NEW25.07).
+Lokale Backtests / Strat-Optimierer / Strat-Finder verbessern – sauber, modular, rückwärtskompatibel,
+sehr customizable. Konkret gefordert:
+1. Walk-Forward-Modus als zusätzliche Einstellung bei Strat Finder / Optimierer / Kombi (Default 75% Training / 25% Test),
+   Bewertung bevorzugt Strategien mit ähnlich guter Performance auf Training UND Test (Overfitting-Schutz, WF-Score).
+2. Drawdown-Filter: max. Drawdown relativ zum PnL (Default 40%), gilt für Finder, Optimierer und Walk-Forward.
+3. Konstanz-Test: Zeitraum in Abschnitte teilen (einstellbar, Default 30 Tage), max. Abweichung einstellbar (Default 20%),
+   zu schwankende Strategien aussortieren.
+4. Immer Top-5-Ergebnisse anzeigen, User wählt aus, welche Strategie übernommen wird.
+5. GPU-Unterstützung für Local Mode (NVIDIA, Auto-Erkennung, CPU-Fallback).
+6. Zeitraum-Auswahl in 360-Tage-Schritten bis 15 Jahre (5400 Tage) erweitern.
 
 ## Architektur
-- Frontend: React (CRA), recharts, lightweight-charts, Phosphor Icons – /app/frontend
-- Backend: FastAPI – /app/backend/server.py + services/ (backtester, optimizer, fast_sim,
-  bitunix_trade, strategy_scanner, candle_cache, ai_engine, news_feed) + strategies/
-- DB: MongoDB (settings, custom_strategies, strategy_coin_configs, backtest_results,
-  trades, ai_chat, ai_decisions)
-- Admin-Auth: POST /api/auth/login (Admin/admin), Bearer-Token
-- LLM: Emergent Universal Key (EMERGENT_LLM_KEY in backend/.env), emergentintegrations,
-  funktioniert auch extern (Render) – Guthaben über Emergent-Profil aufladen.
+- Backend: FastAPI (/app/backend), MongoDB (Motor), Router + Services + Strategies.
+- Frontend: React CRA/craco (/app/frontend), deutschsprachige UI, Phosphor-Icons.
+- Local Worker: /app/local_worker/worker.py – Outbound-Polling, nutzt identischen services/-Code.
+- Auth: JWT, Admin über backend/.env (ADMIN_USER=Admin, ADMIN_PASSWORD=admin).
+- Echte Marktdaten (Bitunix), kein Mock.
 
-## Umgesetzt am 24.07.2026 – Lokale Ausführung Phase 1 (100% getestet, Backend 20/20, Frontend 100%)
-Backtester, Optimizer & Strategy-Discovery können wahlweise auf dem PC des Users laufen:
-1. **Architektur "Same code, remote executor"**: Lokaler Worker (`/app/local_worker/worker.py`)
-   importiert exakt dieselben Module (services.backtester/optimizer/candle_cache,
-   strategies/) -> identische Ergebnisse per Konstruktion (verifiziert: Cloud vs. Lokal
-   36 Trades / -41.66 PnL identisch). Jobs bleiben in bt.JOBS/opt.JOBS -> alle bestehenden
-   Status-/Active-/Cancel-/Equity-/Export-/Apply-Endpoints & UI unverändert.
-2. **Verbindung**: Worker -> Server Outbound-Polling alle 2s (`POST /api/worker/poll`,
-   X-Worker-Token), keine Portfreigaben. Server: services/local_exec.py (Queue, Worker-
-   Registry, Watchdog gegen Geister-Jobs), routers/local_worker.py. Job-Payload enthält
-   Settings-Snapshot + Custom-Strategie-Definitionen. Ergebnis kommt gzip zurück und wird
-   wie beim Cloud-Pfad in db.backtests/backtest_trades/optimizer_runs persistiert.
-3. **Lokaler Daten-Cache**: Worker nutzt candle_cache mit CANDLE_CACHE_DIR=Daten-Ordner
-   (Default ~/KryptoScannerDaten) -> inkrementelle Updates (nur fehlender Head/Tail) gratis.
-   1m-Kerzen decken alle Timeframes ab. Neue candle_cache-Helfer: cached_meta,
-   persist_symbol, remove_symbol, list_disk_symbols. Daten-Index (index.json) fürs Inventar.
-4. **Daten-Verwaltung** (UI + Worker-Jobs): Download pro Coin/Zeitraum, Alle aktualisieren,
-   Löschen, Speicherbelegung/freier Platz, Fortschritt + Abbruch. Auto-Update optional.
-5. **UI**: Ausführungs-Toggle Cloud/Lokal in Backtester & Optimizer (mit Online-Punkt,
-   localStorage-persistiert, 💻-Tag im Fortschritt), neues LocalWorkerPanel (⚙ Verwalten):
-   Worker-Status (CPU/RAM/GPU/Version), Einstellungen (CPU-Kerne, RAM-Limit, max. parallele
-   Jobs, Daten-Ordner, Auto-Update; GPU reserviert für Phase 2), Einrichtung (Zip-Download
-   `GET /api/localworker/package` – bündelt aktuellen Server-Code, ohne worker_config.json –,
-   Token anzeigen/kopieren/erneuern, Startbefehl), Daten-Tabelle.
-6. **Endpoints**: POST /api/worker/poll|/job/{id}/progress|/job/{id}/result (Worker-Token);
-   GET /api/localworker/status|settings|token|package, POST settings|token/regenerate|
-   data/download|data/update|data/delete|data/cancel/{id} (Admin). Backtest/Optimizer-run
-   akzeptieren `execution: "cloud"|"local"` (Default cloud, 503 wenn kein Worker online).
-7. **Tests**: backend/tests/test_local_worker.py (12 Tests: Queue-Roundtrip, Cancel,
-   Daten-Jobs, Auth, Cloud-Regression). Hinweis: tests/test_backtest_optimizer.py hat einen
-   VORBESTEHENDEN Fehler (erwartet exakt 9 Strategien, es sind 11) + Default-URL zeigt auf
-   alten Pod (REACT_APP_BACKEND_URL setzen).
+### Neue Module (26.07.2026)
+- `backend/services/robustness.py`: parse_config, split_histories, walk_forward_eval (WF-Score,
+  Konsistenz = min/max der zeitnormierten Qualität, Score = Mittel × (0.4+0.6×Konsistenz), negativ wenn
+  eine Seite verliert), dd_check (DD/PnL-Ratio, PnL<=0 fällt durch), collect_chunk_pnls + evaluate_chunks
+  (Konstanz: std/mean der Abschnitts-PnLs in %), TopTracker (dedupe per rule_key).
+- `backend/services/gpu_accel.py`: CuPy-Erkennung (USE_GPU=1 + cupy), GPU-Kernels für rolling
+  mean/std/max/min mit CPU-Fallback (pandas-identisch). Genutzt von fast_sim (SMA, Bollinger, Stochastik).
+  EMA/RSI/MACD + Trade-Simulation bleiben bewusst CPU (rekursiv/ereignisbasiert).
 
-## Umgesetzt am 24.07.2026 – Multi-Core auf dem lokalen Worker (100% getestet, 25 Pytests + 8/8 E2E)
-1. **services/parallel_sim.py**: Prozess-Pool; Kinder erhalten Kerzen einmalig
-   (Linux/Mac fork=Copy-on-Write, Windows spawn+Initializer) und bauen Strategie +
-   Fast-Path-Provider selbst -> exakt derselbe simulate_pair-/_evaluate-Code.
-   Aktivierung via SIM_WORKERS (Server ungesetzt -> 1 -> Cloud unverändert;
-   Worker setzt es aus UI-Einstellung cpu_cores, 0=alle Kerne).
-2. **backtester.py**: run_backtest dispatcht -> _simulate_all_sequential (alter Pfad,
-   1:1 ausgelagert) oder _simulate_all_parallel (alle (Strategie,Coin)-Paare parallel,
-   stabile Export-Reihenfolge). Geteilte Helfer _effective_strategy/_pair_trade_cfg/
-   _pair_settings.
-3. **optimizer.py**: _evaluate_batch (pool=None -> sequenziell wie bisher); gebatchte
-   _optimize_params (Random: identische Kandidaten-Sequenz), _discover (identische
-   Greedy-Auswahl), _optimize_trade_settings; _refine bewusst sequenziell
-   (pfadabhängig). Pool-Lifecycle in run_optimizer (finally close, kill bei Abbruch).
-4. **Verifiziert**: seq vs. Multi-Core EXAKT identische Ergebnisse (Unit-Tests
-   tests/test_multicore.py 5/5 + E2E über echten Worker mit festem Datumsbereich);
-   Abbruch killt Pool-Prozesse; Cloud-Regression grün. Pod ist cgroup-limitiert auf
-   2 Kerne -> Speedup hier ~1.7x, auf echten Mehrkern-PCs entsprechend höher.
-   Worker v1.1.0; UI zeigt "Multi-Core: N Prozesse" im Worker-Status.
+### Integration (services/optimizer.py)
+- Body-Felder: walk_forward{enabled,train_pct}, dd_filter{enabled,max_dd_pct}, constancy{enabled,chunk_days,max_deviation_pct}.
+- WF-Split VOR fs_map/Prozess-Pool → gesamte Suche läuft auf Trainingsdaten.
+- _score(..., dd_max_pct): DD-Verletzer bekommen -5e8-Malus (opt-in).
+- TopTracker wird in _discover/_refine/_optimize_trade_settings gefüllt; params-Modus nutzt die top-Liste.
+- _finalize_top5: Top-~10 Kandidaten → Test-Evaluierung (WF), DD-Check (Training UND Test), Konstanz-Test,
+  Re-Ranking (bestanden zuerst; bei WF nach wf_score, sonst score), Fallback = bestes Suchergebnis.
+- result: top5[], walk_forward{train_days,test_days,train_pct}, robustness{Config-Echo}. Alles additiv/rückwärtskompatibel.
+- days-Clamp 1500 → 5500 (auch routers/backtest.py, routers/local_worker.py).
 
-## Backlog Lokale Ausführung (Phase 2)
-- P1: Walk-Forward-Analyse & Konstanz-/Robustheitstests für Optimizer/Strat-Finder
-  (laufen dank Architektur automatisch auch lokal)
-- P2: GPU-Beschleunigung für Parameter-Sweeps (use_gpu-Setting bereits vorhanden)
-- P2: Backtest-Queue für mehrere Strategien-Läufe hintereinander, Benchmark-Modus
-- P2: Kerzen-CSV-Export für lokale Läufe (export_candles wird aktuell nicht hochgeladen)
-- P3: _refine (Feintuning) parallelisieren (Batch-Hill-Climbing, ändert Trajektorie)
+### Frontend (Optimizer.js)
+- Sektion "ROBUSTHEIT & WALK-FORWARD" (Toggles opt-wf-toggle/opt-dd-toggle/opt-ct-toggle + Eingaben
+  opt-wf-trainpct/opt-dd-maxpct/opt-ct-chunkdays/opt-ct-maxdev, Split-Info opt-wf-split-info), persistiert in localStorage.
+- Top-5-Karten (opt-top5, opt-top5-0..4) mit WF-Score/Konsistenz, DD/PnL-Badge, Konstanz-Badge,
+  Training-/Test-Metriken, Regeln/Parameter-Pills; Klick wählt aus, Übernehmen/Speichern nutzt selEntry.
+- DAY_OPTIONS bis 5400 (auch Backtester.js, LocalWorkerPanel DL_DAYS).
+- LocalWorkerPanel: use_gpu-Select aktiviert, GPU-Status im Worker-Header (aktiv/aus).
+- Worker v1.2.0: gpu_info via gpu_accel/CuPy (torch-Fallback), USE_GPU aus Website-Einstellung.
 
-## Umgesetzt am 24.07.2026 – KI Trader (100% getestet, Backend 15/15, Frontend 100%)
-Neue parameterlose Strategie **"KI Trader"** (strategy_id: `ai_trader`):
-1. **AI Engine** (services/ai_engine.py): Periodische Analyse (default alle 10 min,
-   konfigurierbar 5-60) aller Coins mit Multi-Timeframe-Snapshots (1m/15m/1h: RSI,
-   EMA-Trend, Range, ATR, Volumen) + Krypto-News (kostenlose RSS: Cointelegraph,
-   CoinDesk, Decrypt via services/news_feed.py, 10-min-Cache). LLM (default
-   openai/gpt-5.4, wählbar: gpt-5.4-mini, claude-sonnet-4-6, gemini-3-flash-preview)
-   liefert JSON-Entscheidungen: action LONG/SHORT/HOLD, confidence, sl/tp1/tpf %,
-   news_impact, reasoning (deutsch).
-2. **Vollautomatisches Trading**: Aktionable Entscheidungen (confidence >= min_confidence,
-   Cooldown, Session-Fenster) werden als Signale durch die BESTEHENDE Pipeline emittiert
-   (process_signal → Telegram → autotrader.on_signal). Per-Coin Paper/Live über das
-   bestehende ⚡-Modal (strategy_coin_configs, default off). Signal wird zusätzlich per
-   WebSocket type "signal" gebroadcastet.
-3. **KI-Chat-Panel** (AITradingPanel.js): Zahnrad am KI-Trader-Tab öffnet Chat statt
-   Settings. SSE-Streaming (POST /api/ai/chat, fetch+ReadableStream, da EventSource keine
-   Auth-Header kann). User-Nachrichten fließen als Direktiven in die nächste Analyse
-   (letzte 15 Nachrichten). Analyse-Ergebnisse erscheinen als Karten im Chat-Feed
-   (role="analysis"). Decision-Chips pro Coin, An/Aus-Toggle, "Jetzt analysieren",
-   Setup (Modell/Intervall/Konfidenz/Cooldown/News).
-4. **SignalPanel-Regeln** (strategies/ai_trader_strategy.py): KI-Analyse, KI-Richtung
-   (mit Reasoning), Konfidenz, News-Lage – Live-Kreise wie andere Strategien.
-5. **Endpoints**: GET /api/ai/status, POST /api/ai/config (admin), POST /api/ai/analyze
-   (admin), GET/POST/DELETE /api/ai/chat(+/history), GET /api/ai/news.
-6. **Extern-Deploy**: render.yaml buildCommand um --extra-index-url für
-   emergentintegrations erweitert; EMERGENT_LLM_KEY als Render-EnvVar; requirements.txt
-   um emergentintegrations ergänzt. Download-Zip: frontend/public/krypto_alert_ki_update.zip
-7. Default-Config: enabled=false, interval 10 min, min_confidence 65, cooldown 45 min,
-   news an, Modell gpt-5.4.
+## Was wurde umgesetzt (26.07.2026)
+- [x] Repo geklont, Umgebung eingerichtet (.env neu erstellt – waren nicht im Repo), Services laufen.
+- [x] Features 1–6 komplett (siehe oben), alles optional & rückwärtskompatibel.
+- [x] Unit-/Regressionstests: backend/tests/test_robustness_features.py (20 Tests) + Testing-Agent-Suite
+      tests/test_iter11_robustness.py (6 Tests) – alle grün.
+- [x] E2E verifiziert (curl + Playwright): Discovery ohne/mit WF+DD+Konstanz liefert Top-5, UI-Auswahl funktioniert.
+- [x] Bugfixes nach Testing-Agent: tracker an _discover übergeben, Top-5-Fallback wenn alle Kandidaten
+      unter Min-Trades, Filter-Verletzer werden angezeigt & geflaggt statt versteckt.
+- [x] Doku: local_worker/README.md GPU-Abschnitt, requirements-Hinweis (cupy-cuda12x/11x).
 
-## Frühere Iterationen (22.-24.07.2026)
-Strategie-Export/Import, Auto-Leverage, Optimizer-Gruppen, PnL%/Drawdown%,
-Equity-Kurven-Chart, Zeitraum-Presets bis 1440 Tage, RAM-Anzeige (Details siehe Git-Historie).
+## Bekannte Punkte / Nicht-Regressionen
+- tests/test_winrate_bug.py::test_winrate_bugfix_full_flow erwartet "Re-hydrated"-Logzeile – schlägt in
+  frischer Umgebung ohne persistierte Trades fehl (Alt-Test, umgebungsabhängig, keine Code-Regression).
+- Kosmetisch (vorbestehend, Iter10): React-Warnung <span> in <option> im opt-days-Select.
+- GET /api/localworker/settings liefert {settings:{...}} (vorbestehendes Format).
+- GPU-Wirkung konnte im Pod nicht real gemessen werden (keine NVIDIA-GPU) – CPU-Fallback getestet
+  (Ergebnisse identisch zu pandas). Realistischer Nutzen: Indikator-Vorberechnung bei großen Zeiträumen;
+  Multi-Core (SIM_WORKERS) bleibt der größte Hebel.
 
 ## Backlog / Nächste Schritte
-- P1: KI-Trade-Levels (SL/TP der KI) optional direkt für die Order nutzen
-  (aktuell: Signal zeigt KI-Levels, Trade nutzt Coin-Trade-Settings wie andere Strategien)
-- P2: Hydration-Warning (<span> in <option>) in Selects app-weit fixen (dev-only)
-- P2: Telegram-Nachricht um KI-Reasoning erweitern
-- P2: KI-Tagesbericht (Zusammenfassung aller Trades am Abend im Chat)
+- P1: Rolling Walk-Forward (mehrere Train/Test-Fenster statt einem Split) als Erweiterung.
+- P1: Top-5 auch für lokalen Worker-Pfad end-to-end mit echtem Worker verifizieren (Code identisch, Worker nutzt gleiche services/).
+- P2: WF-/Konstanz-Ergebnisse in Optimizer-Historie (optimizer_runs) visualisieren (Verlauf über mehrere Läufe).
+- P2: GPU-Beschleunigung für Batch-Regelauswertung (viele Kandidaten gleichzeitig auf GPU) evaluieren.
+- P2: Kosmetik: <option>-Warnung beheben; localworker/settings-Format vereinheitlichen.
