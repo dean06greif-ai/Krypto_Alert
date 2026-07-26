@@ -357,7 +357,7 @@ class AIEngine:
         if "learning_lookback_days" in updates:
             self.config["learning_lookback_days"] = max(3, min(90, int(updates["learning_lookback_days"])))
         if "max_lessons" in updates:
-            self.config["max_lessons"] = max(3, min(25, int(updates["max_lessons"])))
+            self.config["max_lessons"] = max(3, min(50, int(updates["max_lessons"])))
         if "use_ai_levels" in updates:
             self.config["use_ai_levels"] = bool(updates["use_ai_levels"])
         if "provider" in updates and "model" in updates:
