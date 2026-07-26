@@ -201,6 +201,11 @@ class AIEngine:
         self._last_cleanup_hour: Optional[str] = None
         self._last_reset_date: Optional[str] = None
         self._housekeeping_lock = asyncio.Lock()
+        # Retry-Backoff für den täglichen Reset. Zählt Fehlversuche pro anstehendem
+        # Vortag, damit ein LLM-/DB-Ausfall den Reset nicht dauerhaft verhindert –
+        # aber auch nicht die Engine in einer Endlosschleife blockiert.
+        self._reset_retry_day: Optional[str] = None
+        self._reset_retry_count: int = 0
         # Lern-Modul (wird in setup() initialisiert, braucht db)
         self.learning = None
 
@@ -1174,13 +1179,43 @@ class AIEngine:
         return None
 
     async def _daily_reset(self, prev_day_iso: str) -> Dict:
-        """Archiviert Tages-Chat + Entscheidungen, leert ai_chat, generiert eine
-        markierte Tages-Zusammenfassung und pinnt sie oben im Chat."""
+        """Archiviert Tages-Chat + Entscheidungen, generiert eine markierte
+        Tages-Zusammenfassung und pinnt sie oben im Chat.
+
+        Reihenfolge (WICHTIG: kein Datenverlust bei LLM- oder DB-Fehlern):
+        1) Fakten sammeln
+        2) Summary-Text generieren (LLM + Fallback)
+        3) Archivieren
+        4) Cutoff-Delete (nur Vortags-Nachrichten `ts < Mitternacht Berlin`) –
+           nach Mitternacht neu eingetroffene Nachrichten bleiben erhalten
+        5) Summary einfügen (ts = Mitternacht Berlin des neuen Tages, damit
+           sie chronologisch VOR allen Neuer-Tag-Nachrichten liegt)
+        6) Ältere gepinnte Summaries entpinnen (nur die neueste ist pinned)
+        """
+        # 1) Fakten sammeln – zwingend VOR jeglicher Löschaktion.
         facts = await self._collect_daily_facts(prev_day_iso)
 
-        # 1) Archivieren – KI vergisst nichts.
+        # 2) Zusammenfassung generieren (LLM + Fallback). Der Fallback liefert
+        #    IMMER einen Text, damit wir nie mit leerer Summary weiterlaufen.
+        text = await self._llm_daily_summary(facts)
+        used_fallback = False
+        if not text:
+            text = self._statistical_summary(facts)
+            used_fallback = True
+
+        # Cutoff = Mitternacht Berlin des NEUEN Tages (= Ende von prev_day_iso).
+        # Alle Nachrichten mit ts < cutoff gehören zum Vortag und werden gelöscht.
+        try:
+            cutoff_dt_berlin = datetime.strptime(prev_day_iso, "%Y-%m-%d") \
+                .replace(tzinfo=BERLIN_TZ) + timedelta(days=1)
+        except Exception:
+            cutoff_dt_berlin = datetime.now(BERLIN_TZ)
+        cutoff_utc_iso = cutoff_dt_berlin.astimezone(timezone.utc).isoformat()
+
+        # 3) Archivieren – KI vergisst nichts.
         archive_batch = str(uuid.uuid4())
         archive_ts = _now_iso()
+        archive_errors = False
         try:
             if facts["chat_docs"]:
                 docs = []
@@ -1205,21 +1240,28 @@ class AIEngine:
                     docs.append(d)
                 await self.db.ai_chat_archive.insert_many(docs)
         except Exception as e:
+            archive_errors = True
             logger.error(f"AI daily archive failed: {e}")
+            # Best-Effort: Archiv-Fehler blockieren den Chat-Reset nicht,
+            # sonst würde die Engine ewig mit vollem Chat weiterlaufen.
 
-        # 2) ai_chat leeren.
+        # 4) Cutoff-Delete: nur echte Vortags-Nachrichten löschen. Verhindert,
+        #    dass Nachrichten aus dem neuen Tag (Race Condition zwischen 00:00
+        #    und dem Ende der Summary-Generierung) versehentlich mit-gelöscht
+        #    werden.
+        delete_ok = False
         try:
-            await self.db.ai_chat.delete_many({})
+            await self.db.ai_chat.delete_many({"ts": {"$lt": cutoff_utc_iso}})
+            delete_ok = True
         except Exception as e:
             logger.error(f"AI daily chat clear failed: {e}")
+            # Wir versuchen trotzdem, die Summary einzufügen (siehe 5) – der
+            # Nutzer soll wenigstens den Tages-Bericht sehen.
 
-        # 3) Zusammenfassung generieren (LLM + Fallback).
-        text = await self._llm_daily_summary(facts)
-        used_fallback = False
-        if not text:
-            text = self._statistical_summary(facts)
-            used_fallback = True
-
+        # 5) Summary einfügen. ts = cutoff (Mitternacht Berlin des neuen Tages),
+        #    dadurch sortiert die Summary chronologisch VOR allen neu
+        #    eingetroffenen Nachrichten und bleibt auch beim `sort("ts", -1)`
+        #    Fenster relevant, wenn wir sie in chat_history() explizit pinnen.
         cfg = self.config
         summary_doc = {
             "id": str(uuid.uuid4()),
@@ -1239,16 +1281,33 @@ class AIEngine:
             },
             "fallback": used_fallback,
             "archive_batch": archive_batch,
-            "ts": _now_iso(),
+            "archive_errors": archive_errors,
+            "ts": cutoff_utc_iso,
         }
+        summary_inserted = False
         try:
             await self.db.ai_chat.insert_one(dict(summary_doc))
+            summary_inserted = True
         except Exception as e:
             logger.error(f"AI daily summary insert failed: {e}")
 
+        # 6) Nur die NEUESTE Summary bleibt gepinnt – alle älteren entpinnen.
+        #    Verhindert Doppel-Pins nach mehreren Reset-Läufen und stellt sicher,
+        #    dass das Frontend immer genau eine gepinnte Summary sieht.
+        if summary_inserted:
+            try:
+                await self.db.ai_chat.update_many(
+                    {"role": "summary", "pinned": True, "id": {"$ne": summary_doc["id"]}},
+                    {"$set": {"pinned": False}},
+                )
+            except Exception as e:
+                logger.warning(f"AI daily summary un-pin previous failed: {e}")
+
         logger.info(
             f"AI daily reset done for {prev_day_iso}: archived {len(facts['chat_docs'])} chat + "
-            f"{len(facts['day_decisions'])} decisions, summary via {'FALLBACK' if used_fallback else 'LLM'}"
+            f"{len(facts['day_decisions'])} decisions, summary via "
+            f"{'FALLBACK' if used_fallback else 'LLM'}, delete_ok={delete_ok}, "
+            f"summary_inserted={summary_inserted}"
         )
         return {
             "day": prev_day_iso,
@@ -1256,11 +1315,21 @@ class AIEngine:
             "archived_decisions": len(facts["day_decisions"]),
             "fallback": used_fallback,
             "summary_id": summary_doc["id"],
+            "summary_inserted": summary_inserted,
+            "delete_ok": delete_ok,
+            "archive_errors": archive_errors,
         }
 
     async def _run_housekeeping(self):
         """Wird vom run_loop jede Iteration angetriggert. Führt bei Bedarf
-        (1) stündliches Analyse-Cleanup und (2) 00:00-Berlin Tages-Reset aus."""
+        (1) stündliches Analyse-Cleanup und (2) 00:00-Berlin Tages-Reset aus.
+
+        Der Tages-Reset-Marker (`_last_reset_date`) wird AUSSCHLIESSLICH nach
+        einem nachweislich erfolgreichen Reset fortgeschrieben – schlägt der
+        Reset fehl (z. B. DB-Fehler beim Insert der Summary), wird er im
+        nächsten Loop-Durchlauf automatisch erneut versucht. Nach 5 erfolglosen
+        Versuchen wird der Marker zwangs-fortgeschrieben und ein Error geloggt,
+        damit die Engine nicht dauerhaft blockiert bleibt."""
         async with self._housekeeping_lock:
             now_berlin = datetime.now(BERLIN_TZ)
             hour_key = now_berlin.strftime("%Y%m%d%H")
@@ -1269,11 +1338,49 @@ class AIEngine:
             # (A) Tages-Reset zuerst: neuer Kalendertag Berlin?
             if self._last_reset_date and date_key != self._last_reset_date:
                 prev_day = self._last_reset_date
+
+                # Retry-Zähler pro anstehendem Vortag verwalten.
+                if self._reset_retry_day != prev_day:
+                    self._reset_retry_day = prev_day
+                    self._reset_retry_count = 0
+
+                # Notbremse: nach 5 Fehlversuchen Marker fortschreiben, damit
+                # die Engine nicht dauerhaft am selben Tag festhängt.
+                if self._reset_retry_count >= 5:
+                    logger.error(
+                        f"Daily reset for {prev_day} skipped after "
+                        f"{self._reset_retry_count} failed attempts – marker advanced."
+                    )
+                    self._last_reset_date = date_key
+                    self._last_cleanup_hour = hour_key
+                    self._reset_retry_day = None
+                    self._reset_retry_count = 0
+                    await self._persist_housekeeping()
+                    return
+
+                success = False
                 try:
-                    await self._daily_reset(prev_day)
+                    result = await self._daily_reset(prev_day)
+                    # Erfolg = Summary konnte tatsächlich in ai_chat geschrieben
+                    # werden. Nur dann darf der Marker fortgeschritten werden,
+                    # sonst würde die Summary für diesen Tag ausfallen.
+                    success = bool(result.get("summary_inserted"))
                 except Exception as e:
-                    logger.error(f"Daily reset error: {e}")
-                # Täglicher Lernlauf über den abgelaufenen Tag (nach der Archivierung).
+                    logger.error(
+                        f"Daily reset error "
+                        f"(attempt {self._reset_retry_count + 1}/5) for {prev_day}: {e}"
+                    )
+
+                if not success:
+                    self._reset_retry_count += 1
+                    logger.warning(
+                        f"Daily reset for {prev_day} not successful, "
+                        f"will retry ({self._reset_retry_count}/5)."
+                    )
+                    # Marker NICHT fortschreiben -> nächster Loop-Durchlauf retried.
+                    return
+
+                # Erst nach echtem Erfolg: Lernlauf + Marker fortschreiben.
                 try:
                     if self.learning and self.config.get("learning_enabled", True) and self.key:
                         await self.learning.run_learning(trigger="daily")
@@ -1283,6 +1390,8 @@ class AIEngine:
                 # Nach Reset ist auch die aktuelle Stunde als 'gecleant' zu markieren
                 # (der Chat ist ohnehin leer bis auf die Summary).
                 self._last_cleanup_hour = hour_key
+                self._reset_retry_day = None
+                self._reset_retry_count = 0
                 await self._persist_housekeeping()
                 return
 
@@ -1299,13 +1408,18 @@ class AIEngine:
 
     async def force_daily_summary(self) -> Dict:
         """Manueller Trigger (Endpoint): erzwingt Reset + Summary für den 'aktuellen
-        Berlin-Tag' (bzw. dem Marker `_last_reset_date`)."""
+        Berlin-Tag' (bzw. dem Marker `_last_reset_date`).
+
+        Marker wird NUR nach nachweislich erfolgreichem Reset fortgeschrieben,
+        damit ein Fehler nicht die reguläre Mitternachts-Logik überspringt."""
         prev_day = self._last_reset_date or datetime.now(BERLIN_TZ).strftime("%Y-%m-%d")
         result = await self._daily_reset(prev_day)
-        # Reset-Marker aktualisieren auf heute, damit der reguläre Loop nicht doppelt feuert.
-        self._last_reset_date = datetime.now(BERLIN_TZ).strftime("%Y-%m-%d")
-        self._last_cleanup_hour = datetime.now(BERLIN_TZ).strftime("%Y%m%d%H")
-        await self._persist_housekeeping()
+        if result.get("summary_inserted"):
+            self._last_reset_date = datetime.now(BERLIN_TZ).strftime("%Y-%m-%d")
+            self._last_cleanup_hour = datetime.now(BERLIN_TZ).strftime("%Y%m%d%H")
+            self._reset_retry_day = None
+            self._reset_retry_count = 0
+            await self._persist_housekeeping()
         return result
 
     # ---------------- background loop ----------------
@@ -1344,10 +1458,28 @@ class AIEngine:
 
     # ---------------- chat ----------------
     async def chat_history(self, limit: int = 80) -> List[Dict]:
+        """Liefert den Chatverlauf für das Frontend.
+
+        Garantiert, dass die aktuelle gepinnte Tages-Summary IMMER als erstes
+        Element enthalten ist – unabhängig vom Limit. Ohne diese Absicherung
+        würde die Summary (älteste Nachricht des Tages) nach ~limit
+        Neu-Nachrichten aus dem `sort("ts", -1).limit(limit)`-Fenster fallen
+        und im Frontend nicht mehr angezeigt werden."""
+        pinned = await self.db.ai_chat.find_one(
+            {"role": "summary", "pinned": True}, sort=[("ts", -1)]
+        )
         rows = await self.db.ai_chat.find().sort("ts", -1).limit(limit).to_list(limit)
         rows.reverse()
         for r in rows:
             r.pop("_id", None)
+        if pinned:
+            pinned.pop("_id", None)
+            pinned_id = pinned.get("id")
+            # Dedupe: falls die gepinnte Summary bereits im Fenster ist, entferne
+            # sie dort – sie wird stattdessen garantiert an den Anfang gesetzt.
+            if pinned_id:
+                rows = [r for r in rows if r.get("id") != pinned_id]
+            rows = [pinned] + rows
         return rows
 
     async def chat_stream(self, text: str, coins=None):
