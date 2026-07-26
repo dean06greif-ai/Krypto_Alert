@@ -19,7 +19,7 @@ von services.optimizer genutzt.
 import asyncio
 import json
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 DEFAULT_TRAIN_PCT = 75.0
@@ -44,6 +44,8 @@ def parse_config(body: Dict) -> Dict:
     ct = body.get("constancy") or {}
     cfg = {
         "wf_enabled": bool(wf.get("enabled")),
+        "wf_mode": "rolling" if str(wf.get("mode") or "").lower() == "rolling" else "single",
+        "wf_windows": int(_num(wf.get("windows"), 4, 2, 12)),
         "train_pct": _num(wf.get("train_pct"), DEFAULT_TRAIN_PCT, 50.0, 95.0),
         "dd_enabled": bool(dd.get("enabled")),
         "dd_max_pct": _num(dd.get("max_dd_pct"), DEFAULT_DD_MAX_PCT, 1.0, 1000.0),
@@ -65,6 +67,75 @@ def split_histories(histories: Dict[str, List[Dict]], train_pct: float
         train[sym] = candles[:cut]
         test[sym] = candles[cut:]
     return train, test
+
+
+def _iso_date(ts_ms) -> Optional[str]:
+    try:
+        return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).date().isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def rolling_windows(histories: Dict[str, List[Dict]], train_pct: float,
+                    n_windows: int) -> List[Dict]:
+    """Rolling Walk-Forward: gleitende Fenster über den Gesamtzeitraum.
+    Fenster i: Training = [i*test_len, i*test_len+train_len),
+               Test     = direkt anschließend (test_len Kerzen).
+    Zusammen decken die W Test-Segmente den kompletten Out-of-Sample-Anteil ab.
+    Rückgabe: [{"train": {sym: candles}, "test": {sym: candles}, "range": {...}}]"""
+    wins = []
+    for i in range(n_windows):
+        train, test = {}, {}
+        rng = None
+        for sym, candles in histories.items():
+            n = len(candles)
+            train_len = int(n * train_pct / 100.0)
+            test_len = max(int((n - train_len) / n_windows), 1)
+            start = i * test_len
+            tr = candles[start: start + train_len]
+            te = candles[start + train_len: start + train_len + test_len]
+            train[sym] = tr
+            test[sym] = te
+            if rng is None and tr and te:
+                rng = {"train_from": _iso_date(tr[0]["timestamp"]),
+                       "train_to": _iso_date(tr[-1]["timestamp"]),
+                       "test_from": _iso_date(te[0]["timestamp"]),
+                       "test_to": _iso_date(te[-1]["timestamp"])}
+        wins.append({"train": train, "test": test, "range": rng or {}})
+    return wins
+
+
+def aggregate_rolling(window_evals: List[Dict]) -> Dict:
+    """Fenster-Ergebnisse zu einem Gesamt-WF-Score verdichten."""
+    n = len(window_evals)
+    if not n:
+        return {"wf_score": 0.0, "consistency_pct": 0.0,
+                "positive_windows_pct": 0.0, "windows": 0}
+    wf = sum(w.get("wf_score", 0.0) for w in window_evals) / n
+    cons = sum(w.get("consistency_pct", 0.0) for w in window_evals) / n
+    pos = sum(1 for w in window_evals
+              if float((w.get("test_metrics") or {}).get("pnl") or 0) > 0) / n * 100.0
+    return {"wf_score": round(wf, 4), "consistency_pct": round(cons, 1),
+            "positive_windows_pct": round(pos, 1), "windows": n}
+
+
+def combine_test_metrics(metrics_list: List[Dict]) -> Dict:
+    """Test-Metriken mehrerer Fenster kombinieren (PnL/Trades summiert,
+    Drawdown konservativ = schlechtestes Fenster)."""
+    tot = {"trades": 0, "wins": 0, "losses": 0, "breakevens": 0,
+           "pnl": 0.0, "fees": 0.0, "max_drawdown": 0.0}
+    for m in metrics_list:
+        for k in ("trades", "wins", "losses", "breakevens"):
+            tot[k] += int(m.get(k) or 0)
+        tot["pnl"] += float(m.get("pnl") or 0)
+        tot["fees"] += float(m.get("fees") or 0)
+        tot["max_drawdown"] = max(tot["max_drawdown"], float(m.get("max_drawdown") or 0))
+    decided = tot["wins"] + tot["losses"]
+    tot["win_rate"] = round(tot["wins"] / decided * 100, 1) if decided else 0.0
+    tot["pnl"] = round(tot["pnl"], 2)
+    tot["fees"] = round(tot["fees"], 2)
+    tot["max_drawdown"] = round(tot["max_drawdown"], 2)
+    return tot
 
 
 def _quality(m: Dict, span_days: float) -> float:

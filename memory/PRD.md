@@ -51,9 +51,17 @@ sehr customizable. Konkret gefordert:
 ## Was wurde umgesetzt (26.07.2026)
 - [x] Repo geklont, Umgebung eingerichtet (.env neu erstellt – waren nicht im Repo), Services laufen.
 - [x] Features 1–6 komplett (siehe oben), alles optional & rückwärtskompatibel.
-- [x] Unit-/Regressionstests: backend/tests/test_robustness_features.py (20 Tests) + Testing-Agent-Suite
-      tests/test_iter11_robustness.py (6 Tests) – alle grün.
-- [x] E2E verifiziert (curl + Playwright): Discovery ohne/mit WF+DD+Konstanz liefert Top-5, UI-Auswahl funktioniert.
+- [x] **Rolling Walk-Forward** (2. Session): walk_forward.mode single|rolling + windows (2–12, Default 4).
+      robustness.rolling_windows (gleitende Fenster mit ISO-Datums-Ranges), aggregate_rolling
+      (Ø WF-Score, Ø Konsistenz, % positive Fenster), combine_test_metrics (PnL summiert, DD = schlechtestes
+      Fenster). Suche läuft auf Fenster-1-Training; Top-Kandidaten werden über alle Fenster geprüft.
+      UI: Umschalt-Buttons "Einfacher Split"/"Rolling" (opt-wf-mode-single/-rolling), Fenster-Anzahl
+      (opt-wf-windows), Karten zeigen Fenster-Chips (opt-wf-windows-{i}) mit Test-PnL + Tooltip (Datum, Train-PnL, WF-Score).
+- [x] **Phasen-Transparenz** (2. Session): Bei aktivem WF sind alle Such-Phasen mit "Training · " geprefixt;
+      Finalize zeigt "Walk-Forward-Test: Kandidat i/n auf X Tagen unbekannter Testdaten",
+      "Rolling Walk-Forward: Kandidat i/n · Fenster w/W" und "Konstanz-Test: Kandidat i/n (Xd-Abschnitte)".
+- [x] Unit-/Regressionstests: test_robustness_features.py (25 Tests inkl. 5 Rolling-Tests) +
+      test_iter11_robustness.py (6) – alle grün. E2E (curl, echte Bitunix-Daten) + UI-Screenshots verifiziert.
 - [x] Bugfixes nach Testing-Agent: tracker an _discover übergeben, Top-5-Fallback wenn alle Kandidaten
       unter Min-Trades, Filter-Verletzer werden angezeigt & geflaggt statt versteckt.
 - [x] Doku: local_worker/README.md GPU-Abschnitt, requirements-Hinweis (cupy-cuda12x/11x).

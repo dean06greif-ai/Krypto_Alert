@@ -109,6 +109,8 @@ export default function Optimizer({ onClose }) {
   const [execution, setExecution] = useState(saved.execution || 'cloud');
   // ---- Robustheit: Walk-Forward, Drawdown-Filter, Konstanz-Test ----
   const [wfEnabled, setWfEnabled] = useState(!!saved.wfEnabled);
+  const [wfMode, setWfMode] = useState(saved.wfMode === 'rolling' ? 'rolling' : 'single');
+  const [wfWindows, setWfWindows] = useState(saved.wfWindows ?? 4);
   const [wfTrainPct, setWfTrainPct] = useState(saved.wfTrainPct ?? 75);
   const [ddEnabled, setDdEnabled] = useState(!!saved.ddEnabled);
   const [ddMaxPct, setDdMaxPct] = useState(saved.ddMaxPct ?? 40);
@@ -126,12 +128,14 @@ export default function Optimizer({ onClose }) {
       localStorage.setItem(STATE_KEY, JSON.stringify({
         mode, selStrategy, selCoins, days, timeframe, objective, iterations,
         minTrades, maxRules, indicators, optFlags, algorithm, baseStrategy, optSessions,
-        execution, wfEnabled, wfTrainPct, ddEnabled, ddMaxPct, ctEnabled, ctChunkDays, ctMaxDev,
+        execution, wfEnabled, wfTrainPct, wfMode, wfWindows,
+        ddEnabled, ddMaxPct, ctEnabled, ctChunkDays, ctMaxDev,
       }));
     } catch { /* ignore */ }
   }, [mode, selStrategy, selCoins, days, timeframe, objective, iterations,
     minTrades, maxRules, indicators, optFlags, algorithm, baseStrategy, optSessions,
-    execution, wfEnabled, wfTrainPct, ddEnabled, ddMaxPct, ctEnabled, ctChunkDays, ctMaxDev]);
+    execution, wfEnabled, wfTrainPct, wfMode, wfWindows,
+    ddEnabled, ddMaxPct, ctEnabled, ctChunkDays, ctMaxDev]);
 
   // ---- Lokaler Worker: Online-Status für die Ausführungs-Auswahl ----
   useEffect(() => {
@@ -304,7 +308,10 @@ export default function Optimizer({ onClose }) {
           sessions: optSessions.trim() || undefined,
           base_strategy_id: mode !== 'params' && baseStrategy ? baseStrategy : undefined,
           execution,
-          walk_forward: wfEnabled ? { enabled: true, train_pct: wfTrainPct } : undefined,
+          walk_forward: wfEnabled
+            ? { enabled: true, train_pct: wfTrainPct, mode: wfMode,
+              windows: wfMode === 'rolling' ? wfWindows : undefined }
+            : undefined,
           dd_filter: ddEnabled ? { enabled: true, max_dd_pct: ddMaxPct } : undefined,
           constancy: ctEnabled
             ? { enabled: true, chunk_days: ctChunkDays, max_deviation_pct: ctMaxDev }
@@ -537,15 +544,40 @@ export default function Optimizer({ onClose }) {
           {(wfEnabled || ddEnabled || ctEnabled) && (
             <div className="opt-setup" style={{ marginTop: 8 }} data-testid="opt-robust-settings">
               {wfEnabled && (
-                <label className="opt-field">Trainings-Anteil (%)
-                  <input type="number" min={50} max={95} value={wfTrainPct}
-                    onChange={e => setWfTrainPct(parseInt(e.target.value) || 75)}
-                    data-testid="opt-wf-trainpct" />
-                  <span className="opt-inline-hint" data-testid="opt-wf-split-info">
-                    Training: {Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)} Tage ·
-                    Test: {days - Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)} Tage
-                  </span>
-                </label>
+                <>
+                  <label className="opt-field">Walk-Forward-Variante
+                    <div className="opt-wf-mode" data-testid="opt-wf-mode">
+                      <button type="button" className={`opt-chip ${wfMode === 'single' ? 'on' : ''}`}
+                        onClick={() => setWfMode('single')} data-testid="opt-wf-mode-single"
+                        title="Ein Split: Training vorne, Test hinten (schnell)">
+                        Einfacher Split
+                      </button>
+                      <button type="button" className={`opt-chip ${wfMode === 'rolling' ? 'on' : ''}`}
+                        onClick={() => setWfMode('rolling')} data-testid="opt-wf-mode-rolling"
+                        title="Mehrere gleitende Trainings-/Test-Fenster über den Zeitraum – Goldstandard gegen Overfitting, dauert etwas länger">
+                        Rolling (mehrere Fenster)
+                      </button>
+                    </div>
+                  </label>
+                  {wfMode === 'rolling' && (
+                    <label className="opt-field">Anzahl Fenster
+                      <input type="number" min={2} max={12} value={wfWindows}
+                        onChange={e => setWfWindows(parseInt(e.target.value) || 4)}
+                        data-testid="opt-wf-windows" />
+                      <span className="opt-inline-hint">Jedes Fenster: eigenes Training + Test auf den direkt folgenden, unbekannten Daten</span>
+                    </label>
+                  )}
+                  <label className="opt-field">Trainings-Anteil (%)
+                    <input type="number" min={50} max={95} value={wfTrainPct}
+                      onChange={e => setWfTrainPct(parseInt(e.target.value) || 75)}
+                      data-testid="opt-wf-trainpct" />
+                    <span className="opt-inline-hint" data-testid="opt-wf-split-info">
+                      {wfMode === 'rolling'
+                        ? `${Math.max(2, Math.min(12, wfWindows))} Fenster · Training je ${Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)} Tage · Test je ~${Math.max(Math.round((days - Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)) / Math.max(2, Math.min(12, wfWindows)) * 10) / 10, 0.1)} Tage`
+                        : `Training: ${Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)} Tage · Test: ${days - Math.round(days * Math.min(Math.max(wfTrainPct, 50), 95) / 100)} Tage`}
+                    </span>
+                  </label>
+                </>
               )}
               {ddEnabled && (
                 <label className="opt-field">Max. Drawdown (% vom PnL)
@@ -709,7 +741,9 @@ export default function Optimizer({ onClose }) {
                   TOP {top5.length} ERGEBNISSE – zum Auswählen anklicken
                   {result.walk_forward && (
                     <span className="opt-wf-tag" data-testid="opt-wf-tag">
-                      Walk-Forward: {result.walk_forward.train_days}d Training / {result.walk_forward.test_days}d Test
+                      {result.walk_forward.mode === 'rolling'
+                        ? `Rolling Walk-Forward: ${result.walk_forward.windows} Fenster · je ${result.walk_forward.train_days}d Training / ~${result.walk_forward.test_days}d Test`
+                        : `Walk-Forward: ${result.walk_forward.train_days}d Training / ${result.walk_forward.test_days}d Test`}
                     </span>
                   )}
                 </div>
@@ -720,7 +754,10 @@ export default function Optimizer({ onClose }) {
                     <div className="opt-top5-head">
                       <span className="opt-top5-rank">#{t.rank || i + 1}</span>
                       {t.wf
-                        ? <span className="opt-top5-score">WF-Score {fmt(t.wf.wf_score, 2)} · Übereinstimmung {fmt(t.wf.consistency_pct, 0)}%</span>
+                        ? <span className="opt-top5-score">
+                          WF-Score {fmt(t.wf.wf_score, 2)} · Übereinstimmung {fmt(t.wf.consistency_pct, 0)}%
+                          {t.wf.positive_windows_pct !== undefined && ` · ${fmt(t.wf.positive_windows_pct, 0)}% Fenster positiv`}
+                        </span>
                         : <span className="opt-top5-score">Score {fmt(t.score, 1)}</span>}
                       {t.dd_ratio_pct !== undefined && (
                         <span className={`opt-badge ${t.dd_pass === false ? 'bad' : 'ok'}`}
@@ -745,6 +782,18 @@ export default function Optimizer({ onClose }) {
                       <div className="opt-metrics">
                         <span className="opt-small">Test (unbekannte Daten):</span>
                         {metricsRow(t.test_metrics)}
+                      </div>
+                    )}
+                    {(t.wf_windows || []).length > 0 && (
+                      <div className="opt-wf-windows" data-testid={`opt-wf-windows-${i}`}>
+                        {t.wf_windows.map((w, wi) => (
+                          <span key={wi}
+                            className={`opt-wf-win ${(w.test_metrics?.pnl || 0) > 0 ? 'pos' : 'neg'}`}
+                            title={`Fenster ${w.window}: Training ${w.range?.train_from || '?'} bis ${w.range?.train_to || '?'} (PnL ${fmt(w.train_metrics?.pnl)}) · Test ${w.range?.test_from || '?'} bis ${w.range?.test_to || '?'} (PnL ${fmt(w.test_metrics?.pnl)}) · WF-Score ${fmt(w.wf_score, 2)}`}>
+                            F{w.window}: {fmt(w.test_metrics?.pnl, 1)}
+                          </span>
+                        ))}
+                        <span className="opt-small" style={{ alignSelf: 'center' }}>Test-PnL je Fenster (Details per Mouseover)</span>
                       </div>
                     )}
                     <div className="opt-params-list">

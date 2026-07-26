@@ -525,15 +525,24 @@ async def _optimize_trade_settings(job, definition, base_score, base_metrics,
 # ---------------- Top-5 + Robustheits-Checks ----------------
 async def _finalize_top5(job, mode, candidates, train_hist, test_hist, settings,
                          cfg, robust, fs_map, should_stop, strategy=None,
-                         train_days=1.0, test_days=0.0):
-    """Die besten Kandidaten mit Walk-Forward-Test, Drawdown-Filter und
-    Konstanz-Test anreichern und neu sortieren (max. ~10 Extra-Bewertungen).
-    Läuft immer – ohne aktivierte Checks ist es ein reines Top-5-Ranking."""
+                         train_days=1.0, test_days=0.0, wf_windows=None):
+    """Die besten Kandidaten mit Walk-Forward-Test (single/rolling), Drawdown-
+    Filter und Konstanz-Test anreichern und neu sortieren. Läuft immer – ohne
+    aktivierte Checks ist es ein reines Top-5-Ranking."""
     if not candidates:
         return []
+    rolling = bool(robust["wf_enabled"] and robust.get("wf_mode") == "rolling" and wf_windows)
     fs_test = None
-    if robust["wf_enabled"] and test_hist:
+    if robust["wf_enabled"] and test_hist and not rolling:
         fs_test = {s: fast_sim.FastSeries(c) for s, c in test_hist.items()}
+    # Rolling: FastSeries je Fenster EINMAL bauen und für alle Kandidaten wiederverwenden
+    win_fs = []
+    if rolling:
+        for w in wf_windows:
+            win_fs.append({
+                "train": {s: fast_sim.FastSeries(c) for s, c in w["train"].items()},
+                "test": {s: fast_sim.FastSeries(c) for s, c in w["test"].items()},
+            })
     out = []
     n = len(candidates)
     for i, cand in enumerate(candidates):
@@ -561,7 +570,37 @@ async def _finalize_top5(job, mode, candidates, train_hist, test_hist, settings,
             entry["dd_ratio_pct"] = ratio
             entry["dd_pass"] = ok
             passed = passed and ok
-        if fs_test is not None:
+        if rolling:
+            # ---- Rolling Walk-Forward: Kandidat über alle Fenster prüfen ----
+            win_results = []
+            n_win = len(wf_windows)
+            for w_i, (win, wfs) in enumerate(zip(wf_windows, win_fs)):
+                if should_stop and should_stop():
+                    raise JobCancelled()
+                job["phase"] = (f"Rolling Walk-Forward: Kandidat {i + 1}/{n} · "
+                                f"Fenster {w_i + 1}/{n_win} (Test auf unbekannten Daten)")
+                if w_i == 0:
+                    tr_m = entry["metrics"] or {}  # Fenster 1 = Suchdaten (schon bewertet)
+                else:
+                    tr_m = (await _evaluate_batch(job, None, [(st, s_eff, c_eff)],
+                                                  win["train"], wfs["train"], should_stop))[0]
+                te_m = (await _evaluate_batch(job, None, [(st, s_eff, c_eff)],
+                                              win["test"], wfs["test"], should_stop))[0]
+                ev = robustness.walk_forward_eval(tr_m, te_m, train_days, test_days)
+                win_results.append({"window": w_i + 1, "range": win.get("range") or {},
+                                    "train_metrics": tr_m, "test_metrics": te_m, **ev})
+            entry["wf_windows"] = win_results
+            entry["wf"] = robustness.aggregate_rolling(win_results)
+            entry["test_metrics"] = robustness.combine_test_metrics(
+                [w["test_metrics"] for w in win_results])
+            if robust["dd_enabled"]:
+                ok_t, ratio_t = robustness.dd_check(entry["test_metrics"], robust["dd_max_pct"])
+                entry["wf"]["test_dd_ratio_pct"] = ratio_t
+                entry["dd_pass"] = bool(entry.get("dd_pass")) and ok_t
+                passed = passed and ok_t
+        elif fs_test is not None:
+            job["phase"] = (f"Walk-Forward-Test: Kandidat {i + 1}/{n} auf "
+                            f"{round(test_days, 1)} Tagen unbekannter Testdaten")
             test_m = (await _evaluate_batch(job, None, [(st, s_eff, c_eff)],
                                             test_hist, fs_test, should_stop))[0]
             entry["test_metrics"] = test_m
@@ -573,6 +612,8 @@ async def _finalize_top5(job, mode, candidates, train_hist, test_hist, settings,
                 entry["dd_pass"] = bool(entry.get("dd_pass")) and ok_t
                 passed = passed and ok_t
         if robust["ct_enabled"]:
+            job["phase"] = (f"Konstanz-Test: Kandidat {i + 1}/{n} "
+                            f"({robust['ct_chunk_days']}-Tage-Abschnitte)")
             pnls = await robustness.collect_chunk_pnls(
                 st, train_hist, s_eff, c_eff, robust["ct_chunk_days"], fs_map, should_stop)
             entry["constancy"] = robustness.evaluate_chunks(pnls, robust["ct_max_dev_pct"])
@@ -667,19 +708,35 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
             raise RuntimeError("Zu wenig Daten für diesen Timeframe/Zeitraum")
 
         # Walk-Forward: Optimierung nur auf Trainingsdaten, Prüfung auf den
-        # letzten (unbekannten) Testdaten. Split VOR fs_map/Pool, damit alle
-        # Such-Pfade konsistent auf den Trainingsdaten arbeiten.
+        # unbekannten Testdaten. Split VOR fs_map/Pool, damit alle Such-Pfade
+        # konsistent auf den Trainingsdaten arbeiten.
+        # mode="single":  ein Split (Training vorne, Test hinten)
+        # mode="rolling": mehrere gleitende Trainings-/Test-Fenster
         test_hist = None
+        wf_windows = None
         train_days, test_days = float(days), 0.0
+        wf_prefix = ""
         if robust["wf_enabled"]:
-            histories, test_hist = robustness.split_histories(histories, robust["train_pct"])
-            histories = {s: c for s, c in histories.items() if len(c) > 100}
-            test_hist = {s: c for s, c in (test_hist or {}).items() if len(c) > 20}
-            if not histories or not test_hist:
-                raise RuntimeError("Zu wenig Daten für den Walk-Forward-Split – "
-                                   "Zeitraum erhöhen oder Trainings-Anteil anpassen")
+            wf_prefix = "Training · "
             train_days = days * robust["train_pct"] / 100.0
-            test_days = float(days) - train_days
+            if robust["wf_mode"] == "rolling":
+                wf_windows = robustness.rolling_windows(histories, robust["train_pct"],
+                                                        robust["wf_windows"])
+                histories = {s: c for s, c in wf_windows[0]["train"].items() if len(c) > 100}
+                ok_windows = all(w["test"] and all(len(c) > 20 for c in w["test"].values())
+                                 for w in wf_windows)
+                if not histories or not ok_windows:
+                    raise RuntimeError("Zu wenig Daten für Rolling Walk-Forward – "
+                                       "Zeitraum erhöhen oder weniger Fenster wählen")
+                test_days = (float(days) - train_days) / robust["wf_windows"]
+            else:
+                histories, test_hist = robustness.split_histories(histories, robust["train_pct"])
+                histories = {s: c for s, c in histories.items() if len(c) > 100}
+                test_hist = {s: c for s, c in (test_hist or {}).items() if len(c) > 20}
+                if not histories or not test_hist:
+                    raise RuntimeError("Zu wenig Daten für den Walk-Forward-Split – "
+                                       "Zeitraum erhöhen oder Trainings-Anteil anpassen")
+                test_days = float(days) - train_days
 
         # Vorberechnete Indikator-Serien für den schnellen Custom-Pfad
         fs_map = {sym: fast_sim.FastSeries(c) for sym, c in histories.items()}
@@ -703,12 +760,17 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
                   "optimize": opt_flags, "max_capital": cfg.get("max_capital"),
                   "sessions": fixed_sessions or None}
         result["robustness"] = {k: robust[k] for k in
-                                ("wf_enabled", "train_pct", "dd_enabled", "dd_max_pct",
+                                ("wf_enabled", "wf_mode", "wf_windows", "train_pct",
+                                 "dd_enabled", "dd_max_pct",
                                  "ct_enabled", "ct_chunk_days", "ct_max_dev_pct")}
         if robust["wf_enabled"]:
-            result["walk_forward"] = {"train_pct": robust["train_pct"],
+            result["walk_forward"] = {"mode": robust["wf_mode"],
+                                      "train_pct": robust["train_pct"],
                                       "train_days": round(train_days, 1),
                                       "test_days": round(test_days, 1)}
+            if wf_windows:
+                result["walk_forward"]["windows"] = robust["wf_windows"]
+                result["walk_forward"]["ranges"] = [w["range"] for w in wf_windows]
 
         if mode == "params":
             sid = body.get("strategy_id")
@@ -718,7 +780,7 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
 
             def prog(done, total, phase):
                 job["progress"] = 10 + round(done / max(total, 1) * 89)
-                job["phase"] = phase
+                job["phase"] = wf_prefix + phase
 
             baseline, best, top = await _optimize_params(
                 job, strategy, histories, settings, cfg, objective, min_trades,
@@ -750,7 +812,7 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
 
             def prog_d(done, total, phase):
                 job["progress"] = 10 + round(done / max(total, 1) * (span_end - 10))
-                job["phase"] = phase
+                job["phase"] = wf_prefix + phase
 
             definition, best_m, best_sc, steps = await _discover(
                 job, histories, settings, cfg, objective, min_trades,
@@ -763,7 +825,7 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
 
                 def prog_r(done, total, phase, _s=span_end, _e=refine_end):
                     job["progress"] = _s + round(done / max(total, 1) * (_e - _s))
-                    job["phase"] = phase
+                    job["phase"] = wf_prefix + phase
 
                 definition, best_m, refine_log = await _refine(
                     job, definition, best_sc, best_m, histories, settings, cfg,
@@ -774,7 +836,7 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
             if do_trade and best_m:
                 def prog_t(done, total, phase, _s=refine_end):
                     job["progress"] = _s + round(done / max(total, 1) * (99 - _s))
-                    job["phase"] = phase
+                    job["phase"] = wf_prefix + phase
 
                 best_trade_params, best_m, best_sc = await _optimize_trade_settings(
                     job, definition, best_sc, best_m, histories, settings, cfg,
@@ -797,7 +859,8 @@ async def run_optimizer(job_id: str, body: Dict, registry, settings: Dict,
         try:
             result["top5"] = await _finalize_top5(
                 job, mode, candidates, histories, test_hist, settings, cfg,
-                robust, fs_map, cancelled, strategy_obj, train_days, test_days)
+                robust, fs_map, cancelled, strategy_obj, train_days, test_days,
+                wf_windows)
         except JobCancelled:
             raise
         except Exception as e:  # noqa: BLE001 – Top-5 darf das Ergebnis nie killen

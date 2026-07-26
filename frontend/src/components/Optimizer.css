@@ -273,3 +273,22 @@
   margin-left: 8px;
   font-weight: 600;
 }
+
+/* ---- Rolling Walk-Forward ---- */
+.opt-wf-mode { display: flex; gap: 6px; margin-top: 4px; }
+.opt-wf-windows {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 6px 0 2px;
+}
+.opt-wf-win {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  cursor: help;
+}
+.opt-wf-win.pos { color: #7CFFB2; border-color: rgba(124, 255, 178, 0.35); }
+.opt-wf-win.neg { color: #FF7C7C; border-color: rgba(255, 124, 124, 0.4); }

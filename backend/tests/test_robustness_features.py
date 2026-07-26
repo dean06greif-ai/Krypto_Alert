@@ -227,5 +227,84 @@ class TestFinalizeTop5:
         assert isinstance(e["passed"], bool)
 
 
+# ---------------- Rolling Walk-Forward ----------------
+class TestRollingWalkForward:
+    def test_parse_rolling_config(self):
+        cfg = robustness.parse_config({"walk_forward": {"enabled": True, "mode": "rolling",
+                                                        "windows": 99}})
+        assert cfg["wf_mode"] == "rolling"
+        assert cfg["wf_windows"] == 12  # clamp
+        assert robustness.parse_config({})["wf_mode"] == "single"
+
+    def test_rolling_windows_split(self):
+        candles = synth_candles(1000)
+        wins = robustness.rolling_windows({"BTCUSDT": candles}, 75.0, 4)
+        assert len(wins) == 4
+        train_len = 750
+        test_len = (1000 - 750) // 4  # 62
+        for i, w in enumerate(wins):
+            tr, te = w["train"]["BTCUSDT"], w["test"]["BTCUSDT"]
+            assert len(tr) == train_len
+            assert len(te) == test_len
+            # Fenster gleitet: Start i*test_len, Test direkt nach dem Training
+            assert tr[0]["timestamp"] == candles[i * test_len]["timestamp"]
+            assert tr[-1]["timestamp"] < te[0]["timestamp"]
+            assert w["range"]["train_from"] and w["range"]["test_to"]
+        # Test-Segmente überlappen nicht
+        assert wins[0]["test"]["BTCUSDT"][-1]["timestamp"] < wins[1]["test"]["BTCUSDT"][0]["timestamp"]
+
+    def test_aggregate_rolling(self):
+        evals = [
+            {"wf_score": 2.0, "consistency_pct": 80.0, "test_metrics": {"pnl": 10.0}},
+            {"wf_score": 1.0, "consistency_pct": 60.0, "test_metrics": {"pnl": -5.0}},
+        ]
+        agg = robustness.aggregate_rolling(evals)
+        assert agg["wf_score"] == 1.5
+        assert agg["consistency_pct"] == 70.0
+        assert agg["positive_windows_pct"] == 50.0
+        assert agg["windows"] == 2
+        assert robustness.aggregate_rolling([])["windows"] == 0
+
+    def test_combine_test_metrics(self):
+        combined = robustness.combine_test_metrics([
+            {"trades": 4, "wins": 3, "losses": 1, "pnl": 10.0, "max_drawdown": 2.0, "fees": 0.5},
+            {"trades": 2, "wins": 1, "losses": 1, "pnl": -3.0, "max_drawdown": 5.0, "fees": 0.2},
+        ])
+        assert combined["trades"] == 6
+        assert combined["pnl"] == 7.0
+        assert combined["max_drawdown"] == 5.0  # konservativ: schlechtestes Fenster
+        assert combined["win_rate"] == round(4 / 6 * 100, 1)
+
+    def test_finalize_rolling_integration(self):
+        from services.bitunix_trade import DEFAULT_COIN_CFG
+        from services import fast_sim
+        candles = synth_candles(8000)
+        robust = robustness.parse_config({"walk_forward": {"enabled": True, "mode": "rolling",
+                                                           "windows": 3, "train_pct": 70}})
+        wf_windows = robustness.rolling_windows({"BTCUSDT": candles}, 70.0, 3)
+        train = wf_windows[0]["train"]
+        fs_map = {s: fast_sim.FastSeries(c) for s, c in train.items()}
+        definition = {"name": "T", "indicators": {},
+                      "long_rules": [{"indicator": "rsi", "op": "<", "value": 45}],
+                      "short_rules": [{"indicator": "rsi", "op": ">", "value": 55}]}
+        job = {"phase": ""}
+        cfg = dict(DEFAULT_COIN_CFG)
+
+        async def go():
+            m = opt._evaluate(opt._mk_strategy(definition), train, {}, cfg, fs_map)
+            cand = {"definition": definition, "trade_params": {}, "metrics": m, "score": 1.0}
+            return await opt._finalize_top5(job, "discovery", [cand], train, None,
+                                            {}, cfg, robust, fs_map, None,
+                                            None, 3.9, 0.55, wf_windows)
+        top5 = asyncio.run(go())
+        e = top5[0]
+        assert len(e["wf_windows"]) == 3
+        for w in e["wf_windows"]:
+            assert "test_metrics" in w and "wf_score" in w and "range" in w
+        assert "positive_windows_pct" in e["wf"]
+        assert "test_metrics" in e  # kombinierte Test-Metriken
+        assert "Fenster" in job["phase"] or "Konstanz" in job["phase"] or job["phase"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-n", "0"])
