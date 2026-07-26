@@ -710,11 +710,24 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
         <div className="ai-chat-area" data-testid="ai-chat-area">
           {(() => {
             // Neueste angepinnte Summary ganz oben anzeigen, aus dem Haupt-Stream entfernen.
+            // Dedupe (defensiv):
+            //  (1) exakt-selbe id aus dem Stream entfernen
+            //  (2) andere gepinnte Summaries desselben Tages entfernen
+            //      – so bleibt garantiert genau eine sichtbare Tages-Zusammenfassung
+            //        oben, selbst falls das Backend die Summary sowohl über die
+            //        garantierte Pin-Rückgabe als auch im normalen Fenster liefert.
             const pinnedSummary = [...messages]
               .filter(m => m.role === 'summary' && m.pinned)
               .sort((a, b) => new Date(b.ts) - new Date(a.ts))[0];
             const pinnedId = pinnedSummary?.id;
-            const streamMessages = pinnedId ? messages.filter(m => m.id !== pinnedId) : messages;
+            const pinnedDay = pinnedSummary?.day;
+            const streamMessages = pinnedSummary
+              ? messages.filter(m => {
+                  if (m.id && m.id === pinnedId) return false;
+                  if (m.role === 'summary' && m.pinned && m.day && m.day === pinnedDay) return false;
+                  return true;
+                })
+              : messages;
             return (
               <>
                 {pinnedSummary && (
