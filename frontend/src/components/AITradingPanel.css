@@ -217,12 +217,10 @@
 
 /* Tages-Zusammenfassung â€“ markiert & oben angepinnt */
 .ai-summary-pin-wrap {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  margin: -16px -18px 4px;
-  padding: 12px 18px 4px;
-  background: linear-gradient(180deg, #10131b 78%, rgba(16, 19, 27, 0) 100%);
+  position: static;
+  margin: 0 0 4px;
+  padding: 0;
+  background: none;
 }
 .ai-msg-summary {
   align-self: stretch;
