@@ -365,10 +365,30 @@
   border: 1px solid rgba(122, 90, 248, 0.25);
   border-radius: 10px;
   font-size: 12.5px;
+  /* Lernen-Tab: füllt den gesamten verfügbaren Panel-Bereich & scrollt */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(122, 90, 248, 0.5) transparent;
 }
+.ai-learn-panel::-webkit-scrollbar { width: 8px; }
+.ai-learn-panel::-webkit-scrollbar-track { background: transparent; }
+.ai-learn-panel::-webkit-scrollbar-thumb {
+  background: rgba(122, 90, 248, 0.4);
+  border-radius: 999px;
+}
+.ai-learn-panel::-webkit-scrollbar-thumb:hover { background: rgba(122, 90, 248, 0.65); }
+/* Kopfbereich (Titel + „Jetzt lernen") bleibt beim Scrollen oben stehen */
 .ai-learn-head {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  margin-bottom: 8px;
+  position: sticky;
+  top: -12px;
+  z-index: 2;
+  margin: -12px -14px 8px;
+  padding: 12px 14px 8px;
+  background: #171226;
+  border-bottom: 1px solid rgba(122, 90, 248, 0.22);
 }
 .ai-learn-title { display: flex; align-items: center; gap: 6px; font-weight: 700; letter-spacing: 0.3px; }
 .ai-learn-stats {
