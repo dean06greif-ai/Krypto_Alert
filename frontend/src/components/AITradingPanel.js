@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Robot, PaperPlaneRight, X, Trash, ArrowsClockwise, Lightning, CaretDown, CaretUp, Newspaper, PushPin, Brain, GraduationCap, CheckCircle, XCircle, Sliders } from '@phosphor-icons/react';
+import { Robot, PaperPlaneRight, X, Trash, ArrowsClockwise, Lightning, CaretDown, CaretUp, Newspaper, PushPin, Brain, GraduationCap, CheckCircle, XCircle, Sliders, Coins } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import { authHeaders } from '../auth';
 import './AITradingPanel.css';
@@ -67,15 +67,35 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
   const [insights, setInsights] = useState(null);
   const [showLearn, setShowLearn] = useState(false);
   const [learning, setLearning] = useState(false);
-  // "KI-Chat Fokus"-Bereich ein-/ausklappbar (Standard: ausgeklappt, persistiert in localStorage)
+  // "Coin-Fokus"-Bereich ein-/ausklappbar (Standard: eingeklappt, persistiert in localStorage)
   const [showChatFocus, setShowChatFocus] = useState(() => {
-    try { return localStorage.getItem(CHAT_FOCUS_STORE_KEY) !== '0'; } catch (e) { return true; }
+    try { return localStorage.getItem(CHAT_FOCUS_STORE_KEY) === '1'; } catch (e) { return false; }
   });
 
+  // Entweder-Oder: beim Öffnen eines Panels werden die anderen geschlossen.
+  const closeChatFocus = () => {
+    setShowChatFocus(false);
+    try { localStorage.setItem(CHAT_FOCUS_STORE_KEY, '0'); } catch (e) { /* ignore */ }
+  };
   const toggleChatFocus = () => {
     setShowChatFocus(prev => {
       const next = !prev;
       try { localStorage.setItem(CHAT_FOCUS_STORE_KEY, next ? '1' : '0'); } catch (e) { /* ignore */ }
+      if (next) { setShowLearn(false); setShowSetup(false); }
+      return next;
+    });
+  };
+  const toggleLearn = () => {
+    setShowLearn(prev => {
+      const next = !prev;
+      if (next) { loadInsights(); setShowSetup(false); closeChatFocus(); }
+      return next;
+    });
+  };
+  const toggleSetup = () => {
+    setShowSetup(prev => {
+      const next = !prev;
+      if (next) { setShowLearn(false); closeChatFocus(); }
       return next;
     });
   };
@@ -104,6 +124,8 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
     [selectedCoin],
   );
   const allSelected = chatCoins.length >= ALL_COINS.length;
+  // Kompakte Anzeige der aktuellen Auswahl (für Button-Text & Tooltip)
+  const focusSummary = allSelected ? 'alle' : chatCoins.map(coinLabel).join(', ');
 
   // Beim Öffnen / Coin-Wechsel: gespeicherte Auswahl je Coin-Ansicht laden,
   // sonst standardmäßig nur den aktuell geöffneten Coin vorwählen.
@@ -490,12 +512,21 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
           </span>
           <button
             className={`ai-setup-toggle ${showLearn ? 'active' : ''}`}
-            onClick={() => { setShowLearn(s => !s); if (!showLearn) loadInsights(); }}
+            onClick={toggleLearn}
             data-testid="ai-learn-toggle"
           >
             <Brain size={12} weight="bold" /> Lernen{status?.learning?.lessons_count ? ` (${status.learning.lessons_count})` : ''}
           </button>
-          <button className="ai-setup-toggle" onClick={() => setShowSetup(s => !s)} data-testid="ai-setup-toggle">
+          <button
+            className={`ai-setup-toggle ai-focus-toggle ${showChatFocus ? 'active' : ''}`}
+            onClick={toggleChatFocus}
+            title={`KI-Chat Fokus: ${allSelected ? 'alle Coins' : chatCoins.map(coinLabel).join(', ')}`}
+            data-testid="ai-chat-focus-toggle"
+          >
+            <Coins size={12} weight="bold" />
+            <span className="ai-focus-toggle-label">Coin-Fokus: {focusSummary}</span>
+          </button>
+          <button className="ai-setup-toggle" onClick={toggleSetup} data-testid="ai-setup-toggle">
             Setup {showSetup ? <CaretUp size={12} /> : <CaretDown size={12} />}
           </button>
         </div>
@@ -645,66 +676,53 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
           </div>
         )}
 
-        {/* Decision chips + KI-Chat Fokus (anklickbar: Coin für den Chat auswählen) */}
-        <div className={`ai-decisions-wrap${showChatFocus ? '' : ' collapsed'}`} data-testid="ai-coin-selector">
-          <div
-            className="ai-decisions-head ai-chat-focus-head"
-            role="button"
-            tabIndex={0}
-            aria-expanded={showChatFocus}
-            onClick={toggleChatFocus}
-            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleChatFocus(); } }}
-            title={showChatFocus ? 'KI-Chat Fokus einklappen' : 'KI-Chat Fokus ausklappen'}
-            data-testid="ai-chat-focus-toggle"
-          >
-            <span className="ai-coin-selector-title">
-              KI-Chat Fokus{allSelected ? ' · alle Coins' : ` · ${chatCoins.map(coinLabel).join(', ')}`}
-            </span>
-            <span className="ai-decisions-head-right">
+        {/* Coin-Fokus – Coin-Auswahl für den Chat, nur bei geöffnetem Toggle sichtbar
+            (Toggle sitzt in der Status-Row neben „Lernen"). Eingeklappt = 0px, verdeckt nichts. */}
+        {showChatFocus && (
+          <div className="ai-decisions-wrap" data-testid="ai-coin-selector">
+            <div className="ai-chat-focus-bar">
+              <span className="ai-coin-selector-title">
+                KI-Chat Fokus{allSelected ? ' · alle Coins' : ` · ${chatCoins.map(coinLabel).join(', ')}`}
+              </span>
               <button
                 className={`ai-coin-all-toggle ${allSelected ? 'on' : ''}`}
-                onClick={e => { e.stopPropagation(); toggleAll(); }}
+                onClick={toggleAll}
                 data-testid="ai-coin-select-all"
               >
                 {allSelected ? 'Nur aktueller Coin' : 'Alle Coins'}
               </button>
-              <span className="ai-chat-focus-caret" aria-hidden="true">
-                {showChatFocus ? <CaretUp size={13} weight="bold" /> : <CaretDown size={13} weight="bold" />}
-              </span>
-            </span>
+            </div>
+            <div
+              className="ai-decisions-strip"
+              data-testid="ai-decisions-strip"
+              ref={stripRef}
+              onMouseDown={onStripMouseDown}
+              onMouseMove={onStripMouseMove}
+              onMouseUp={endStripDrag}
+              onMouseLeave={endStripDrag}
+            >
+              {orderedCoins.map(coin => {
+                const d = decisionFor(coin);
+                const active = allSelected || chatCoins.includes(coin);
+                const isCurrent = coin === selectedCoin;
+                return (
+                  <button
+                    key={coin}
+                    className={`ai-chip ${actionClass(d?.action)} ${active ? 'selected' : ''} ${isCurrent ? 'current' : ''}`}
+                    onClick={() => { if (!stripDrag.current.moved) toggleCoin(coin); }}
+                    title={d?.reasoning || (isCurrent ? 'Aktuell geöffneter Coin' : 'Anklicken, um den Coin für den KI-Chat auszuwählen')}
+                    data-testid={`ai-coin-chip-${coin}`}
+                  >
+                    <span className="ai-chip-sym">{coinLabel(coin)}</span>
+                    <span className="ai-chip-action">{d?.action || '–'}</span>
+                    {d && <span className="ai-chip-conf">{d?.confidence ?? 0}%</span>}
+                    {d?.signaled && <span className="ai-dec-signaled" title="Signal ausgelöst"><Lightning size={11} weight="fill" /></span>}
+                  </button>
+                );
+              })}
+            </div>
           </div>
-          <div className={`ai-chat-focus-body${showChatFocus ? '' : ' closed'}`} aria-hidden={!showChatFocus}>
-          <div
-            className="ai-decisions-strip"
-            data-testid="ai-decisions-strip"
-            ref={stripRef}
-            onMouseDown={onStripMouseDown}
-            onMouseMove={onStripMouseMove}
-            onMouseUp={endStripDrag}
-            onMouseLeave={endStripDrag}
-          >
-            {orderedCoins.map(coin => {
-              const d = decisionFor(coin);
-              const active = allSelected || chatCoins.includes(coin);
-              const isCurrent = coin === selectedCoin;
-              return (
-                <button
-                  key={coin}
-                  className={`ai-chip ${actionClass(d?.action)} ${active ? 'selected' : ''} ${isCurrent ? 'current' : ''}`}
-                  onClick={() => { if (!stripDrag.current.moved) toggleCoin(coin); }}
-                  title={d?.reasoning || (isCurrent ? 'Aktuell geöffneter Coin' : 'Anklicken, um den Coin für den KI-Chat auszuwählen')}
-                  data-testid={`ai-coin-chip-${coin}`}
-                >
-                  <span className="ai-chip-sym">{coinLabel(coin)}</span>
-                  <span className="ai-chip-action">{d?.action || '–'}</span>
-                  {d && <span className="ai-chip-conf">{d?.confidence ?? 0}%</span>}
-                  {d?.signaled && <span className="ai-dec-signaled" title="Signal ausgelöst"><Lightning size={11} weight="fill" /></span>}
-                </button>
-              );
-            })}
-          </div>
-          </div>
-        </div>
+        )}
 
         {/* Chat */}
         <div className="ai-chat-area" data-testid="ai-chat-area">
