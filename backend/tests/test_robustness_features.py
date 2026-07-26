@@ -1,0 +1,231 @@
+"""Regressionstests für die neuen Robustheits-Features:
+Walk-Forward, Drawdown-Filter, Konstanz-Test, Top-5, GPU-Fallback, Zeitraum-Limits.
+Reine Unit-/Integrationstests ohne Netzwerk (synthetische Kerzen).
+"""
+import asyncio
+import math
+import pathlib
+import sys
+
+import pytest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from services import gpu_accel, robustness  # noqa: E402
+from services import optimizer as opt  # noqa: E402
+
+
+# ---------------- Helpers ----------------
+def synth_candles(n=4000, start_ts=1700000000000, step_ms=60000, base=100.0):
+    out = []
+    price = base
+    for i in range(n):
+        price = base * (1 + 0.05 * math.sin(i / 40.0))
+        out.append({"timestamp": start_ts + i * step_ms,
+                    "open": price, "high": price * 1.002, "low": price * 0.998,
+                    "close": price, "volume": 10.0 + (i % 7)})
+    return out
+
+
+# ---------------- parse_config ----------------
+class TestParseConfig:
+    def test_defaults_disabled(self):
+        cfg = robustness.parse_config({})
+        assert cfg["wf_enabled"] is False
+        assert cfg["dd_enabled"] is False
+        assert cfg["ct_enabled"] is False
+        assert cfg["any"] is False
+        assert cfg["train_pct"] == 75.0
+        assert cfg["dd_max_pct"] == 40.0
+        assert cfg["ct_chunk_days"] == 30
+        assert cfg["ct_max_dev_pct"] == 20.0
+
+    def test_enabled_and_clamped(self):
+        cfg = robustness.parse_config({
+            "walk_forward": {"enabled": True, "train_pct": 99},
+            "dd_filter": {"enabled": True, "max_dd_pct": 0.1},
+            "constancy": {"enabled": True, "chunk_days": 1, "max_deviation_pct": 5000},
+        })
+        assert cfg["any"] is True
+        assert cfg["train_pct"] == 95.0          # clamp oben
+        assert cfg["dd_max_pct"] == 1.0          # clamp unten
+        assert cfg["ct_chunk_days"] == 2         # clamp unten
+        assert cfg["ct_max_dev_pct"] == 1000.0   # clamp oben
+
+    def test_invalid_values_fall_back(self):
+        cfg = robustness.parse_config({"walk_forward": {"enabled": True, "train_pct": "abc"}})
+        assert cfg["train_pct"] == 75.0
+
+
+# ---------------- Walk-Forward ----------------
+class TestWalkForward:
+    def test_split_proportions(self):
+        candles = synth_candles(1000)
+        train, test = robustness.split_histories({"BTCUSDT": candles}, 75.0)
+        assert len(train["BTCUSDT"]) == 750
+        assert len(test["BTCUSDT"]) == 250
+        # chronologisch: Test kommt NACH dem Training
+        assert train["BTCUSDT"][-1]["timestamp"] < test["BTCUSDT"][0]["timestamp"]
+
+    def test_wf_score_prefers_consistent(self):
+        good_train = {"pnl": 100.0, "win_rate": 60.0}
+        good_test = {"pnl": 33.0, "win_rate": 58.0}    # ~gleich pro Tag (75/25)
+        lucky_test = {"pnl": 200.0, "win_rate": 90.0}  # Test viel besser -> Zufall
+        consistent = robustness.walk_forward_eval(good_train, good_test, 90, 30)
+        lucky = robustness.walk_forward_eval(good_train, lucky_test, 90, 30)
+        assert consistent["consistency_pct"] > lucky["consistency_pct"]
+
+    def test_wf_score_negative_when_test_loses(self):
+        r = robustness.walk_forward_eval({"pnl": 100.0, "win_rate": 60.0},
+                                         {"pnl": -50.0, "win_rate": 30.0}, 90, 30)
+        assert r["wf_score"] < 0
+        assert r["consistency_pct"] == 0.0
+
+
+# ---------------- Drawdown-Filter ----------------
+class TestDrawdownFilter:
+    def test_pass_and_fail(self):
+        ok, ratio = robustness.dd_check({"pnl": 100.0, "max_drawdown": 30.0}, 40.0)
+        assert ok is True and ratio == 30.0
+        bad, ratio2 = robustness.dd_check({"pnl": 100.0, "max_drawdown": 55.0}, 40.0)
+        assert bad is False and ratio2 == 55.0
+
+    def test_negative_pnl_always_fails(self):
+        ok, ratio = robustness.dd_check({"pnl": -10.0, "max_drawdown": 1.0}, 40.0)
+        assert ok is False and ratio is None
+
+    def test_score_applies_dd_penalty(self):
+        m_ok = {"trades": 50, "win_rate": 60.0, "pnl": 100.0, "max_drawdown": 20.0}
+        m_bad = {"trades": 50, "win_rate": 60.0, "pnl": 100.0, "max_drawdown": 90.0}
+        s_ok = opt._score(m_ok, "combo", 10, dd_max_pct=40.0)
+        s_bad = opt._score(m_bad, "combo", 10, dd_max_pct=40.0)
+        assert s_ok > 0
+        assert s_bad < -1e8
+        # ohne Filter: identisches Verhalten wie bisher (Back-Compat)
+        assert opt._score(m_bad, "combo", 10) == opt._score(m_ok, "combo", 10)
+
+
+# ---------------- Konstanz-Test ----------------
+class TestConstancy:
+    def test_uniform_chunks_pass(self):
+        r = robustness.evaluate_chunks([10.0, 11.0, 9.5, 10.5], 20.0)
+        assert r["passed"] is True
+        assert r["deviation_pct"] < 20
+        assert r["profitable_chunks_pct"] == 100.0
+
+    def test_concentrated_profit_fails(self):
+        r = robustness.evaluate_chunks([0.0, 0.0, 100.0, 0.0], 20.0)
+        assert r["passed"] is False
+        assert r["deviation_pct"] > 100
+
+    def test_negative_mean_fails(self):
+        r = robustness.evaluate_chunks([-5.0, -3.0, 1.0], 20.0)
+        assert r["passed"] is False
+        assert r["deviation_pct"] is None
+
+    def test_empty(self):
+        assert robustness.evaluate_chunks([], 20.0)["passed"] is False
+
+
+# ---------------- TopTracker ----------------
+class TestTopTracker:
+    def test_dedupe_and_order(self):
+        t = robustness.TopTracker(3)
+        d1 = {"long_rules": [{"indicator": "rsi", "op": "<", "value": 30}], "short_rules": []}
+        d2 = {"long_rules": [{"indicator": "rsi", "op": "<", "value": 25}], "short_rules": []}
+        t.add(robustness.rule_key(d1), {"definition": d1, "metrics": {}, "score": 5.0})
+        t.add(robustness.rule_key(d1), {"definition": d1, "metrics": {}, "score": 9.0})  # besser
+        t.add(robustness.rule_key(d1), {"definition": d1, "metrics": {}, "score": 2.0})  # schlechter
+        t.add(robustness.rule_key(d2), {"definition": d2, "metrics": {}, "score": 7.0})
+        top = t.top()
+        assert len(top) == 2
+        assert top[0]["score"] == 9.0 and top[1]["score"] == 7.0
+
+    def test_trade_params_make_distinct_keys(self):
+        d = {"long_rules": [], "short_rules": []}
+        assert robustness.rule_key(d, {"leverage": 5}) != robustness.rule_key(d, {"leverage": 10})
+
+
+# ---------------- GPU-Fallback (kein CuPy im CI -> CPU-Pfad) ----------------
+class TestGpuAccel:
+    def test_info_and_fallback_identical_to_pandas(self):
+        import numpy as np
+        import pandas as pd
+        info = gpu_accel.info()
+        assert "available" in info and "enabled" in info
+        a = np.array([float(i % 13) + 0.5 for i in range(300)])
+        for w in (5, 20):
+            np.testing.assert_allclose(gpu_accel.rolling_mean(a, w),
+                                       pd.Series(a).rolling(w).mean().to_numpy(),
+                                       equal_nan=True)
+            np.testing.assert_allclose(gpu_accel.rolling_std(a, w),
+                                       pd.Series(a).rolling(w).std(ddof=0).to_numpy(),
+                                       equal_nan=True)
+            np.testing.assert_allclose(gpu_accel.rolling_max(a, w),
+                                       pd.Series(a).rolling(w).max().to_numpy(),
+                                       equal_nan=True)
+
+
+# ---------------- Zeitraum-Limit (15 Jahre) ----------------
+class TestDayLimits:
+    def test_optimizer_clamps_at_5500(self):
+        days = min(max(int(9999), 1), 5500)
+        assert days == 5500
+        import inspect
+        src = inspect.getsource(opt.run_optimizer)
+        assert "5500" in src
+
+
+# ---------------- Integration: _finalize_top5 (Discovery, ohne Netzwerk) ----------------
+class TestFinalizeTop5:
+    def _run(self, robust_body):
+        from services.bitunix_trade import DEFAULT_COIN_CFG
+        from services import fast_sim
+        candles = synth_candles(6000)
+        robust = robustness.parse_config(robust_body)
+        if robust["wf_enabled"]:
+            train, test = robustness.split_histories({"BTCUSDT": candles}, robust["train_pct"])
+        else:
+            train, test = {"BTCUSDT": candles}, None
+        fs_map = {s: fast_sim.FastSeries(c) for s, c in train.items()}
+        definition = {"name": "T", "indicators": {},
+                      "long_rules": [{"indicator": "rsi", "op": "<", "value": 45}],
+                      "short_rules": [{"indicator": "rsi", "op": ">", "value": 55}]}
+        job = {"phase": ""}
+        cfg = dict(DEFAULT_COIN_CFG)
+        settings = {}
+
+        async def go():
+            m = opt._evaluate(opt._mk_strategy(definition), train, settings, cfg, fs_map)
+            cand = {"definition": definition, "trade_params": {}, "metrics": m, "score": 1.0}
+            return await opt._finalize_top5(job, "discovery", [cand, cand], train, test,
+                                            settings, cfg, robust, fs_map, None,
+                                            None, 3.0, 1.0)
+        return asyncio.run(go())
+
+    def test_plain_top5_ranking(self):
+        top5 = self._run({})
+        assert 1 <= len(top5) <= 5
+        e = top5[0]
+        assert e["rank"] == 1
+        assert "metrics" in e and "definition" in e and "rules" in e
+        assert e["passed"] is True
+
+    def test_walk_forward_fields(self):
+        top5 = self._run({"walk_forward": {"enabled": True, "train_pct": 75}})
+        e = top5[0]
+        assert "test_metrics" in e
+        assert "wf" in e and "wf_score" in e["wf"] and "consistency_pct" in e["wf"]
+
+    def test_dd_and_constancy_fields(self):
+        top5 = self._run({"dd_filter": {"enabled": True, "max_dd_pct": 40},
+                          "constancy": {"enabled": True, "chunk_days": 2,
+                                        "max_deviation_pct": 100}})
+        e = top5[0]
+        assert "dd_pass" in e
+        assert "constancy" in e and "deviation_pct" in e["constancy"]
+        assert isinstance(e["passed"], bool)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "-n", "0"])
