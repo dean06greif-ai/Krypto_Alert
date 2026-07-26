@@ -623,6 +623,19 @@ async def _finalize_top5(job, mode, candidates, train_hist, test_hist, settings,
                 st, train_hist, s_eff, c_eff, robust["ct_chunk_days"], fs_map, should_stop)
             entry["constancy"] = robustness.evaluate_chunks(pnls, robust["ct_max_dev_pct"])
             passed = passed and entry["constancy"]["passed"]
+        if len(train_hist) > 1:
+            # Multi-Coin-Check: funktioniert der Kandidat auf jedem Coin einzeln?
+            job["phase"] = f"Multi-Coin-Check: Kandidat {i + 1}/{n}"
+            per = {}
+            for sym, candles in train_hist.items():
+                sym_fs = {sym: fs_map[sym]} if fs_map and sym in fs_map else None
+                m_s = (await _evaluate_batch(job, None, [(st, s_eff, c_eff)],
+                                             {sym: candles}, sym_fs, should_stop))[0]
+                per[sym] = {"pnl": m_s.get("pnl"), "trades": m_s.get("trades"),
+                            "win_rate": m_s.get("win_rate")}
+            entry["per_symbol"] = per
+            entry["positive_symbols_pct"] = round(
+                sum(1 for v in per.values() if (v.get("pnl") or 0) > 0) / len(per) * 100, 1)
         entry["passed"] = passed
         out.append(entry)
     if robust["wf_enabled"]:

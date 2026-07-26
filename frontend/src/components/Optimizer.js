@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Play, MagicWand, Trophy, CheckCircle, FloppyDisk, ChartLine, Cloud, Desktop, Gear } from '@phosphor-icons/react';
+import { X, Play, MagicWand, Trophy, CheckCircle, FloppyDisk, ChartLine, Cloud, Desktop, Gear, ClockCounterClockwise } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import { authHeaders, isAdmin } from '../auth';
 import SafeOverlay from './SafeOverlay';
@@ -118,6 +118,9 @@ export default function Optimizer({ onClose }) {
   const [ctChunkDays, setCtChunkDays] = useState(saved.ctChunkDays ?? 30);
   const [ctMaxDev, setCtMaxDev] = useState(saved.ctMaxDev ?? 20);
   const [selTop, setSelTop] = useState(0);
+  // ---- Verlauf (Robustheit über alle Läufe) ----
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyRows, setHistoryRows] = useState(null);
   const [lwOnline, setLwOnline] = useState(false);
   const [showLW, setShowLW] = useState(false);
   const pollRef = useRef(null);
@@ -394,6 +397,33 @@ export default function Optimizer({ onClose }) {
   // Top-5-Auswahl: der ausgewählte Kandidat wird beim Übernehmen/Speichern verwendet
   const top5 = result?.top5 || [];
   const selEntry = top5.length ? top5[Math.min(selTop, top5.length - 1)] : null;
+
+  const toggleHistory = async () => {
+    const next = !showHistory;
+    setShowHistory(next);
+    if (next) {
+      try {
+        const r = await fetch(`${API_URL}/api/optimizer/history?limit=30`);
+        const d = await r.json();
+        setHistoryRows(d.history || []);
+      } catch { setHistoryRows([]); }
+    }
+  };
+
+  const loadRun = async (id) => {
+    try {
+      const r = await fetch(`${API_URL}/api/optimizer/result/${id}`);
+      if (!r.ok) { toast.error('Ergebnis nicht gefunden'); return; }
+      const d = await r.json();
+      setResult(d.result);
+      setEquityJobId(id);
+      setEquityPoints(null);
+      setShowEquity(false);
+      setApplied(false);
+      setSelTop(0);
+      toast.success('Lauf aus dem Verlauf geladen');
+    } catch { toast.error('Laden fehlgeschlagen'); }
+  };
   const metricsRow = (m) => m ? (
     <>
       <span>{m.trades} Trades</span>
@@ -677,6 +707,64 @@ export default function Optimizer({ onClose }) {
         <button className="opt-run" onClick={run} disabled={running} data-testid="opt-run">
           <Play size={15} weight="fill" /> {running ? 'Optimiert...' : 'Optimierung starten'}
         </button>
+        <button className={`opt-chip opt-history-btn ${showHistory ? 'on' : ''}`} onClick={toggleHistory}
+          data-testid="opt-history-toggle"
+          title="Alle bisherigen Läufe mit Robustheits-Kennzahlen (WF-Score, Konsistenz, Konstanz) vergleichen und alte Ergebnisse wieder laden">
+          <ClockCounterClockwise size={13} /> Verlauf
+        </button>
+        {showHistory && (
+          <div className="opt-history" data-testid="opt-history">
+            <div className="opt-section-title">
+              <ClockCounterClockwise size={14} /> VERLAUF – Robustheit über alle Läufe (klicken zum Laden)
+            </div>
+            {historyRows === null && <div className="opt-small">Lade Verlauf...</div>}
+            {historyRows !== null && historyRows.length === 0 && (
+              <div className="opt-small">Noch keine gespeicherten Läufe.</div>
+            )}
+            {(historyRows || []).length > 0 && (
+              <table className="opt-history-table">
+                <thead>
+                  <tr>
+                    <th>Datum</th><th>Modus</th><th>Strategie</th><th>TF/Tage</th>
+                    <th>PnL</th><th>WR</th><th>WF-Score</th><th>Konsist.</th>
+                    <th>Test-PnL</th><th>DD/PnL</th><th>Konstanz</th><th>Filter</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {historyRows.map((h, hi) => {
+                    const maxWf = Math.max(...historyRows.map(x => Math.abs(x.wf?.wf_score || 0)), 0.01);
+                    const wfv = h.wf?.wf_score;
+                    return (
+                      <tr key={h.id || hi} onClick={() => loadRun(h.id)} data-testid={`opt-history-row-${hi}`}
+                        title={`${(h.symbols || []).join(', ')} · Ziel: ${h.objective || '–'}${h.wf_mode ? ` · WF: ${h.wf_mode}` : ''}`}>
+                        <td>{h.created_at ? new Date(h.created_at).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '–'}</td>
+                        <td>{h.mode || '–'}{h.wf_mode ? ` +WF(${h.wf_mode === 'single' ? 'Split' : h.wf_mode})` : ''}</td>
+                        <td className="opt-hist-name">{h.strategy || (h.rules_n ? `${h.rules_n} Regeln` : '–')}</td>
+                        <td>{h.timeframe || '–'}/{h.days || '–'}</td>
+                        <td className={(h.pnl || 0) > 0 ? 'pos' : 'neg'}>{fmt(h.pnl, 1)}</td>
+                        <td>{fmt(h.win_rate, 0)}%</td>
+                        <td>
+                          {wfv !== undefined && wfv !== null ? (
+                            <span className="opt-hist-wf">
+                              <span className={`opt-hist-bar ${wfv >= 0 ? 'pos' : 'neg'}`}
+                                style={{ width: `${Math.min(Math.abs(wfv) / maxWf * 40, 40)}px` }} />
+                              {fmt(wfv, 2)}
+                            </span>
+                          ) : '–'}
+                        </td>
+                        <td>{h.wf ? `${fmt(h.wf.consistency_pct, 0)}%${h.wf.positive_windows_pct !== undefined ? ` · ${fmt(h.wf.positive_windows_pct, 0)}%F+` : ''}` : '–'}</td>
+                        <td className={(h.test_pnl || 0) > 0 ? 'pos' : (h.test_pnl !== undefined && h.test_pnl !== null ? 'neg' : '')}>{h.test_pnl !== undefined && h.test_pnl !== null ? fmt(h.test_pnl, 1) : '–'}</td>
+                        <td>{h.dd_ratio_pct !== undefined && h.dd_ratio_pct !== null ? `${fmt(h.dd_ratio_pct, 0)}%` : '–'}</td>
+                        <td>{h.constancy_dev !== undefined && h.constancy_dev !== null ? `${fmt(h.constancy_dev, 0)}%` : '–'}</td>
+                        <td>{h.passed === undefined ? '–' : (h.passed ? '✓' : '✗')}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
 
         {running && (
           <div className="opt-progress" data-testid="opt-progress">
@@ -807,6 +895,19 @@ export default function Optimizer({ onClose }) {
                           </span>
                         ))}
                         <span className="opt-small" style={{ alignSelf: 'center' }}>Test-PnL je Fenster (Details per Mouseover)</span>
+                      </div>
+                    )}
+                    {t.per_symbol && (
+                      <div className="opt-wf-windows" data-testid={`opt-per-symbol-${i}`}>
+                        {Object.entries(t.per_symbol).map(([sym, v]) => (
+                          <span key={sym} className={`opt-wf-win ${(v.pnl || 0) > 0 ? 'pos' : 'neg'}`}
+                            title={`${sym}: PnL ${fmt(v.pnl)} · ${v.trades ?? 0} Trades · ${fmt(v.win_rate, 0)}% WR`}>
+                            {sym.replace('USDT', '')}: {fmt(v.pnl, 1)}
+                          </span>
+                        ))}
+                        <span className="opt-small" style={{ alignSelf: 'center' }}>
+                          PnL je Coin · {fmt(t.positive_symbols_pct, 0)}% der Coins positiv
+                        </span>
                       </div>
                     )}
                     <div className="opt-params-list">

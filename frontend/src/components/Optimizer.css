@@ -292,3 +292,50 @@
 }
 .opt-wf-win.pos { color: #7CFFB2; border-color: rgba(124, 255, 178, 0.35); }
 .opt-wf-win.neg { color: #FF7C7C; border-color: rgba(255, 124, 124, 0.4); }
+
+/* ---- Verlauf (Robustheit über Läufe) ---- */
+.opt-history-btn { margin-left: 8px; }
+.opt-history {
+  margin: 10px 0;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+.opt-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10.5px;
+}
+.opt-history-table th {
+  text-align: left;
+  color: #8A8FA3;
+  font-weight: 600;
+  padding: 4px 8px 6px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: #101018;
+}
+.opt-history-table td {
+  padding: 5px 8px 5px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  white-space: nowrap;
+}
+.opt-history-table tbody tr { cursor: pointer; transition: background-color 0.12s; }
+.opt-history-table tbody tr:hover { background: rgba(179, 136, 255, 0.07); }
+.opt-history-table td.pos, .opt-history-table td .pos { color: #7CFFB2; }
+.opt-history-table td.neg, .opt-history-table td .neg { color: #FF7C7C; }
+.opt-hist-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+.opt-hist-wf { display: inline-flex; align-items: center; gap: 5px; }
+.opt-hist-bar {
+  display: inline-block;
+  height: 7px;
+  border-radius: 3px;
+  min-width: 2px;
+}
+.opt-hist-bar.pos { background: #7CFFB2; }
+.opt-hist-bar.neg { background: #FF7C7C; }

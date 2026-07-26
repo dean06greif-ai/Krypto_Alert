@@ -122,6 +122,48 @@ async def optimizer_results(limit: int = 5):
     return {"results": [_clean(r) for r in rows]}
 
 
+@router.get("/api/optimizer/history")
+async def optimizer_history(limit: int = 30):
+    """Kompakter Verlauf aller Optimizer-Läufe inkl. Robustheits-Kennzahlen
+    (WF-Score, Konsistenz, Konstanz, DD/PnL) – für die Verlaufs-Ansicht."""
+    limit = min(max(limit, 1), 100)
+    rows = await state.db.optimizer_runs.find().sort("created_at", -1).limit(limit).to_list(limit)
+    out = []
+    for r in rows:
+        res = r.get("result") or {}
+        top = res.get("top5") or []
+        best = top[0] if top else {}
+        m = best.get("metrics") or res.get("metrics") or (res.get("best") or {}).get("metrics") or {}
+        d = res.get("definition") or {}
+        out.append({
+            "id": r.get("id"), "created_at": r.get("created_at"),
+            "mode": res.get("mode"), "days": res.get("days"),
+            "timeframe": res.get("timeframe"), "symbols": res.get("symbols") or [],
+            "objective": res.get("objective"),
+            "strategy": res.get("strategy_name") or d.get("name"),
+            "rules_n": len(d.get("long_rules") or []) + len(d.get("short_rules") or []),
+            "pnl": m.get("pnl"), "win_rate": m.get("win_rate"),
+            "trades": m.get("trades"), "max_drawdown": m.get("max_drawdown"),
+            "wf_mode": (res.get("walk_forward") or {}).get("mode"),
+            "wf": best.get("wf"),
+            "test_pnl": (best.get("test_metrics") or {}).get("pnl"),
+            "dd_ratio_pct": best.get("dd_ratio_pct"),
+            "constancy_dev": (best.get("constancy") or {}).get("deviation_pct"),
+            "passed": best.get("passed"),
+            "top5_n": len(top),
+        })
+    return {"history": out}
+
+
+@router.get("/api/optimizer/result/{job_id}")
+async def optimizer_result_by_id(job_id: str):
+    """Vollständiges Ergebnis eines früheren Laufs (für 'Verlauf -> Lauf laden')."""
+    res = await _load_optimizer_result(job_id)
+    if not res:
+        raise HTTPException(status_code=404, detail="Ergebnis nicht gefunden")
+    return {"result": res}
+
+
 async def _load_optimizer_result(job_id: str) -> Optional[Dict]:
     """Best-Ergebnis eines Optimizer-Laufs: erst RAM-Cache, dann DB."""
     job = opt.JOBS.get(job_id)

@@ -62,6 +62,13 @@ sehr customizable. Konkret gefordert:
       Test-Segmente identisch zum Rolling (gleiche OOS-Abdeckung), zeitnormierte Bewertung
       berücksichtigt die wachsende Trainingslänge. UI: 3. Umschalt-Button (opt-wf-mode-anchored),
       eigene Split-Info + Ergebnis-Tag. Phase: "Anchored Walk-Forward: Kandidat i/n · Fenster w/W".
+- [x] **WF-Historie / Verlauf** (26.07.2026, 4. Session): GET /api/optimizer/history (kompakte
+      Robustheits-Kennzahlen je Lauf) + GET /api/optimizer/result/{job_id} (alten Lauf laden).
+      UI: "Verlauf"-Button (opt-history-toggle) neben Start -> Tabelle (opt-history-row-{i}) mit Datum,
+      Modus+WF-Variante, PnL, WR, WF-Score (Farbbalken), Konsistenz, Test-PnL, DD/PnL, Konstanz, Filter;
+      Klick laedt den kompletten alten Lauf inkl. Top-5 in die Ansicht.
+- [x] **Multi-Coin-Check** (26.07.2026, 4. Session): Bei >1 Coin wird jeder Top-5-Kandidat je Coin einzeln
+      bewertet (entry.per_symbol + positive_symbols_pct); UI zeigt PnL-je-Coin-Chips (opt-per-symbol-{i}).
 - [x] **Phasen-Transparenz** (2. Session): Bei aktivem WF sind alle Such-Phasen mit "Training · " geprefixt;
       Finalize zeigt "Walk-Forward-Test: Kandidat i/n auf X Tagen unbekannter Testdaten",
       "Rolling Walk-Forward: Kandidat i/n · Fenster w/W" und "Konstanz-Test: Kandidat i/n (Xd-Abschnitte)".
@@ -83,6 +90,14 @@ sehr customizable. Konkret gefordert:
 ## Backlog / Nächste Schritte
 - P1: Rolling Walk-Forward (mehrere Train/Test-Fenster statt einem Split) als Erweiterung.
 - P1: Top-5 auch für lokalen Worker-Pfad end-to-end mit echtem Worker verifizieren (Code identisch, Worker nutzt gleiche services/).
-- P2: WF-/Konstanz-Ergebnisse in Optimizer-Historie (optimizer_runs) visualisieren (Verlauf über mehrere Läufe).
+- [x] ~~WF-/Konstanz-Verlauf visualisieren~~ (erledigt 26.07.2026, 4. Session)
 - P2: GPU-Beschleunigung für Batch-Regelauswertung (viele Kandidaten gleichzeitig auf GPU) evaluieren.
 - P2: Kosmetik: <option>-Warnung beheben; localworker/settings-Format vereinheitlichen.
+
+## Vorgeschlagene weitere Robustheits-Features (noch offen, User gefragt 26.07.)
+- P1: Monte-Carlo-Test (Trade-Reihenfolge mischen -> DD-Verteilung/Konfidenz statt Einzelwert)
+- P1: Fee-/Slippage-Stresstest (Kandidat muss auch mit 1.5-2x Kosten profitabel bleiben)
+- P1: Parameter-Stabilität (Nachbarschafts-Check: +/-10% auf Schwellen darf Ergebnis nicht kippen)
+- P2: Regime-Aufschlüsselung (Performance getrennt nach Bull/Bär/Seitwärts ausweisen)
+- P2: Seed für Random Search (reproduzierbare Läufe)
+- P2: Datenlücken-Check bei sehr langen Zeiträumen (10-15 Jahre)
