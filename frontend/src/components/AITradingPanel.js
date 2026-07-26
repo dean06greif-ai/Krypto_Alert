@@ -100,6 +100,8 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
     });
   };
   const chatEndRef = useRef(null);
+  const chatAreaRef = useRef(null);
+  const atBottomRef = useRef(true);
   const streamingRef = useRef(false);
   const stripRef = useRef(null);
   const stripDrag = useRef({ active: false, startX: 0, scrollLeft: 0, moved: false });
@@ -195,8 +197,19 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
     return () => clearInterval(iv);
   }, [loadStatus, loadHistory, loadProposals, loadInsights]);
 
+  // Nur automatisch ans Ende scrollen, wenn der Nutzer ohnehin (fast) unten ist.
+  // Scrollt der Nutzer nach oben, um zu lesen, bleibt die Position erhalten –
+  // auch wenn das 12s-Polling neue Nachrichten nachlädt.
+  const onChatScroll = () => {
+    const el = chatAreaRef.current;
+    if (!el) return;
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  };
+
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (atBottomRef.current) {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [messages, streamText]);
 
   const cfg = status?.config || {};
@@ -732,7 +745,7 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
         )}
 
         {/* Chat */}
-        <div className="ai-chat-area" data-testid="ai-chat-area">
+        <div className="ai-chat-area" data-testid="ai-chat-area" ref={chatAreaRef} onScroll={onChatScroll}>
           {(() => {
             // Neueste angepinnte Summary ganz oben anzeigen, aus dem Haupt-Stream entfernen.
             // Dedupe (defensiv):
