@@ -304,6 +304,26 @@
   background: rgba(0, 229, 160, 0.12); border-color: rgba(0, 229, 160, 0.5); color: #00e5a0;
 }
 
+/* Einklappbarer "KI-Chat Fokus"-Bereich */
+.ai-chat-focus-head { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.ai-chat-focus-head:focus-visible {
+  outline: 1px solid rgba(0, 168, 255, 0.6); outline-offset: -1px; border-radius: 6px;
+}
+.ai-chat-focus-head .ai-coin-selector-title { transition: color 0.15s; }
+.ai-chat-focus-head:hover .ai-coin-selector-title { color: #e8eaf2; }
+.ai-decisions-head-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.ai-chat-focus-caret {
+  display: flex; align-items: center; color: #6b7394;
+  transition: color 0.15s, transform 0.2s;
+}
+.ai-chat-focus-head:hover .ai-chat-focus-caret { color: #00a8ff; }
+.ai-chat-focus-body {
+  overflow: hidden; max-height: 140px; opacity: 1;
+  transition: max-height 0.25s ease, opacity 0.2s ease;
+}
+.ai-chat-focus-body.closed { max-height: 0; opacity: 0; }
+.ai-decisions-wrap.collapsed .ai-decisions-head { padding-bottom: 10px; }
+
 
 /* Input */
 .ai-input-row {
