@@ -636,7 +636,7 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
             <label>
               <span>Max. Lektionen</span>
               <select value={cfg.max_lessons || 10} onChange={e => updateConfig({ max_lessons: Number(e.target.value) })} data-testid="ai-max-lessons-select">
-                {[5, 10, 15, 20].map(v => <option key={v} value={v}>{v}</option>)}
+                {[5, 10, 15, 20, 25, 30, 40, 50].map(v => <option key={v} value={v}>{v}</option>)}
               </select>
             </label>
             <label className="ai-setup-check" title="Selbst-Lernen aus Signal-/Trade-Ergebnissen">
@@ -744,7 +744,9 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
           </div>
         )}
 
-        {/* Chat */}
+        {/* Chat + Input – im Lernen-Tab komplett ausgeblendet */}
+        {!showLearn && (
+        <>
         <div className="ai-chat-area" data-testid="ai-chat-area" ref={chatAreaRef} onScroll={onChatScroll}>
           {(() => {
             // Neueste angepinnte Summary ganz oben anzeigen, aus dem Haupt-Stream entfernen.
@@ -815,6 +817,8 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
             <Trash size={15} />
           </button>
         </div>
+        </>
+        )}
         <div className="ai-panel-footer">
           Auto-Trading pro Coin über das <Lightning size={11} weight="fill" color="#FFD60A" />-Symbol am „KI Trader"-Tab konfigurieren (Paper/Live).
         </div>
