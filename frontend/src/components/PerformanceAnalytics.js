@@ -51,7 +51,7 @@ const TradeDetailCard = ({ t, stratName, getCoinName }) => {
     : t.result === 'breakeven'
       ? { label: 'BEP', cls: 'res-be' }
       : { label: 'OFFEN', cls: 'res-open' };
-  const pnl = t.realized_pnl || 0;
+  const pnl = (!closed && c.live_pnl != null) ? c.live_pnl : (t.realized_pnl || 0);
   const pnlPct = c.pnl_pct;
 
   return (
@@ -81,6 +81,9 @@ const TradeDetailCard = ({ t, stratName, getCoinName }) => {
             <LevelRow label={`TP Full (${c.rr_tpf || '?'}R)`} value={t.tpf} pct={c.tpf_distance_pct} cls="lvl-tp" />
             <LevelRow label={`TP1 (${c.rr_tp1 || '?'}R)`} value={t.tp1} pct={c.tp1_distance_pct} cls="lvl-tp1" hit={t.tp1_hit} />
             <LevelRow label="Entry" value={t.entry} pct={0} cls="lvl-entry" />
+            {!closed && c.current_price != null && (
+              <LevelRow label="Aktueller Kurs" value={c.current_price} pct={c.price_distance_pct} cls="lvl-current" />
+            )}
             {closed && <LevelRow label="Exit" value={t.exit_price} pct={c.exit_distance_pct} cls="lvl-exit" />}
             <LevelRow label={`SL${c.sl_moved ? ' (aktuell)' : ''}`} value={t.sl} pct={c.sl_distance_pct} cls="lvl-sl" />
             {c.sl_moved ? <LevelRow label="SL initial" value={t.initial_sl} pct={c.initial_sl_distance_pct} cls="lvl-sl-init" /> : null}
@@ -89,6 +92,15 @@ const TradeDetailCard = ({ t, stratName, getCoinName }) => {
           <div className="tdc-meta">
             <div className="tdc-meta-item"><span>Eröffnet</span><b className="mono">{fmtTime(t.opened_at)}</b></div>
             {closed && <div className="tdc-meta-item"><span>Geschlossen</span><b className="mono">{fmtTime(t.closed_at)}</b></div>}
+            {!closed && c.current_price != null && (
+              <div className="tdc-meta-item" data-testid={`trade-current-price-${t.id}`}><span>Aktueller Kurs</span><b className="mono">{c.current_price}</b></div>
+            )}
+            {!closed && c.unrealized_pnl != null && (
+              <div className="tdc-meta-item"><span>Unrealisierter PnL</span><b className={`mono ${c.unrealized_pnl >= 0 ? 'text-long' : 'text-short'}`} data-testid={`trade-unrealized-pnl-${t.id}`}>{c.unrealized_pnl >= 0 ? '+' : ''}{c.unrealized_pnl.toFixed(2)} $</b></div>
+            )}
+            {!closed && c.live_pnl != null && (
+              <div className="tdc-meta-item"><span>Live PnL (inkl. Gebühren)</span><b className={`mono ${c.live_pnl >= 0 ? 'text-long' : 'text-short'}`} data-testid={`trade-live-pnl-${t.id}`}>{c.live_pnl >= 0 ? '+' : ''}{c.live_pnl.toFixed(2)} $</b></div>
+            )}
             <div className="tdc-meta-item"><span>Dauer</span><b className="mono">{fmtDur(c.duration_seconds)}</b></div>
             <div className="tdc-meta-item"><span>R-Vielfaches</span><b className={`mono ${(c.r_multiple || 0) >= 0 ? 'text-long' : 'text-short'}`}>{c.r_multiple != null ? `${c.r_multiple}R` : '—'}</b></div>
             <div className="tdc-meta-item"><span>PnL %</span><b className={`mono ${(c.pnl_pct || 0) >= 0 ? 'text-long' : 'text-short'}`} data-testid={`trade-meta-pnl-pct-${t.id}`}>{c.pnl_pct != null ? fmtPct(c.pnl_pct) : '—'}</b></div>

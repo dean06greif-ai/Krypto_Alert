@@ -354,6 +354,7 @@
 .lvl-tp1 .lvl-label, .lvl-tp1 .lvl-value { color: #4CE38C; }
 .lvl-entry .lvl-label, .lvl-entry .lvl-value { color: #4CC3FF; font-weight: 700; }
 .lvl-exit .lvl-label, .lvl-exit .lvl-value { color: #FFB800; }
+.lvl-current .lvl-label, .lvl-current .lvl-value { color: #E4E6EE; font-weight: 700; }
 .lvl-sl .lvl-label, .lvl-sl .lvl-value { color: #FF6688; }
 .lvl-sl-init .lvl-label, .lvl-sl-init .lvl-value { color: #8A5560; }
 

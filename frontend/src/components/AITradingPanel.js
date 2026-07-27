@@ -616,6 +616,14 @@ const AITradingPanel = ({ onClose, selectedCoin = 'BTCUSDT' }) => {
                 {[0, 15, 30, 45, 60, 120].map(v => <option key={v} value={v}>{v === 0 ? 'aus' : `${v} min`}</option>)}
               </select>
             </label>
+            <label title="Wie viele KI-Trader-Trades dürfen pro Coin gleichzeitig offen sein (1–5). Nur der KI-Trader nutzt dieses Limit; andere Strategien bleiben bei 1 Trade pro Coin.">
+              <span>Max. Trades pro Coin</span>
+              <select value={cfg.max_trades_per_coin || 1}
+                onChange={e => updateConfig({ max_trades_per_coin: Number(e.target.value) })}
+                data-testid="ai-max-trades-select">
+                {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>{v} Trade{v > 1 ? 's' : ''}</option>)}
+              </select>
+            </label>
             <label className="ai-setup-check">
               <span><Newspaper size={13} /> News</span>
               <input type="checkbox" checked={cfg.news_enabled !== false}

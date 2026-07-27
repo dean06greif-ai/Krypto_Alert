@@ -196,17 +196,27 @@ const AutoTradeModal = ({ symbol, onClose }) => {
         {openTrades.length > 0 && (
           <div className="at-block">
             <div className="at-block-title">OFFENE TRADES</div>
-            {openTrades.map(t => (
+            {openTrades.map(t => {
+              const c = t.computed || {};
+              const livePnl = c.live_pnl != null ? c.live_pnl : (t.realized_pnl || 0);
+              return (
               <div key={t.id} className="at-trade" data-testid={`open-trade-${t.id}`}>
                 <div className={`at-trade-side ${t.side === 'LONG' ? 'long' : 'short'}`}>
                   {t.side === 'LONG' ? <TrendUp size={14} /> : <TrendDown size={14} />} {t.side}
                 </div>
                 <div className="at-trade-info mono">
                   Entry {t.entry} · SL {t.sl} · TP {t.tpf} {t.tp1_hit ? '· TP1✓' : ''}
+                  {c.current_price != null && (
+                    <> · Kurs <b data-testid={`open-trade-price-${t.id}`}>{c.current_price}</b></>
+                  )}
+                  {c.live_pnl != null && (
+                    <> · PnL <b className={livePnl >= 0 ? 'long' : 'short'} data-testid={`open-trade-pnl-${t.id}`}>{livePnl >= 0 ? '+' : ''}{livePnl.toFixed(2)} $</b></>
+                  )}
                 </div>
                 <button className="at-trade-close" onClick={() => closeTrade(t.id)} data-testid={`close-trade-${t.id}`}>Schließen</button>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

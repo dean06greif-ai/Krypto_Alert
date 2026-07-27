@@ -50,6 +50,8 @@
 .at-trade-side.long { color: #00FF66; }
 .at-trade-side.short { color: #FF3366; }
 .at-trade-info { font-size: 11px; color: #A1A4B0; flex: 1; }
+.at-trade-info b.long { color: #00FF66; }
+.at-trade-info b.short { color: #FF3366; }
 .at-trade-close { padding: 5px 10px; font-size: 11px; background: #FF336622; color: #FF3366; border: 1px solid #FF336644; border-radius: 6px; cursor: pointer; }
 
 .switch { position: relative; display: inline-block; width: 40px; height: 22px; }
