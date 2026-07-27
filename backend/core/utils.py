@@ -12,9 +12,15 @@ def _clean(d: Dict) -> Dict:
     return d
 
 
-def _enrich_trade(t: Dict) -> Dict:
+def _enrich_trade(t: Dict, current_price: float = None) -> Dict:
     """Add computed analytics fields to a trade without changing stored schema.
     Gives the UI and the AI exact numbers: durations, distances (%), R-multiple.
+
+    For OPEN trades a `current_price` (live mark price) can be passed in. We then
+    compute the UNREALIZED PnL on the remaining quantity and expose it, plus a
+    `live_pnl` (= realized so far + unrealized). The percentage/R fields for open
+    trades reflect this live PnL instead of the stored `realized_pnl` (which for a
+    fresh open trade is only the negative entry fee → looked like a "loss" before).
     """
     t = _clean(t)
     entry = float(t.get("entry") or 0)
@@ -24,13 +30,34 @@ def _enrich_trade(t: Dict) -> Dict:
     tp1 = float(t.get("tp1") or 0)
     tpf = float(t.get("tpf") or 0)
     qty = float(t.get("qty") or 0)
+    qty_rem = float(t.get("qty_remaining", qty) or 0)
     risk = float(t.get("risk") or 0)
     exit_price = t.get("exit_price")
+    is_open = t.get("status") == "open"
+    realized = float(t.get("realized_pnl") or 0)
 
     def pct_from_entry(p):
         if not entry or not p:
             return None
         return round((p - entry) / entry * 100, 3)
+
+    # ---- Live / unrealized PnL for open trades ----
+    cur = None
+    try:
+        cur = float(current_price) if current_price else None
+    except (TypeError, ValueError):
+        cur = None
+    unrealized_pnl = None
+    live_pnl = None
+    if is_open and cur and entry and qty_rem > 0:
+        gross = (cur - entry) * qty_rem if side == "LONG" else (entry - cur) * qty_rem
+        unrealized_pnl = round(gross, 6)
+        # realized already carries the entry fee (and any TP1 partial) → live = realized + unrealized
+        live_pnl = round(realized + gross, 6)
+
+    # Effective PnL used for the % / R metrics: live PnL while open (if we have a
+    # price), otherwise the realized PnL (closed trades or no price available).
+    eff_pnl = live_pnl if (is_open and live_pnl is not None) else realized
 
     # timings
     dur = None
@@ -44,23 +71,23 @@ def _enrich_trade(t: Dict) -> Dict:
     except Exception:
         dur = None
 
-    # R-multiple: realized PnL relative to the initial 1R risk in USDT
+    # R-multiple: (effective) PnL relative to the initial 1R risk in USDT
     risk_usd = round(risk * qty, 4) if (risk and qty) else 0.0
     r_multiple = None
     if risk_usd:
-        r_multiple = round(float(t.get("realized_pnl") or 0) / risk_usd, 2)
+        r_multiple = round(eff_pnl / risk_usd, 2)
 
     # PnL in % on the used capital (margin)
     capital = float(t.get("max_capital") or 0)
     pnl_pct_capital = None
     if capital:
-        pnl_pct_capital = round(float(t.get("realized_pnl") or 0) / capital * 100, 2)
+        pnl_pct_capital = round(eff_pnl / capital * 100, 2)
 
     # PnL in % of the position size (entry * qty)
     pos_size = entry * qty
     pnl_pct = None
     if pos_size:
-        pnl_pct = round(float(t.get("realized_pnl") or 0) / pos_size * 100, 2)
+        pnl_pct = round(eff_pnl / pos_size * 100, 2)
 
     t["computed"] = {
         "duration_seconds": dur,
@@ -68,6 +95,10 @@ def _enrich_trade(t: Dict) -> Dict:
         "r_multiple": r_multiple,
         "pnl_pct_capital": pnl_pct_capital,
         "pnl_pct": pnl_pct,
+        "current_price": round(cur, 6) if cur else None,
+        "price_distance_pct": pct_from_entry(cur) if cur else None,
+        "unrealized_pnl": unrealized_pnl,
+        "live_pnl": live_pnl,
         "sl_distance_pct": pct_from_entry(sl),
         "initial_sl_distance_pct": pct_from_entry(init_sl),
         "tp1_distance_pct": pct_from_entry(tp1),
