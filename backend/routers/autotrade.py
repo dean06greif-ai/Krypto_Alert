@@ -141,7 +141,10 @@ async def get_trades(status: str = None, limit: int = 50, mode: str = None):
     if mode in ("live", "paper"):
         q["mode"] = mode
     trades = await state.db.auto_trades.find(q).sort("opened_at", -1).limit(limit).to_list(limit)
-    return {"trades": [_enrich_trade(t) for t in trades]}
+    return {"trades": [
+        _enrich_trade(t, scanner.current_price(t["symbol"]) if t.get("status") == "open" else None)
+        for t in trades
+    ]}
 
 
 @router.get("/api/autotrade/trades/{trade_id}")
@@ -149,7 +152,8 @@ async def get_trade_detail(trade_id: str):
     t = await state.db.auto_trades.find_one({"id": trade_id})
     if not t:
         raise HTTPException(status_code=404, detail="Trade not found")
-    return {"trade": _enrich_trade(t)}
+    cur = scanner.current_price(t["symbol"]) if t.get("status") == "open" else None
+    return {"trade": _enrich_trade(t, cur)}
 
 
 @router.post("/api/autotrade/close/{trade_id}")
