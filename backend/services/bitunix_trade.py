@@ -746,10 +746,21 @@ class AutoTradeManager:
         if cfg.get("require_all_rules") and signal.get("rules_total") \
                 and (signal.get("rules_met_count") or 0) < signal["rules_total"]:
             return None
-        # only one open trade per symbol
-        existing = await self.db.auto_trades.find_one({"symbol": symbol, "status": "open"})
-        if existing:
-            return None
+        # Offene-Trades-Limit pro Coin.
+        # KI-Trader ("ai_trader"): bis zu max_trades_per_coin (1–5, per Panel-
+        # Dropdown einstellbar) gleichzeitig offene Trades pro Coin.
+        # Alle anderen Strategien: strikt EIN offener Trade pro Coin.
+        if strategy_id == "ai_trader":
+            ai_cfg = await self.db.settings.find_one({"_id": "ai_trader_config"}) or {}
+            max_per_coin = max(1, min(5, int(ai_cfg.get("max_trades_per_coin", 1) or 1)))
+            open_count = await self.db.auto_trades.count_documents(
+                {"symbol": symbol, "status": "open", "strategy_id": "ai_trader"})
+            if open_count >= max_per_coin:
+                return None
+        else:
+            existing = await self.db.auto_trades.find_one({"symbol": symbol, "status": "open"})
+            if existing:
+                return None
 
         side = signal["type"]
         entry = float(signal.get("entry_price") or 0)

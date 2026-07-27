@@ -67,6 +67,10 @@ DEFAULT_AI_CONFIG = {
     # Coins, für die pro Zyklus Key-Levels + Funding/OI geholt werden (kompakt ~2 KB).
     "macro_symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
     "cooldown_min": 45,
+    # Max. gleichzeitig offene KI-Trader-Trades pro Coin (1–5). Default 1 =
+    # bisheriges Verhalten (strikt ein Trade pro Coin). Nur der KI-Trader nutzt
+    # dieses Limit; alle anderen Strategien bleiben bei strikt 1 Trade pro Coin.
+    "max_trades_per_coin": 1,
     # Einstellungs-Autonomie: darf die KI ihre Trade-Settings ändern?
     # off = nie | suggest = Vorschläge, Trader bestätigt | auto = sofort anwenden
     "autonomy": "suggest",
@@ -352,6 +356,8 @@ class AIEngine:
             self.config["min_confidence"] = max(0, min(100, int(updates["min_confidence"])))
         if "cooldown_min" in updates:
             self.config["cooldown_min"] = max(0, min(720, int(updates["cooldown_min"])))
+        if "max_trades_per_coin" in updates:
+            self.config["max_trades_per_coin"] = max(1, min(5, int(updates["max_trades_per_coin"])))
         if "news_enabled" in updates:
             self.config["news_enabled"] = bool(updates["news_enabled"])
         if "macro_enabled" in updates:
@@ -902,8 +908,24 @@ class AIEngine:
     async def _emit_signal(self, dec: Dict) -> bool:
         sym = dec["symbol"]
         cooldown = self.config.get("cooldown_min", 45) * 60
-        if cooldown and (time.time() - self._last_signal_ts.get(sym, 0)) < cooldown:
-            return False
+        if cooldown:
+            max_per_coin = max(1, min(5, int(self.config.get("max_trades_per_coin", 1) or 1)))
+            if max_per_coin > 1:
+                # KI-Trader mit mehreren Slots: Cooldown gilt PRO TRADE statt pro
+                # Coin. Solange auf dem Coin noch freie Slots (max_trades_per_coin)
+                # offen sind, wird der Coin-Cooldown übersprungen, damit die Slots
+                # zeitnah gefüllt werden. Erst wenn die Slots voll sind, bremst der
+                # Cooldown (die Slot-Obergrenze setzt on_signal ohnehin durch).
+                try:
+                    open_count = await self.db.auto_trades.count_documents(
+                        {"symbol": sym, "status": "open", "strategy_id": "ai_trader"})
+                except Exception:
+                    open_count = 0
+                if open_count >= max_per_coin and \
+                        (time.time() - self._last_signal_ts.get(sym, 0)) < cooldown:
+                    return False
+            elif (time.time() - self._last_signal_ts.get(sym, 0)) < cooldown:
+                return False
         entry = float(dec["price"])
         if entry <= 0:
             return False
